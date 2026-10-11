@@ -56,6 +56,10 @@ pub fn export(
     if total == 0 {
         return Err(ExportError::Empty);
     }
+    // Arquivo sumido no áudio também para a exportação (senão sairia mudo sem avisar).
+    if let Some((frame, path)) = first_missing_media(project) {
+        return Err(ExportError::Offline { frame, path });
+    }
     let work = tempfile::tempdir()?;
     let audio = work.path().join("audio.f32");
     write_audio(project, renderer, total, &audio, cancel)?;
@@ -227,3 +231,16 @@ fn media_path(project: &Project, clip: ClipId) -> PathBuf {
         _ => PathBuf::new(),
     }
 }
+
+/// Primeiro clipe (em ordem de tempo) cujo arquivo não existe.
+fn first_missing_media(project: &Project) -> Option<(Frame, PathBuf)> {
+    project
+        .all_tracks()
+        .flat_map(|t| t.clips.iter())
+        .filter_map(|c| match &c.source {
+            ClipSource::Media(id) => project.media(*id).filter(|m| !m.info.path.exists()).map(|m| (c.start, m.info.path.clone())),
+            _ => None,
+        })
+        .min_by_key(|(start, _)| *start)
+}
+
