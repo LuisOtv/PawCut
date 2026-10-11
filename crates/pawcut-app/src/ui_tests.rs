@@ -178,3 +178,98 @@ fn lock_button_locks_the_track() {
     click(&mut h, lock);
     assert!(h.state().st.project().video_tracks[0].locked);
 }
+
+mod whole_app {
+    use std::time::Duration;
+
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+    use pawcut_core::*;
+    use pawcut_testkit as kit;
+
+    use crate::app::PawCutApp;
+    use crate::state::{AppState, Generator};
+    use crate::workspace::Workspace;
+
+    fn small_project(st: &mut AppState) {
+        st.drop_generator(Generator::SolidColor, 0, 0);
+        st.drop_generator(Generator::Text, 1, 0);
+        let g = st.project().video_tracks[0].clips[0].id;
+        st.apply(Edit::Trim { clips: vec![g], edge: Edge::End, delta: -120 });
+        let t = st.project().video_tracks[1].clips[0].id;
+        st.apply(Edit::Trim { clips: vec![t], edge: Edge::End, delta: -120 });
+    }
+
+    #[test]
+    fn deliver_button_exports_an_mp4() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("saida.mp4");
+        let mut st = AppState::new(Project::new(ProjectSettings { width: 320, height: 180, ..ProjectSettings::default() }));
+        small_project(&mut st);
+        let ctx = egui::Context::default();
+        let mut ws = Workspace::new(&ctx, st);
+        ws.open_deliver();
+        ws.deliver.as_mut().unwrap().output = out.display().to_string();
+        let mut h = Harness::builder().with_size(egui::vec2(900.0, 600.0)).build_ui_state(
+            |ui, ws: &mut Workspace| {
+                let ctx = ui.ctx().clone();
+                ws.begin_frame(&ctx);
+                ws.dialogs_ui(&ctx);
+            },
+            ws,
+        );
+        h.run_steps(2);
+        h.get_by_label("⏺ Exportar").click();
+        for _ in 0..400 {
+            h.step();
+            if h.state().deliver.as_ref().is_some_and(|d| d.message.is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let msg = h.state().deliver.as_ref().unwrap().message.clone();
+        assert!(matches!(msg, Some(Ok(_))), "exportação: {msg:?}");
+        let info = kit::ffprobe(&out);
+        let duration: f64 = info["format"]["duration"].as_str().unwrap().parse().unwrap();
+        assert!((duration - 1.0).abs() < 0.1, "duração {duration}");
+    }
+
+    #[test]
+    fn whole_window_opens_a_real_project_and_survives_interaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = kit::gray_ramp_video(dir.path(), 2, true);
+        let logo = kit::png(dir.path(), "logo.png", "orange", 64, 64);
+        let music = kit::dc_audio(dir.path(), "musica.wav", 0.2, 2.0);
+        let mut st = AppState::new(Project::new(ProjectSettings::default()));
+        assert_eq!(st.import(&[video, logo, music]), 3);
+        let ids: Vec<MediaId> = st.project().media.iter().map(|m| m.id).collect();
+        st.drop_media(ids[0], TrackKind::Video, 0, 0);
+        st.drop_media(ids[1], TrackKind::Video, 1, 10);
+        st.drop_media(ids[2], TrackKind::Audio, 1, 0);
+        st.drop_generator(Generator::Text, 2, 0);
+        let path = dir.path().join("projeto.pawcut");
+        st.save_to(&path).unwrap();
+
+        let config = tempfile::tempdir().unwrap();
+        // SAFETY: os testes deste módulo não leem essas variáveis em paralelo de outro jeito.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", config.path());
+            std::env::set_var("XDG_DATA_HOME", config.path());
+        }
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1600.0, 950.0))
+            .build_eframe(|cc| PawCutApp::new(cc, vec![path.clone()]));
+        h.run_steps(10);
+        assert_eq!(h.state().workspace().st.project().video_tracks.len(), 3);
+        h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::A);
+        h.run_steps(5);
+        assert!(h.state().workspace().st.selection.len() >= 5);
+        h.key_press(egui::Key::B);
+        h.run_steps(3);
+        assert_eq!(h.state().workspace().st.tool, crate::state::Tool::Blade);
+        h.get_by_label("Workspace").click();
+        h.run_steps(3);
+        h.get_by_label("Reset UI Layout").click();
+        h.run_steps(5);
+    }
+}

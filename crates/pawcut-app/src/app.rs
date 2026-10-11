@@ -87,6 +87,11 @@ impl PawCutApp {
         }
     }
 
+    #[cfg(test)]
+    pub fn workspace(&self) -> &Workspace {
+        &self.ws
+    }
+
     fn save_layout(&self) {
         if let Ok(text) = serde_json::to_string(&self.dock) {
             let _ = std::fs::create_dir_all(config::config_dir());

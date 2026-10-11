@@ -24,4 +24,5 @@ libpulse-simple-binding = "2.29"
 
 [dev-dependencies]
 tempfile.workspace = true
-egui_kittest = "0.36"
+egui_kittest = { version = "0.36", features = ["eframe"] }
+pawcut-testkit.workspace = true
