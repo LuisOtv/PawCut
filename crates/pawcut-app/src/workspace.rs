@@ -92,6 +92,8 @@ pub struct Workspace {
     /// Fechar o app assim que a exportação em andamento terminar (ou for cancelada).
     pub quit_after_export: bool,
     pub export_quit_prompt: bool,
+    /// Diálogo de arquivo aberto (roda em outra thread).
+    pub file_dialog: Option<crate::file_dialog::OpenDialog>,
     pub allow_close: bool,
     last_autosave: Instant,
     last_offline_check: Instant,
@@ -132,6 +134,7 @@ impl Workspace {
             session: config::session_id(),
             quit_after_export: false,
             export_quit_prompt: false,
+            file_dialog: None,
             allow_close: false,
             last_autosave: Instant::now(),
             last_offline_check: Instant::now(),
@@ -170,6 +173,7 @@ impl Workspace {
             }
         }
         self.tick();
+        self.poll_file_dialog();
         self.handle_keys(ctx);
         self.refresh_project_arc();
         if ctx.input(|i| {
@@ -532,14 +536,75 @@ impl Workspace {
         }
     }
 
-    pub fn import_dialog(&mut self) {
-        if let Some(paths) = rfd::FileDialog::new()
-            .set_title("Importar mídia")
-            .add_filter("Vídeo, áudio e imagem", &MEDIA_EXTENSIONS)
-            .pick_files()
-        {
-            self.st.import(&paths);
+    /// Abre um diálogo de arquivo sem travar a interface; a resposta chega em `poll_file_dialog`.
+    pub fn ask_file(
+        &mut self,
+        purpose: crate::file_dialog::Purpose,
+        run: impl FnOnce() -> Vec<PathBuf> + Send + 'static,
+    ) {
+        if self.file_dialog.is_some() {
+            self.st.say("Já há uma janela de arquivos aberta");
+            return;
         }
+        let ctx = self.ctx.clone();
+        self.file_dialog = Some(crate::file_dialog::OpenDialog::spawn(
+            purpose,
+            run,
+            move || ctx.request_repaint(),
+        ));
+    }
+
+    fn poll_file_dialog(&mut self) {
+        use crate::file_dialog::Purpose;
+        let Some(paths) = self.file_dialog.as_ref().and_then(|d| d.poll()) else {
+            return;
+        };
+        let purpose = self
+            .file_dialog
+            .take()
+            .map(|d| d.purpose)
+            .expect("diálogo aberto");
+        let Some(first) = paths.first().cloned() else {
+            return;
+        };
+        match purpose {
+            Purpose::Import => {
+                self.st.import(&paths);
+            }
+            Purpose::Open => self.request(Pending::Open(first)),
+            Purpose::Save { then } => {
+                let mut p = first;
+                if p.extension().is_none_or(|e| e != "pawcut") {
+                    p.set_extension("pawcut");
+                }
+                if self.save_to(&p)
+                    && let Some(then) = then
+                {
+                    let ctx = self.ctx.clone();
+                    self.run_pending(then, &ctx);
+                }
+            }
+            Purpose::Relink(id) => {
+                self.forget_media(id);
+                self.st.relink(id, &first);
+                self.forget_media(id);
+            }
+            Purpose::ExportTo => {
+                if let Some(d) = &mut self.deliver {
+                    d.output = first.display().to_string();
+                }
+            }
+        }
+    }
+
+    pub fn import_dialog(&mut self) {
+        self.ask_file(crate::file_dialog::Purpose::Import, || {
+            rfd::FileDialog::new()
+                .set_title("Importar mídia")
+                .add_filter("Vídeo, áudio e imagem", &MEDIA_EXTENSIONS)
+                .pick_files()
+                .unwrap_or_default()
+        });
     }
 
     /// Arquivos soltos na janela ou passados na linha de comando.
@@ -558,13 +623,14 @@ impl Workspace {
     // ---------------- arquivo ----------------
 
     pub fn open_dialog(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .set_title("Abrir projeto")
-            .add_filter("Projeto PawCut", &["pawcut"])
-            .pick_file()
-        {
-            self.request(Pending::Open(path));
-        }
+        self.ask_file(crate::file_dialog::Purpose::Open, || {
+            rfd::FileDialog::new()
+                .set_title("Abrir projeto")
+                .add_filter("Projeto PawCut", &["pawcut"])
+                .pick_file()
+                .into_iter()
+                .collect()
+        });
     }
 
     /// Faz a ação, perguntando antes se há alterações não salvas.
@@ -619,34 +685,43 @@ impl Workspace {
         ));
     }
 
-    /// Salva (ou "Salvar como"). Devolve se salvou.
+    /// Salva (ou "Salvar como"). Devolve se já salvou; com diálogo, salva quando ele responder
+    /// e então continua com `then`.
     pub fn save(&mut self, save_as: bool) -> bool {
-        let path = match (&self.st.path, save_as) {
-            (Some(p), false) => p.clone(),
-            _ => {
-                let name = self
-                    .st
-                    .path
-                    .as_ref()
-                    .and_then(|p| p.file_name())
-                    .map_or("projeto.pawcut".into(), |n| {
-                        n.to_string_lossy().into_owned()
-                    });
-                let Some(mut p) = rfd::FileDialog::new()
-                    .set_title("Salvar projeto")
-                    .add_filter("Projeto PawCut", &["pawcut"])
-                    .set_file_name(name)
-                    .save_file()
-                else {
-                    return false;
-                };
-                if p.extension().is_none_or(|e| e != "pawcut") {
-                    p.set_extension("pawcut");
-                }
-                p
+        self.save_then(save_as, None)
+    }
+
+    pub fn save_then(&mut self, save_as: bool, then: Option<Pending>) -> bool {
+        if let (Some(p), false) = (self.st.path.clone(), save_as) {
+            let ok = self.save_to(&p);
+            if ok && let Some(then) = then {
+                let ctx = self.ctx.clone();
+                self.run_pending(then, &ctx);
             }
-        };
-        match self.st.save_to(&path) {
+            return ok;
+        }
+        let name = self
+            .st
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map_or("projeto.pawcut".into(), |n| {
+                n.to_string_lossy().into_owned()
+            });
+        self.ask_file(crate::file_dialog::Purpose::Save { then }, move || {
+            rfd::FileDialog::new()
+                .set_title("Salvar projeto")
+                .add_filter("Projeto PawCut", &["pawcut"])
+                .set_file_name(name)
+                .save_file()
+                .into_iter()
+                .collect()
+        });
+        false
+    }
+
+    fn save_to(&mut self, path: &Path) -> bool {
+        match self.st.save_to(path) {
             Ok(()) => {
                 self.discard_autosave();
                 self.refresh_autosave_path();

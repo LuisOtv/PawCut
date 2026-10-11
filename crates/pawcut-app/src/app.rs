@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 
 use egui::Color32;
-use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
+use egui_dock::{DockArea, DockState, TabViewer};
+
+use crate::layout::PanelLayout;
 
 use crate::config;
 use crate::icons::{self, Icon};
@@ -13,23 +15,11 @@ use crate::state::AppState;
 use crate::theme;
 use crate::workspace::{Pending, Workspace};
 
-pub fn default_layout() -> DockState<Panel> {
-    let mut dock = DockState::new(vec![Panel::TimelineViewer]);
-    let tree = dock.main_surface_mut();
-    let [top, _] = tree.split_below(NodeIndex::root(), 0.56, vec![Panel::Timeline]);
-    let [center, _] = tree.split_right(top, 0.79, vec![Panel::Inspector]);
-    // No split_left/split_above a fração vai para o nó novo (o da esquerda/de cima).
-    let [center, pool] = tree.split_left(center, 0.24, vec![Panel::MediaPool]);
-    tree.split_below(pool, 0.62, vec![Panel::Effects]);
-    tree.split_left(center, 0.5, vec![Panel::SourceViewer]);
-    dock
-}
-
 fn load_layout() -> DockState<Panel> {
     std::fs::read_to_string(config::layout_path())
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_else(default_layout)
+        .unwrap_or_else(PanelLayout::default_layout)
 }
 
 impl TabViewer for Workspace {
@@ -41,6 +31,16 @@ impl TabViewer for Workspace {
 
     fn title(&mut self, tab: &mut Panel) -> egui::WidgetText {
         tab.title().into()
+    }
+
+    // Como no Resolve: painéis não fecham pelo "X" nem viram janelas soltas;
+    // liga e desliga pela barra de cima (assim o lugar deles é lembrado).
+    fn is_closeable(&self, _tab: &Panel) -> bool {
+        false
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut Panel) -> bool {
+        false
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Panel) {
@@ -58,7 +58,7 @@ impl TabViewer for Workspace {
 }
 
 pub struct PawCutApp {
-    dock: DockState<Panel>,
+    layout: PanelLayout,
     ws: Workspace,
     last_title: String,
     /// Para testes visuais: `PAWCUT_SCREENSHOT=arquivo.png` salva a janela e fecha.
@@ -78,7 +78,7 @@ impl PawCutApp {
             ws.open_paths(args);
         }
         Self {
-            dock: load_layout(),
+            layout: PanelLayout::new(load_layout()),
             ws,
             last_title: String::new(),
             screenshot: std::env::var_os("PAWCUT_SCREENSHOT").map(PathBuf::from),
@@ -92,7 +92,7 @@ impl PawCutApp {
     }
 
     fn save_layout(&self) {
-        if let Ok(text) = serde_json::to_string(&self.dock) {
+        if let Ok(text) = serde_json::to_string(&self.layout.dock) {
             let _ = std::fs::create_dir_all(config::config_dir());
             let _ = std::fs::write(config::layout_path(), text);
         }
@@ -186,32 +186,22 @@ impl PawCutApp {
             });
             ui.menu_button("Workspace", |ui| {
                 for panel in Panel::ALL {
-                    let mut shown = self.dock.find_tab(&panel).is_some();
+                    let mut shown = self.layout.is_visible(panel);
                     if ui.checkbox(&mut shown, panel.title()).changed() {
-                        match self.dock.find_tab(&panel) {
-                            Some(path) => {
-                                self.dock.remove_tab(path);
-                            }
-                            None => self.dock.push_to_first_leaf(panel),
-                        }
+                        self.layout.toggle(panel);
                     }
                 }
                 ui.separator();
                 if ui.button("Reset UI Layout").clicked() {
                     ui.close();
-                    self.dock = default_layout();
+                    self.layout.reset();
                 }
             });
         });
     }
 
     fn toggle_panel(&mut self, panel: Panel) {
-        match self.dock.find_tab(&panel) {
-            Some(path) => {
-                self.dock.remove_tab(path);
-            }
-            None => self.dock.push_to_first_leaf(panel),
-        }
+        self.layout.toggle(panel);
     }
 
     /// Barra de interface do Resolve: liga/desliga painéis e mostra o nome do projeto.
@@ -222,7 +212,7 @@ impl PawCutApp {
                 (Panel::MediaPool, Icon::MediaPool, "Media Pool"),
                 (Panel::Effects, Icon::Effects, "Effects"),
             ] {
-                let on = self.dock.find_tab(&panel).is_some();
+                let on = self.layout.is_visible(panel);
                 if icons::button(ui, icon, 15.0, on, label).clicked() {
                     self.toggle_panel(panel);
                 }
@@ -234,7 +224,7 @@ impl PawCutApp {
                 ui.add_space(10.0);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let on = self.dock.find_tab(&Panel::Inspector).is_some();
+                let on = self.layout.is_visible(Panel::Inspector);
                 ui.label(egui::RichText::new("Inspector").size(11.5).color(if on {
                     theme::TEXT
                 } else {
@@ -460,9 +450,11 @@ impl eframe::App for PawCutApp {
             .show(ui, |ui| self.page_bar(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let style = theme::dock_style(ui.style().as_ref());
-            DockArea::new(&mut self.dock)
+            DockArea::new(&mut self.layout.dock)
                 .style(style)
                 .show_leaf_collapse_buttons(false)
+                .show_close_buttons(false)
+                .show_leaf_close_all_buttons(false)
                 .show_inside(ui, &mut self.ws);
         });
         self.ws.dialogs_ui(&ctx);

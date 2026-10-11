@@ -205,14 +205,14 @@ impl Workspace {
         if let Some(id) = open_source {
             self.st.open_in_source(id);
         }
-        if let Some(id) = relink
-            && let Some(path) = rfd::FileDialog::new()
-                .set_title("Onde está esse arquivo agora?")
-                .pick_file()
-        {
-            self.forget_media(id);
-            self.st.relink(id, &path);
-            self.forget_media(id);
+        if let Some(id) = relink {
+            self.ask_file(crate::file_dialog::Purpose::Relink(id), || {
+                rfd::FileDialog::new()
+                    .set_title("Onde está esse arquivo agora?")
+                    .pick_file()
+                    .into_iter()
+                    .collect()
+            });
         }
         if let Some(id) = remove {
             let removed = self.st.apply(pawcut_core::Edit::RemoveMedia(id)).is_some();

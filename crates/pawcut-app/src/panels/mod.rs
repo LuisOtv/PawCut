@@ -7,7 +7,7 @@ pub mod viewers;
 use serde::{Deserialize, Serialize};
 
 /// As abas do layout (igual à página Edit do Resolve).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Panel {
     MediaPool,
     Effects,

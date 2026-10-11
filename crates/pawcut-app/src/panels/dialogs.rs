@@ -93,6 +93,7 @@ impl Workspace {
         let project = self.project_arc.clone();
         let s = &project.settings;
         let mut start = false;
+        let mut pick_output = false;
         Window::new("Deliver — Exportar")
             .open(&mut open)
             .collapsible(false)
@@ -111,13 +112,8 @@ impl Workspace {
                 ui.horizontal(|ui| {
                     ui.label("Arquivo");
                     ui.add(egui::TextEdit::singleline(&mut d.output).desired_width(300.0));
-                    if ui.button("…").clicked()
-                        && let Some(p) = rfd::FileDialog::new()
-                            .add_filter("MP4", &["mp4"])
-                            .set_file_name("video.mp4")
-                            .save_file()
-                    {
-                        d.output = p.display().to_string();
+                    if ui.button("…").clicked() {
+                        pick_output = true;
                     }
                 });
                 ui.horizontal(|ui| {
@@ -177,6 +173,17 @@ impl Workspace {
                     None => {}
                 }
             });
+        if pick_output {
+            self.ask_file(crate::file_dialog::Purpose::ExportTo, || {
+                rfd::FileDialog::new()
+                    .add_filter("MP4", &["mp4"])
+                    .set_file_name("video.mp4")
+                    .save_file()
+                    .into_iter()
+                    .collect()
+            });
+            return;
+        }
         if start {
             let mut output = PathBuf::from(d.output.trim());
             if output.extension().is_none() {
@@ -351,9 +358,8 @@ impl Workspace {
         match choice {
             Some(0) => {
                 self.confirm = None;
-                if self.save(false) {
-                    self.run_pending(pending, ctx);
-                }
+                // Salva e depois continua (na hora, ou quando o diálogo de "Salvar como" responder).
+                self.save_then(false, Some(pending));
             }
             Some(1) => {
                 self.confirm = None;
