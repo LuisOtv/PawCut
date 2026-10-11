@@ -14,8 +14,42 @@ use thiserror::Error;
 #[derive(Debug, Clone)]
 pub struct ExportSettings {
     pub output: PathBuf,
-    /// Qualidade do H.264: menor é melhor (18 é visualmente sem perda).
+    /// Qualidade (CRF): menor é melhor (18 é visualmente sem perda).
     pub crf: u8,
+    /// Só um trecho `[início, fim)` da timeline (In/Out); `None` = tudo.
+    pub range: Option<(Frame, Frame)>,
+    /// Tamanho da saída; `None` = resolução do projeto.
+    pub size: Option<(u32, u32)>,
+    pub codec: VideoCodec,
+    /// Exportar só o áudio.
+    pub audio_only: Option<AudioFormat>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoCodec {
+    #[default]
+    H264,
+    /// HEVC: arquivos menores, mais lento para exportar.
+    H265,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioFormat {
+    Mp3,
+    Wav,
+}
+
+impl Default for ExportSettings {
+    fn default() -> Self {
+        Self {
+            output: PathBuf::new(),
+            crf: 18,
+            range: None,
+            size: None,
+            codec: VideoCodec::H264,
+            audio_only: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,8 +86,10 @@ pub fn export(
     cancel: &AtomicBool,
     mut on_progress: impl FnMut(Progress),
 ) -> Result<(), ExportError> {
-    let total = project.duration();
-    if total == 0 {
+    let (from, to) = settings.range.unwrap_or((0, project.duration()));
+    let (from, to) = (from.max(0), to.min(project.duration()));
+    let total = to - from;
+    if total <= 0 {
         return Err(ExportError::Empty);
     }
     // Arquivo sumido no áudio também para a exportação (senão sairia mudo sem avisar).
@@ -62,7 +98,23 @@ pub fn export(
     }
     let work = tempfile::tempdir()?;
     let audio = work.path().join("audio.f32");
-    write_audio(project, renderer, total, &audio, cancel)?;
+    write_audio(project, renderer, from, total, &audio, cancel)?;
+
+    if let Some(format) = settings.audio_only {
+        let mut child = spawn_audio_ffmpeg(project, &audio, format, &settings.output)?;
+        let mut stderr = child.stderr.take().expect("stderr configurado");
+        let log = thread::spawn(move || {
+            let mut s = String::new();
+            let _ = stderr.read_to_string(&mut s);
+            s
+        });
+        drop(child.stdin.take());
+        let result = finish(child, Ok(()), log, &settings.output);
+        if result.is_ok() {
+            on_progress(Progress { done: total, total });
+        }
+        return result;
+    }
 
     let mut child = spawn_ffmpeg(project, &audio, settings)?;
     let mut stderr = child.stderr.take().expect("stderr configurado");
@@ -75,7 +127,8 @@ pub fn export(
     let fed = feed_frames(
         project,
         renderer,
-        total,
+        (from, total),
+        output_size(project, settings),
         &mut stdin,
         cancel,
         &mut on_progress,
@@ -122,12 +175,14 @@ fn finish(
 fn write_audio(
     project: &Project,
     renderer: &mut Renderer,
+    from: Frame,
     total: Frame,
     path: &Path,
     cancel: &AtomicBool,
 ) -> Result<(), ExportError> {
     let s = &project.settings;
-    let samples = s.fps.frame_to_sample(total, s.sample_rate);
+    let first = s.fps.frame_to_sample(from, s.sample_rate);
+    let samples = s.fps.frame_to_sample(from + total, s.sample_rate) - first;
     let mut out = BufWriter::new(File::create(path)?);
     let mut pos = 0i64;
     while pos < samples {
@@ -135,7 +190,7 @@ fn write_audio(
             return Err(ExportError::Cancelled);
         }
         let n = AUDIO_CHUNK.min((samples - pos) as usize);
-        for v in renderer.mix_audio(project, pos, n) {
+        for v in renderer.mix_audio(project, first + pos, n) {
             out.write_all(&v.to_le_bytes())?;
         }
         pos += n as i64;
@@ -144,16 +199,42 @@ fn write_audio(
     Ok(())
 }
 
+/// Tamanho da saída (par, como o H.264/H.265 em 4:2:0 exige).
+fn output_size(project: &Project, settings: &ExportSettings) -> (u32, u32) {
+    let (w, h) = settings
+        .size
+        .unwrap_or((project.settings.width, project.settings.height));
+    (w.max(2).div_ceil(2) * 2, h.max(2).div_ceil(2) * 2)
+}
+
 fn spawn_ffmpeg(
     project: &Project,
     audio: &Path,
     settings: &ExportSettings,
 ) -> Result<Child, ExportError> {
     let s = &project.settings;
+    let (w, h) = output_size(project, settings);
+    let crf = settings.crf.to_string();
+    let codec: &[&str] = match settings.codec {
+        VideoCodec::H264 => &["-c:v", "libx264", "-preset", "medium", "-crf", &crf],
+        // A tag hvc1 faz o arquivo abrir no QuickTime/iPhone.
+        VideoCodec::H265 => &[
+            "-c:v",
+            "libx265",
+            "-preset",
+            "medium",
+            "-crf",
+            &crf,
+            "-tag:v",
+            "hvc1",
+            "-x265-params",
+            "log-level=error",
+        ],
+    };
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-v", "error", "-y"])
         .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
-        .args(["-s", &format!("{}x{}", s.width, s.height)])
+        .args(["-s", &format!("{w}x{h}")])
         .args(["-framerate", &format!("{}/{}", s.fps.num, s.fps.den)])
         .args(["-i", "-"])
         .args([
@@ -167,20 +248,55 @@ fn spawn_ffmpeg(
         ])
         .arg(audio)
         .args(["-map", "0:v:0", "-map", "1:a:0"])
-        // H.264 em yuv420p exige largura e altura pares.
-        .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
+        .args(codec)
         .args([
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            &settings.crf.to_string(),
             "-pix_fmt",
             "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
         ])
-        .args(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
         .arg(&settings.output)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    cmd.spawn().map_err(|e| {
+        if e.kind() == ErrorKind::NotFound {
+            ExportError::FfmpegMissing
+        } else {
+            e.into()
+        }
+    })
+}
+
+fn spawn_audio_ffmpeg(
+    project: &Project,
+    audio: &Path,
+    format: AudioFormat,
+    output: &Path,
+) -> Result<Child, ExportError> {
+    let s = &project.settings;
+    let codec: &[&str] = match format {
+        AudioFormat::Mp3 => &["-c:a", "libmp3lame", "-b:a", "256k"],
+        AudioFormat::Wav => &["-c:a", "pcm_s16le"],
+    };
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-v", "error", "-y"])
+        .args([
+            "-f",
+            "f32le",
+            "-ar",
+            &s.sample_rate.to_string(),
+            "-ac",
+            "2",
+            "-i",
+        ])
+        .arg(audio)
+        .args(codec)
+        .arg(output)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -196,17 +312,18 @@ fn spawn_ffmpeg(
 fn feed_frames(
     project: &Project,
     renderer: &mut Renderer,
-    total: Frame,
+    (from, total): (Frame, Frame),
+    (w, h): (u32, u32),
     stdin: &mut ChildStdin,
     cancel: &AtomicBool,
     on_progress: &mut impl FnMut(Progress),
 ) -> Result<(), ExportError> {
-    let s = &project.settings;
-    for frame in 0..total {
+    for i in 0..total {
         if cancel.load(Ordering::Relaxed) {
             return Err(ExportError::Cancelled);
         }
-        let rendered = renderer.render_frame(project, frame, s.width, s.height);
+        let frame = from + i;
+        let rendered = renderer.render_frame(project, frame, w, h);
         if let Some(&clip) = rendered.offline.first() {
             return Err(ExportError::Offline {
                 frame,
@@ -214,12 +331,24 @@ fn feed_frames(
             });
         }
         stdin.write_all(rendered.image.as_raw())?;
-        on_progress(Progress {
-            done: frame + 1,
-            total,
-        });
+        on_progress(Progress { done: i + 1, total });
     }
     Ok(())
+}
+
+/// Salva o frame `frame` da timeline como PNG, no tamanho do projeto.
+pub fn export_frame(
+    project: &Project,
+    renderer: &mut Renderer,
+    frame: Frame,
+    output: &Path,
+) -> Result<(), ExportError> {
+    let s = &project.settings;
+    let rendered = renderer.render_frame(project, frame, s.width, s.height);
+    rendered
+        .image
+        .save(output)
+        .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))
 }
 
 fn media_path(project: &Project, clip: ClipId) -> PathBuf {

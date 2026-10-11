@@ -5,6 +5,7 @@ mod error;
 mod library;
 mod orient;
 mod probe;
+mod proxy;
 mod video;
 
 pub use audio::{Pcm, decode_audio, load_audio, peaks};
@@ -12,6 +13,7 @@ pub use error::MediaError;
 pub use image::RgbaImage;
 pub use library::{MediaLibrary, default_cache_dir, load_image, thumbnail};
 pub use probe::probe;
+pub use proxy::{has_proxy, make_proxy, proxy_path};
 pub use video::VideoSource;
 
 use std::sync::Once;

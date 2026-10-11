@@ -122,6 +122,30 @@ impl PawCutApp {
                 self.item(ui, "Abrir…", Action::Open);
                 self.item(ui, "Salvar", Action::Save);
                 self.item(ui, "Salvar como…", Action::SaveAs);
+                ui.menu_button("Recentes", |ui| {
+                    let recent = config::recent_projects();
+                    if recent.is_empty() {
+                        ui.label("Nenhum projeto recente");
+                    }
+                    for path in recent {
+                        let name = path
+                            .file_name()
+                            .map_or("?".into(), |n| n.to_string_lossy().into_owned());
+                        if ui
+                            .button(name)
+                            .on_hover_text(path.display().to_string())
+                            .clicked()
+                        {
+                            ui.close();
+                            self.ws.request(Pending::Open(path));
+                        }
+                    }
+                });
+                if ui.button("Configurações do projeto…").clicked() {
+                    ui.close();
+                    let s = &self.ws.project_arc.settings;
+                    self.ws.project_settings = Some((s.width, s.height));
+                }
                 ui.separator();
                 self.item(ui, "Importar mídia…", Action::Import);
                 ui.separator();

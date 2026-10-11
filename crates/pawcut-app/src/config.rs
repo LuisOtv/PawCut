@@ -74,3 +74,30 @@ pub fn autosave_name(project: Option<&std::path::Path>, session: &str) -> String
         None => format!("sem-titulo-{session}.pawcut"),
     }
 }
+
+pub fn recent_path() -> PathBuf {
+    config_dir().join("recent.json")
+}
+
+/// Projetos abertos/salvos recentemente (o mais novo primeiro), só os que ainda existem.
+pub fn recent_projects() -> Vec<PathBuf> {
+    std::fs::read_to_string(recent_path())
+        .ok()
+        .and_then(|t| serde_json::from_str::<Vec<PathBuf>>(&t).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| p.exists())
+        .collect()
+}
+
+/// Coloca `path` no topo da lista de recentes (máximo de 10).
+pub fn remember_recent(path: &std::path::Path) {
+    let mut list = recent_projects();
+    list.retain(|p| p != path);
+    list.insert(0, path.to_path_buf());
+    list.truncate(10);
+    let _ = std::fs::create_dir_all(config_dir());
+    if let Ok(text) = serde_json::to_string_pretty(&list) {
+        let _ = std::fs::write(recent_path(), text);
+    }
+}

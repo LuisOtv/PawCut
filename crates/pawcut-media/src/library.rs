@@ -94,6 +94,8 @@ pub struct MediaLibrary {
     audio_bytes: usize,
     audio_budget: usize,
     failed: HashSet<PathBuf>,
+    /// Usar a mídia otimizada (proxy) quando existir: só no preview.
+    use_proxies: bool,
 }
 
 impl MediaLibrary {
@@ -110,7 +112,22 @@ impl MediaLibrary {
             audio_bytes: 0,
             audio_budget: AUDIO_BUDGET,
             failed: HashSet::new(),
+            use_proxies: false,
         }
+    }
+
+    pub fn set_use_proxies(&mut self, on: bool) {
+        self.use_proxies = on;
+    }
+
+    /// Arquivo de onde os frames de `path` vêm (o proxy, se estiver em uso e existir).
+    pub fn video_source_path(&self, path: &Path) -> PathBuf {
+        if self.use_proxies
+            && let Some(p) = crate::proxy_path(path).filter(|p| p.exists())
+        {
+            return p;
+        }
+        path.to_path_buf()
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -141,7 +158,7 @@ impl MediaLibrary {
     pub fn video_frame(&mut self, path: &Path, seconds: f64) -> Result<Arc<RgbaImage>, MediaError> {
         self.check(path)?;
         if !self.videos.contains_key(path) {
-            let opened = VideoSource::open(path, self.fit);
+            let opened = VideoSource::open(&self.video_source_path(path), self.fit);
             let src = self.remember_failure(path, opened)?;
             self.videos.insert(path.to_path_buf(), src);
         }

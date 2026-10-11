@@ -23,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = ExportSettings {
         output: output.into(),
         crf: 18,
+        ..Default::default()
     };
     export(
         &project,

@@ -65,8 +65,12 @@ impl PreviewWorker {
         thread::Builder::new()
             .name("pawcut-preview".into())
             .spawn(move || {
-                let mut renderer =
-                    Renderer::new(MediaLibrary::new(fit, sample_rate, default_cache_dir()));
+                let mut renderer = {
+                    let mut lib = MediaLibrary::new(fit, sample_rate, default_cache_dir());
+                    // O preview usa a mídia otimizada (proxy) quando existir; a exportação nunca.
+                    lib.set_use_proxies(true);
+                    Renderer::new(lib)
+                };
                 while let Ok(first) = rx.recv() {
                     let mut latest: HashMap<ViewSlot, Job> = HashMap::new();
                     for msg in std::iter::once(first).chain(rx.try_iter()) {
@@ -426,7 +430,9 @@ impl ExportJob {
         let done = Arc::new(AtomicI64::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
         let result = Arc::new(Mutex::new(None));
-        let total = project.duration();
+        let total = settings.range.map_or(project.duration(), |(a, b)| {
+            (b.min(project.duration()) - a).max(0)
+        });
         let (d, c, r) = (done.clone(), cancel.clone(), result.clone());
         thread::Builder::new()
             .name("pawcut-export".into())

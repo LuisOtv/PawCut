@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 
 use egui::{RichText, Window};
 use pawcut_core::{FrameRate, ProjectSettings, format_timecode};
-use pawcut_export::ExportSettings;
+use pawcut_export::{AudioFormat, ExportSettings, VideoCodec};
 
 use crate::config;
 use crate::engine::ExportJob;
@@ -15,9 +15,60 @@ use crate::workspace::{Pending, Workspace};
 pub struct DeliverDialog {
     pub output: String,
     pub crf: u8,
+    pub preset: usize,
+    pub only_in_out: bool,
     pub job: Option<ExportJob>,
     pub message: Option<Result<String, String>>,
 }
+
+/// Presets de exportação: nome, altura de saída (`None` = do projeto), codec, só áudio, extensão.
+/// Nome, altura de saída, codec, só áudio, extensão.
+type DeliverPreset = (&'static str, Option<u32>, VideoCodec, Option<AudioFormat>, &'static str);
+
+pub const DELIVER_PRESETS: [DeliverPreset; 6] = [
+    (
+        "Resolução do projeto (H.264)",
+        None,
+        VideoCodec::H264,
+        None,
+        "mp4",
+    ),
+    (
+        "YouTube 1080p (H.264)",
+        Some(1080),
+        VideoCodec::H264,
+        None,
+        "mp4",
+    ),
+    (
+        "YouTube 4K (H.265)",
+        Some(2160),
+        VideoCodec::H265,
+        None,
+        "mp4",
+    ),
+    (
+        "Rápido 720p (H.264)",
+        Some(720),
+        VideoCodec::H264,
+        None,
+        "mp4",
+    ),
+    (
+        "Só áudio — MP3",
+        None,
+        VideoCodec::H264,
+        Some(AudioFormat::Mp3),
+        "mp3",
+    ),
+    (
+        "Só áudio — WAV",
+        None,
+        VideoCodec::H264,
+        Some(AudioFormat::Wav),
+        "wav",
+    ),
+];
 
 pub struct NewProjectDialog {
     pub preset: usize,
@@ -72,6 +123,8 @@ impl Workspace {
             self.deliver = Some(DeliverDialog {
                 output: dir.join(format!("{stem}.mp4")).display().to_string(),
                 crf: 18,
+                preset: 0,
+                only_in_out: false,
                 job: None,
                 message: None,
             });
@@ -86,6 +139,63 @@ impl Workspace {
         self.recovery_ui(ctx);
         self.export_quit_ui(ctx);
         self.marker_ui(ctx);
+        self.project_settings_ui(ctx);
+    }
+
+    fn project_settings_ui(&mut self, ctx: &egui::Context) {
+        let Some((mut w, mut h)) = self.project_settings else {
+            return;
+        };
+        let fps = self.project_arc.settings.fps;
+        let mut open = true;
+        let mut apply = false;
+        Window::new("Configurações do projeto")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Resolução da timeline");
+                ui.horizontal_wrapped(|ui| {
+                    for (name, pw, ph) in [
+                        ("1080p", 1920, 1080),
+                        ("4K", 3840, 2160),
+                        ("720p", 1280, 720),
+                        ("Vertical 9:16", 1080, 1920),
+                        ("Quadrado", 1080, 1080),
+                        ("4:5 (feed)", 1080, 1350),
+                    ] {
+                        if ui.selectable_label((w, h) == (pw, ph), name).clicked() {
+                            (w, h) = (pw, ph);
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut w).range(16..=8192));
+                    ui.label("×");
+                    ui.add(egui::DragValue::new(&mut h).range(16..=8192));
+                });
+                ui.label(
+                    RichText::new(format!("FPS: {} (fixo depois de criado)", fps.as_f64()))
+                        .weak()
+                        .small(),
+                );
+                ui.add_space(6.0);
+                if ui.button("Aplicar").clicked() {
+                    apply = true;
+                }
+            });
+        self.project_settings = Some((w, h));
+        if apply {
+            self.st.apply(pawcut_core::Edit::SetResolution {
+                width: w,
+                height: h,
+            });
+            self.project_settings = None;
+            self.requested_timeline = None;
+        }
+        if !open {
+            self.project_settings = None;
+        }
     }
 
     fn marker_ui(&mut self, ctx: &egui::Context) {
@@ -179,34 +289,79 @@ impl Workspace {
         let mut open = true;
         let project = self.project_arc.clone();
         let s = &project.settings;
+        let marks = match (self.st.mark_in, self.st.mark_out) {
+            (Some(a), Some(b)) if b > a => Some((a, b)),
+            _ => None,
+        };
         let mut start = false;
         let mut pick_output = false;
+        let mut still = false;
         Window::new("Deliver — Exportar")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(460.0)
+            .default_width(480.0)
             .show(ctx, |ui| {
-                ui.label(RichText::new("MP4 · H.264 + AAC").strong());
-                ui.label(format!(
-                    "{}×{} · {} fps · duração {}",
-                    s.width,
-                    s.height,
-                    s.fps.as_f64(),
-                    format_timecode(project.duration(), s.fps)
-                ));
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label("Arquivo");
-                    ui.add(egui::TextEdit::singleline(&mut d.output).desired_width(300.0));
-                    if ui.button("…").clicked() {
-                        pick_output = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Qualidade");
-                    ui.add(egui::Slider::new(&mut d.crf, 14..=32).text("CRF (menor = melhor)"));
-                });
+                egui::Grid::new("deliver-grid")
+                    .num_columns(2)
+                    .spacing([10.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Formato");
+                        let before = d.preset;
+                        egui::ComboBox::from_id_salt("deliver-preset")
+                            .width(260.0)
+                            .selected_text(DELIVER_PRESETS[d.preset].0)
+                            .show_ui(ui, |ui| {
+                                for (i, p) in DELIVER_PRESETS.iter().enumerate() {
+                                    ui.selectable_value(&mut d.preset, i, p.0);
+                                }
+                            });
+                        if d.preset != before {
+                            // Troca a extensão do arquivo junto com o formato.
+                            let mut out = PathBuf::from(d.output.trim());
+                            out.set_extension(DELIVER_PRESETS[d.preset].4);
+                            d.output = out.display().to_string();
+                        }
+                        ui.end_row();
+                        ui.label("Trecho");
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut d.only_in_out, false, "Timeline inteira");
+                            ui.add_enabled_ui(marks.is_some(), |ui| {
+                                ui.radio_value(&mut d.only_in_out, true, "Só In/Out")
+                                    .on_disabled_hover_text("Marque In (I) e Out (O) na timeline");
+                            });
+                        });
+                        ui.end_row();
+                        ui.label("Arquivo");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut d.output).desired_width(300.0));
+                            if ui.button("…").clicked() {
+                                pick_output = true;
+                            }
+                        });
+                        ui.end_row();
+                        if DELIVER_PRESETS[d.preset].3.is_none() {
+                            ui.label("Qualidade");
+                            ui.add(
+                                egui::Slider::new(&mut d.crf, 14..=32).text("CRF (menor = melhor)"),
+                            );
+                            ui.end_row();
+                        }
+                    });
+                let (from, to) = if d.only_in_out {
+                    marks.unwrap_or((0, project.duration()))
+                } else {
+                    (0, project.duration())
+                };
+                let (w, h) = deliver_size(s.width, s.height, DELIVER_PRESETS[d.preset].1);
+                ui.label(
+                    RichText::new(format!(
+                        "{w}×{h} · {} fps · duração {}",
+                        s.fps.as_f64(),
+                        format_timecode(to - from, s.fps)
+                    ))
+                    .weak(),
+                );
                 ui.add_space(8.0);
                 match &d.job {
                     Some(job) => {
@@ -230,16 +385,21 @@ impl Workspace {
                         }
                     }
                     None => {
-                        let ok = project.duration() > 0 && !d.output.trim().is_empty();
-                        if ui
-                            .add_enabled(
-                                ok,
-                                egui::Button::new(RichText::new("⏺ Exportar").strong()),
-                            )
-                            .clicked()
-                        {
-                            start = true;
-                        }
+                        ui.horizontal(|ui| {
+                            let ok = to > from && !d.output.trim().is_empty();
+                            if ui
+                                .add_enabled(
+                                    ok,
+                                    egui::Button::new(RichText::new("Exportar").strong()),
+                                )
+                                .clicked()
+                            {
+                                start = true;
+                            }
+                            if ui.button("Salvar frame atual como PNG").clicked() {
+                                still = true;
+                            }
+                        });
                         if project.duration() == 0 {
                             ui.label(RichText::new("A timeline está vazia.").weak());
                         }
@@ -261,29 +421,58 @@ impl Workspace {
                 }
             });
         if pick_output {
-            self.ask_file(crate::file_dialog::Purpose::ExportTo, || {
+            let ext = DELIVER_PRESETS[d.preset].4;
+            self.ask_file(crate::file_dialog::Purpose::ExportTo, move || {
                 rfd::FileDialog::new()
-                    .add_filter("MP4", &["mp4"])
-                    .set_file_name("video.mp4")
+                    .add_filter(ext.to_uppercase(), &[ext])
+                    .set_file_name(format!("video.{ext}"))
                     .save_file()
                     .into_iter()
                     .collect()
             });
             return;
         }
+        if still {
+            let mut out = PathBuf::from(d.output.trim());
+            out.set_extension("png");
+            let frame = self.st.playhead.min((project.duration() - 1).max(0));
+            let s = &project.settings;
+            let mut renderer = pawcut_render::Renderer::new(pawcut_media::MediaLibrary::new(
+                (s.width, s.height),
+                s.sample_rate,
+                None,
+            ));
+            d.message = Some(
+                match pawcut_export::export_frame(&project, &mut renderer, frame, &out) {
+                    Ok(()) => Ok(format!("Frame salvo: {}", out.display())),
+                    Err(e) => Err(e.to_string()),
+                },
+            );
+        }
         if start {
+            let preset = DELIVER_PRESETS[d.preset];
             let mut output = PathBuf::from(d.output.trim());
             if output.extension().is_none() {
-                output.set_extension("mp4");
+                output.set_extension(preset.4);
             }
             d.output = output.display().to_string();
             d.message = None;
+            let range = if d.only_in_out { marks } else { None };
+            let size = preset
+                .1
+                .map(|_| deliver_size(project.settings.width, project.settings.height, preset.1));
+            let settings = ExportSettings {
+                output,
+                crf: d.crf,
+                range,
+                size,
+                codec: preset.2,
+                audio_only: preset.3,
+            };
             let c = ctx.clone();
-            d.job = Some(ExportJob::start(
-                (*project).clone(),
-                ExportSettings { output, crf: d.crf },
-                move || c.request_repaint(),
-            ));
+            d.job = Some(ExportJob::start((*project).clone(), settings, move || {
+                c.request_repaint()
+            }));
         }
         if !open {
             if let Some(job) = d.job.as_ref() {
@@ -546,4 +735,13 @@ impl Workspace {
             });
         });
     }
+}
+
+/// Tamanho de saída: a altura do preset no formato do projeto (vertical usa a altura como lado menor).
+pub fn deliver_size(w: u32, h: u32, target: Option<u32>) -> (u32, u32) {
+    let Some(t) = target else { return (w, h) };
+    let short = w.min(h) as f32;
+    let k = t as f32 / short;
+    let even = |v: f32| (v.round() as u32).div_ceil(2) * 2;
+    (even(w as f32 * k), even(h as f32 * k))
 }

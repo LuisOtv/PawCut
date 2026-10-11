@@ -92,6 +92,14 @@ pub struct Workspace {
     /// Fechar o app assim que a exportação em andamento terminar (ou for cancelada).
     pub quit_after_export: bool,
     pub export_quit_prompt: bool,
+    /// Janela "Configurações do projeto" aberta, com a resolução sendo editada.
+    pub project_settings: Option<(u32, u32)>,
+    /// Proxies sendo gerados: mídia, arquivo original e "terminou".
+    pub proxy_jobs: Vec<(
+        MediaId,
+        PathBuf,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    )>,
     /// Parâmetros de "Remover silêncios".
     pub silence_threshold: f32,
     pub silence_min: f64,
@@ -146,6 +154,8 @@ impl Workspace {
             export_quit_prompt: false,
             file_dialog: None,
             editing_marker: None,
+            project_settings: None,
+            proxy_jobs: Vec::new(),
             silence_threshold: -40.0,
             silence_min: 0.5,
             hover_preview: None,
@@ -191,6 +201,7 @@ impl Workspace {
         }
         self.tick();
         self.poll_file_dialog();
+        self.poll_proxy_jobs();
         self.handle_keys(ctx);
         self.refresh_project_arc();
         if ctx.input(|i| {
@@ -622,6 +633,46 @@ impl Workspace {
         }
     }
 
+    /// Gera a mídia otimizada de um vídeo em segundo plano.
+    pub fn make_proxy(&mut self, id: MediaId) {
+        let Some(m) = self.st.project().media(id) else {
+            return;
+        };
+        if self.proxy_jobs.iter().any(|(j, _, _)| *j == id) {
+            return;
+        }
+        let path = m.info.path.clone();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (p, d, ctx) = (path.clone(), done.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let _ = pawcut_media::make_proxy(&p);
+            d.store(true, std::sync::atomic::Ordering::SeqCst);
+            ctx.request_repaint();
+        });
+        self.proxy_jobs.push((id, path, done));
+        self.st.say("Gerando mídia otimizada…");
+    }
+
+    fn poll_proxy_jobs(&mut self) {
+        let finished: Vec<PathBuf> = self
+            .proxy_jobs
+            .iter()
+            .filter(|(_, _, d)| d.load(std::sync::atomic::Ordering::SeqCst))
+            .map(|(_, p, _)| p.clone())
+            .collect();
+        self.proxy_jobs
+            .retain(|(_, _, d)| !d.load(std::sync::atomic::Ordering::SeqCst));
+        for path in finished {
+            let ok = pawcut_media::has_proxy(&path);
+            self.forget_path(&path);
+            self.st.say(if ok {
+                "Mídia otimizada pronta: o preview vai rodar mais leve"
+            } else {
+                "Não foi possível gerar a mídia otimizada"
+            });
+        }
+    }
+
     pub fn import_dialog(&mut self) {
         self.ask_file(crate::file_dialog::Purpose::Import, || {
             rfd::FileDialog::new()
@@ -676,6 +727,7 @@ impl Workspace {
             }
             Pending::Open(path) => match AppState::open(&path) {
                 Ok(st) => {
+                    config::remember_recent(&path);
                     self.discard_autosave();
                     self.replace_state(st);
                     let w = self.tl_width;
@@ -748,6 +800,7 @@ impl Workspace {
     fn save_to(&mut self, path: &Path) -> bool {
         match self.st.save_to(path) {
             Ok(()) => {
+                config::remember_recent(path);
                 self.discard_autosave();
                 self.refresh_autosave_path();
                 self.st.say(format!("Salvo em {}", path.display()));

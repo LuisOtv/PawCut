@@ -2653,6 +2653,7 @@ dependencies = [
 name = "pawcut-export"
 version = "0.1.0"
 dependencies = [
+ "image",
  "pawcut-core",
  "pawcut-media",
  "pawcut-render",

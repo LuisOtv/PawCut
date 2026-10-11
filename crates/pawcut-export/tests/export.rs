@@ -52,6 +52,7 @@ fn run(ed: &Editor, out: &std::path::Path, cancel: bool) -> Result<Vec<Frame>, E
         &ExportSettings {
             output: out.to_path_buf(),
             crf: 20,
+            ..Default::default()
         },
         &flag,
         |p| seen.push(p.done),
@@ -192,4 +193,109 @@ fn offline_audio_also_stops_the_export() {
         other => panic!("esperava Offline, veio {other:?}"),
     }
     assert!(!out.exists());
+}
+
+fn run_with(ed: &Editor, settings: ExportSettings) -> Result<(), ExportError> {
+    export(
+        ed.project(),
+        &mut renderer(),
+        &settings,
+        &AtomicBool::new(false),
+        |_| {},
+    )
+}
+
+fn two_second_project(dir: &std::path::Path) -> Editor {
+    let mut ed = editor();
+    put(
+        &mut ed,
+        TrackKind::Video,
+        ClipSource::SolidColor(Rgba::new(255, 0, 0, 255)),
+        0,
+        60,
+    );
+    let tone = add_media(&mut ed, &kit::dc_audio(dir, "a.wav", 0.3, 2.0));
+    put(&mut ed, TrackKind::Audio, ClipSource::Media(tone), 0, 60);
+    ed
+}
+
+fn duration(path: &std::path::Path) -> f64 {
+    kit::ffprobe(path)["format"]["duration"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn exports_only_the_in_out_range_at_another_size_in_h265() {
+    let dir = tempfile::tempdir().unwrap();
+    let ed = two_second_project(dir.path());
+    let out = dir.path().join("trecho.mp4");
+    run_with(
+        &ed,
+        ExportSettings {
+            output: out.clone(),
+            range: Some((15, 45)),
+            size: Some((160, 90)),
+            codec: pawcut_export::VideoCodec::H265,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        (duration(&out) - 1.0).abs() < 0.1,
+        "duração {}",
+        duration(&out)
+    );
+    let info = kit::ffprobe(&out);
+    let video = info["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["codec_type"] == "video")
+        .unwrap()
+        .clone();
+    assert_eq!(video["codec_name"], "hevc");
+    assert_eq!(
+        (video["width"].as_u64(), video["height"].as_u64()),
+        (Some(160), Some(90))
+    );
+}
+
+#[test]
+fn exports_audio_only_as_mp3_and_wav() {
+    let dir = tempfile::tempdir().unwrap();
+    let ed = two_second_project(dir.path());
+    for (name, format, codec) in [
+        ("a.mp3", pawcut_export::AudioFormat::Mp3, "mp3"),
+        ("a.wav", pawcut_export::AudioFormat::Wav, "pcm_s16le"),
+    ] {
+        let out = dir.path().join(name);
+        run_with(
+            &ed,
+            ExportSettings {
+                output: out.clone(),
+                audio_only: Some(format),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let info = kit::ffprobe(&out);
+        let streams = info["streams"].as_array().unwrap();
+        assert_eq!(streams.len(), 1, "só áudio");
+        assert_eq!(streams[0]["codec_name"], codec);
+        assert!((duration(&out) - 2.0).abs() < 0.1);
+    }
+}
+
+#[test]
+fn saves_the_current_frame_as_png() {
+    let dir = tempfile::tempdir().unwrap();
+    let ed = two_second_project(dir.path());
+    let out = dir.path().join("frame.png");
+    pawcut_export::export_frame(ed.project(), &mut renderer(), 10, &out).unwrap();
+    let img = image::open(&out).unwrap().to_rgba8();
+    assert_eq!(img.dimensions(), (W, H));
+    assert_eq!(img.get_pixel(5, 5).0, [255, 0, 0, 255]);
 }

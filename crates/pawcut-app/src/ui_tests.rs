@@ -232,7 +232,7 @@ mod whole_app {
                 ws,
             );
         h.run_steps(2);
-        h.get_by_label("⏺ Exportar").click();
+        h.get_by_label("Exportar").click();
         for _ in 0..400 {
             h.step();
             if h.state()

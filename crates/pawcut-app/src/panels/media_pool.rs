@@ -53,12 +53,39 @@ impl Workspace {
                 theme::text(11.0),
                 theme::TEXT_DIM,
             );
+            let recent = crate::config::recent_projects();
+            if !recent.is_empty() {
+                let list = Rect::from_min_size(
+                    pos2(area.left() + 12.0, c.y + 52.0),
+                    vec2(area.width() - 24.0, area.bottom() - c.y - 60.0),
+                );
+                ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
+                    ui.label(
+                        egui::RichText::new("Projetos recentes")
+                            .color(theme::TEXT_DIM)
+                            .small(),
+                    );
+                    for path in recent.into_iter().take(6) {
+                        let name = path
+                            .file_name()
+                            .map_or("?".into(), |n| n.to_string_lossy().into_owned());
+                        if ui
+                            .link(name)
+                            .on_hover_text(path.display().to_string())
+                            .clicked()
+                        {
+                            self.request(crate::workspace::Pending::Open(path));
+                        }
+                    }
+                });
+            }
             ui.advance_cursor_after_rect(area);
             return;
         }
         let mut open_source = None;
         let mut relink = None;
         let mut remove = None;
+        let mut make_proxy = None;
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
@@ -131,6 +158,28 @@ impl Workspace {
                                 egui::StrokeKind::Outside,
                             );
                         }
+                        let generating = self.proxy_jobs.iter().any(|(j, _, _)| *j == m.id);
+                        if generating
+                            || (m.info.kind != MediaKind::Image
+                                && pawcut_media::has_proxy(&m.info.path))
+                        {
+                            let label = if generating { "gerando…" } else { "PROXY" };
+                            let galley = painter.layout_no_wrap(
+                                label.into(),
+                                theme::text(9.5),
+                                Color32::WHITE,
+                            );
+                            let at = thumb.left_top() + vec2(4.0, 3.0);
+                            painter.rect_filled(
+                                Rect::from_min_size(
+                                    at - vec2(2.0, 1.0),
+                                    galley.size() + vec2(4.0, 2.0),
+                                ),
+                                2.0,
+                                theme::ACCENT.gamma_multiply(0.85),
+                            );
+                            painter.galley(at, galley, Color32::WHITE);
+                        }
                         let fps = project.settings.fps;
                         if let (Some(d), false) = (m.info.duration, m.info.kind == MediaKind::Image)
                         {
@@ -190,6 +239,13 @@ impl Workspace {
                                 open_source = Some(id);
                                 ui.close();
                             }
+                            if m.info.kind != MediaKind::Image
+                                && m.info.kind != MediaKind::Audio
+                                && ui.button("Gerar mídia otimizada (proxy)").clicked()
+                            {
+                                make_proxy = Some(id);
+                                ui.close();
+                            }
                             if ui.button("Reconectar arquivo (Relink)…").clicked() {
                                 relink = Some(id);
                                 ui.close();
@@ -228,6 +284,9 @@ impl Workspace {
                     .into_iter()
                     .collect()
             });
+        }
+        if let Some(id) = make_proxy {
+            self.make_proxy(id);
         }
         if let Some(id) = remove {
             let removed = self.st.apply(pawcut_core::Edit::RemoveMedia(id)).is_some();
