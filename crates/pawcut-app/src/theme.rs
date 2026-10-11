@@ -188,6 +188,7 @@ pub fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) 
     let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, title));
     let fill = if resp.hovered() { BAR_LIGHT } else { BAR };
     ui.painter().rect_filled(rect, 0.0, fill);
     let c = rect.left_center() + egui::vec2(PAD + 4.0, 0.0);
@@ -234,6 +235,15 @@ pub fn row(
 ) {
     let full = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), ROW_H));
     let label_rect = egui::Rect::from_min_size(full.min, egui::vec2(LABEL_W, ROW_H));
+    // Rótulo desenhado à mão; o widget invisível deixa ele acessível (leitor de tela, testes).
+    if !label.is_empty() {
+        ui.interact(
+            label_rect,
+            ui.id().with(("row", label)),
+            egui::Sense::hover(),
+        )
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label));
+    }
     ui.painter().text(
         label_rect.right_center() - egui::vec2(4.0, 0.0),
         egui::Align2::RIGHT_CENTER,

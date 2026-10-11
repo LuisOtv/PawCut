@@ -4,8 +4,8 @@ use egui::{Align2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, V
 use std::collections::HashMap;
 
 use pawcut_core::{
-    Clip, ClipChange, ClipId, ClipSource, Edge, Edit, Frame, MediaKind, Project, Track, TrackFlags,
-    TrackId, TrackKind, format_timecode, parse_timecode,
+    Clip, ClipChange, ClipId, ClipSource, Edge, Edit, Frame, MediaKind, Param, Project, Track,
+    TrackFlags, TrackId, TrackKind, format_timecode, parse_timecode,
 };
 
 use super::DragPayload;
@@ -25,6 +25,9 @@ const HDR_BTN: f32 = 20.0;
 const ZONE_H: f32 = 22.0;
 const LABEL_H: f32 = 15.0;
 const EDGE_GRAB: f32 = 6.0;
+/// Faixa de volume desenhada no clipe de áudio: de baixo (VOL_MIN) até em cima (VOL_MAX), em dB.
+const VOL_MIN: f32 = -48.0;
+const VOL_MAX: f32 = 24.0;
 const SNAP_PX: f32 = 8.0;
 
 /// Uma linha da timeline. `index == len` é a zona vazia que cria uma faixa nova ao soltar.
@@ -108,6 +111,12 @@ enum TlDrag {
         edge: Edge,
         grab: Frame,
     },
+    /// Linha de volume do clipe de áudio, arrastada para cima/baixo.
+    Volume {
+        clip: ClipId,
+        start_db: f32,
+        grab_y: f32,
+    },
 }
 
 pub struct TimelineView {
@@ -122,6 +131,8 @@ pub struct TimelineView {
     /// Texto do timecode sendo digitado no canto da timeline.
     tc_edit: Option<String>,
     last_scrub: Option<Frame>,
+    /// Clipe com a linha de volume sob o mouse (para destacar).
+    vol_hover: Option<ClipId>,
 }
 
 impl Default for TimelineView {
@@ -134,6 +145,7 @@ impl Default for TimelineView {
             menu_clip: None,
             tc_edit: None,
             last_scrub: None,
+            vol_hover: None,
         }
     }
 }
@@ -292,6 +304,12 @@ fn ruler_step(ppf: f32, fps: i64, min_px: f32) -> Frame {
         .filter(|c| *c > 0)
         .find(|c| *c as f32 * ppf >= min_px)
         .unwrap_or(600 * fps)
+}
+
+/// Altura da linha de volume `db` dentro da área do clipe.
+fn vol_y(content: Rect, db: f32) -> f32 {
+    let frac = ((db - VOL_MIN) / (VOL_MAX - VOL_MIN)).clamp(0.0, 1.0);
+    content.bottom() - 2.0 - frac * (content.height() - 4.0)
 }
 
 /// Retângulos (da esquerda para a direita) dos `n` botões do cabeçalho, alinhados à direita.
@@ -483,8 +501,18 @@ impl Workspace {
         let hovered_clip = pointer.and_then(|pos| self.hit_clip(&p, &layout, pos));
 
         let fade_hit = pointer.and_then(|pos| self.hit_fade(&p, &layout, pos));
+        let vol_hit = pointer
+            .filter(|_| self.st.tool == Tool::Selection && fade_hit.is_none())
+            .and_then(|pos| self.hit_volume(&p, &layout, pos));
+        self.tl.vol_hover = match &self.tl.drag {
+            Some(TlDrag::Volume { clip, .. }) => Some(*clip),
+            Some(_) => None,
+            None => vol_hit,
+        };
         if fade_hit.is_some() && self.tl.drag.is_none() && self.st.tool == Tool::Selection {
             ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        } else if self.tl.vol_hover.is_some() {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
         } else if let Some((_, edge)) = hovered_clip.filter(|_| self.tl.drag.is_none()) {
             let icon = match (self.st.tool, edge) {
                 (Tool::Blade, _) => CursorIcon::Crosshair,
@@ -506,9 +534,19 @@ impl Workspace {
             } else {
                 None
             };
+            let volume = (self.st.tool == Tool::Selection && fade.is_none())
+                .then(|| self.hit_volume(&p, &layout, pos))
+                .flatten();
             if let Some((clip, edge)) = fade {
                 self.st.select(clip, false);
                 self.tl.drag = Some(TlDrag::Fade { clip, edge });
+            } else if let Some(clip) = volume {
+                let start_db = p.clip(clip).map_or(0.0, |c| c.volume_db);
+                self.tl.drag = Some(TlDrag::Volume {
+                    clip,
+                    start_db,
+                    grab_y: pos.y,
+                });
             } else {
                 match (self.st.tool, self.hit_clip(&p, &layout, pos)) {
                     (Tool::Selection, Some((clip, edge))) => {
@@ -566,6 +604,7 @@ impl Workspace {
         let mut snap_line: Option<Frame> = None;
         let mut ghosts: Vec<(Rect, bool)> = Vec::new();
         let mut marquee: Option<Rect> = None;
+        let mut vol_label: Option<(Pos2, f32)> = None;
         if let Some(pos) = lanes_resp
             .interact_pointer_pos()
             .filter(|_| lanes_resp.dragged())
@@ -597,6 +636,35 @@ impl Workspace {
                         }
                     }
                     self.st.selection = sel;
+                }
+                Some(TlDrag::Volume {
+                    clip,
+                    start_db,
+                    grab_y,
+                }) => {
+                    if let Some(rect) = row_of(&p, clip).and_then(|r| layout.rect_of(r)) {
+                        let span = (rect.height() - 2.0 - LABEL_H - 4.0).max(8.0);
+                        let fine = if ui.input(|i| i.modifiers.shift) {
+                            0.2
+                        } else {
+                            1.0
+                        };
+                        let mut db =
+                            start_db + (grab_y - pos.y) / span * (VOL_MAX - VOL_MIN) * fine;
+                        db = (db * 10.0).round() / 10.0;
+                        if db.abs() < 0.4 {
+                            db = 0.0; // encaixa no 0 dB
+                        }
+                        let db = db.clamp(-60.0, VOL_MAX);
+                        self.st.apply_coalescing(
+                            Edit::SetClip {
+                                clip,
+                                change: ClipChange::VolumeDb(db),
+                            },
+                            &format!("vol-drag-{clip:?}"),
+                        );
+                        vol_label = Some((pos, db));
+                    }
                 }
                 Some(TlDrag::Fade { clip, edge }) => {
                     if let Some(c) = p.clip(clip) {
@@ -665,6 +733,7 @@ impl Workspace {
                 let now = self.frame_at(pos.x, layout.left).round() as Frame;
                 match drag {
                     TlDrag::Scrub | TlDrag::Fade { .. } | TlDrag::Marquee { .. } => {}
+                    TlDrag::Volume { .. } => self.st.editor.end_coalescing(),
                     TlDrag::Move {
                         anchor,
                         clips,
@@ -868,6 +937,26 @@ impl Workspace {
                 theme::ACCENT.gamma_multiply(if is_drop { 0.25 } else { 0.18 }),
             );
             lanes_painter.rect_stroke(g, 2.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
+        }
+        if vol_hit.is_some()
+            && self.tl.drag.is_none()
+            && let (Some(c), Some(pos)) = (vol_hit.and_then(|c| p.clip(c)), pointer)
+        {
+            vol_label = Some((pos, c.volume_db));
+        }
+        if let Some((pos, db)) = vol_label {
+            let text = if db <= -59.9 {
+                "−∞ dB".to_string()
+            } else {
+                format!("{}{:.1} dB", if db > 0.0 { "+" } else { "" }, db).replace('-', "−")
+            };
+            let galley = painter.layout_no_wrap(text, theme::mono(11.0), Color32::WHITE);
+            let bubble = Rect::from_min_size(
+                pos + vec2(12.0, -galley.size().y - 10.0),
+                galley.size() + vec2(8.0, 4.0),
+            );
+            lanes_painter.rect_filled(bubble, 3.0, Color32::from_rgb(0x30, 0x30, 0x36));
+            lanes_painter.galley(bubble.min + vec2(4.0, 2.0), galley, Color32::WHITE);
         }
         if let Some(m) = marquee {
             lanes_painter.rect_filled(m, 0.0, Color32::from_white_alpha(18));
@@ -1145,6 +1234,7 @@ impl Workspace {
         }
         if kind == TrackKind::Audio {
             self.paint_waveform(painter, p, clip, content);
+            self.paint_volume_line(painter, clip, content);
         }
         self.paint_fades(painter, clip, r);
         if let Some((a, _)) = clip.dissolve_window() {
@@ -1762,6 +1852,107 @@ impl Workspace {
             self.match_frame(&p, c, at);
             ui.close();
         }
+    }
+
+    /// Linha de volume (como no Resolve): reta no volume do clipe, ou a curva dos keyframes.
+    fn paint_volume_line(&self, painter: &egui::Painter, clip: &Clip, content: Rect) {
+        if content.height() < 12.0 {
+            return;
+        }
+        let hot = self.tl.vol_hover == Some(clip.id);
+        let stroke = Stroke::new(
+            if hot { 2.5 } else { 1.5 },
+            if hot {
+                Color32::WHITE
+            } else {
+                Color32::from_gray(225)
+            },
+        );
+        if clip.keyframes.contains_key(&Param::VolumeDb) {
+            let x0 = content.left().max(painter.clip_rect().left());
+            let x1 = content.right().min(painter.clip_rect().right());
+            let mut pts = Vec::new();
+            let mut x = x0;
+            while x <= x1 {
+                let f = clip.start + ((x - content.left()) / self.tl.ppf) as Frame;
+                pts.push(pos2(x, vol_y(content, clip.param(Param::VolumeDb, f))));
+                x += 3.0;
+            }
+            let shadow: Vec<Pos2> = pts.iter().map(|p| *p + vec2(0.0, 1.5)).collect();
+            painter.add(egui::Shape::line(
+                shadow,
+                Stroke::new(1.5, Color32::from_black_alpha(150)),
+            ));
+            painter.add(egui::Shape::line(pts, stroke));
+        } else {
+            // Sombra escura embaixo: a linha aparece mesmo por cima da forma de onda clara.
+            let y = vol_y(content, clip.volume_db);
+            painter.line_segment(
+                [
+                    pos2(content.left(), y + 1.5),
+                    pos2(content.right(), y + 1.5),
+                ],
+                Stroke::new(1.5, Color32::from_black_alpha(150)),
+            );
+            painter.line_segment([pos2(content.left(), y), pos2(content.right(), y)], stroke);
+        }
+    }
+
+    /// Clipe de áudio cuja linha de volume está sob o ponteiro (só sem keyframes de volume).
+    fn hit_volume(&self, p: &Project, layout: &Layout, pos: Pos2) -> Option<ClipId> {
+        let row = layout.row_at(pos.y)?;
+        if row.kind != TrackKind::Audio {
+            return None;
+        }
+        let track = p.tracks(row.kind).get(row.index)?;
+        if track.locked {
+            return None;
+        }
+        let (clip, edge) = self.hit_clip(p, layout, pos)?;
+        if edge.is_some() {
+            return None;
+        }
+        let c = p.clip(clip)?;
+        if c.keyframes.contains_key(&Param::VolumeDb) {
+            return None;
+        }
+        let rect = layout.rect_of(row)?;
+        let content = Rect::from_min_max(
+            pos2(rect.left(), rect.top() + 1.0 + LABEL_H),
+            pos2(rect.right(), rect.bottom() - 1.0),
+        );
+        if content.height() < 12.0 {
+            return None;
+        }
+        ((pos.y - vol_y(content, c.volume_db)).abs() <= 4.0).then_some(clip)
+    }
+
+    /// Ponto na linha de volume do clipe de áudio (para os testes).
+    #[cfg(test)]
+    pub fn tl_volume_point(&self, index: usize, frame: f32) -> Pos2 {
+        let layout = Layout::new(
+            &self.project_arc,
+            self.tl_area,
+            self.tl.v_scroll,
+            &self.track_views,
+        );
+        let rect = layout
+            .rect_of(Row {
+                kind: TrackKind::Audio,
+                index,
+            })
+            .expect("linha existe");
+        let track = &self.project_arc.audio_tracks[index];
+        let c = track
+            .clips
+            .iter()
+            .find(|c| frame >= c.start as f32 && frame < c.end() as f32)
+            .expect("clipe");
+        let content = Rect::from_min_max(
+            pos2(rect.left(), rect.top() + 1.0 + LABEL_H),
+            pos2(rect.right(), rect.bottom() - 1.0),
+        );
+        pos2(self.x_of(frame, layout.left), vol_y(content, c.volume_db))
     }
 
     /// Alça de fade sob o ponteiro (cantos de cima do clipe).

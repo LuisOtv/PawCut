@@ -257,6 +257,80 @@ fn skimming_shows_the_frame_under_the_mouse() {
     assert_eq!(h.state().st.playhead, 0);
 }
 
+fn with_audio(st: &mut AppState) {
+    st.apply(Edit::AddMedia(MediaInfo {
+        path: "/sons/voz.wav".into(),
+        kind: MediaKind::Audio,
+        duration: Some(120),
+        width: 0,
+        height: 0,
+    }));
+    let m = st.project().media[0].id;
+    st.drop_media(m, TrackKind::Audio, 0, 0);
+    st.selection.clear();
+}
+
+#[test]
+fn dragging_the_volume_line_changes_the_clip_volume() {
+    let mut h = harness(with_audio);
+    let line = h.state().tl_volume_point(0, 60.0);
+    drag(&mut h, line, line - egui::vec2(0.0, 6.0));
+    let up = h.state().st.project().audio_tracks[0].clips[0].volume_db;
+    assert!(up > 0.5, "subiu: {up}");
+    let line = h.state().tl_volume_point(0, 60.0);
+    drag(&mut h, line, line + egui::vec2(0.0, 20.0));
+    let down = h.state().st.project().audio_tracks[0].clips[0].volume_db;
+    assert!(down < up - 5.0, "desceu: {down}");
+    // Um passo de desfazer por arrasto.
+    h.state_mut().st.undo();
+    assert_eq!(
+        h.state().st.project().audio_tracks[0].clips[0].volume_db,
+        up
+    );
+}
+
+#[test]
+fn inspector_has_tabs_and_shows_linked_audio() {
+    let mut st = AppState::new(Project::new(ProjectSettings::default()));
+    st.apply(Edit::AddMedia(MediaInfo {
+        path: "/videos/x.mp4".into(),
+        kind: MediaKind::Video { has_audio: true },
+        duration: Some(90),
+        width: 1920,
+        height: 1080,
+    }));
+    let m = st.project().media[0].id;
+    st.drop_media(m, TrackKind::Video, 0, 0);
+    let v = st.project().video_tracks[0].clips[0].id;
+    st.select(v, false);
+    let ctx = egui::Context::default();
+    let mut ws = Workspace::new(&ctx, st);
+    ws.recovery.clear();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(420.0, 700.0))
+        .build_ui_state(
+            |ui, ws: &mut Workspace| {
+                let ctx = ui.ctx().clone();
+                ws.begin_frame(&ctx);
+                ws.inspector_ui(ui);
+            },
+            ws,
+        );
+    h.run_steps(2);
+    use egui_kittest::kittest::Queryable;
+    assert!(h.query_by_label("Transform").is_some());
+    h.get_by_label("Áudio").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Transform").is_none());
+    assert!(
+        h.query_by_label("Volume").is_some(),
+        "aba Áudio do clipe ligado"
+    );
+    h.get_by_label("Cor").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Matiz").is_some());
+}
+
 mod whole_app {
     use std::time::Duration;
 

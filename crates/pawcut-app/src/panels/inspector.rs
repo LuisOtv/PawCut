@@ -126,6 +126,83 @@ fn static_change(clip: &Clip, param: Param, value: f32) -> ClipChange {
     }
 }
 
+/// Abas do Inspector, como no Resolve (Video / Audio / Color …).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InspectorTab {
+    Title,
+    #[default]
+    Video,
+    Color,
+    Audio,
+    Time,
+}
+
+impl InspectorTab {
+    fn label(self) -> &'static str {
+        match self {
+            InspectorTab::Title => "Título",
+            InspectorTab::Video => "Vídeo",
+            InspectorTab::Color => "Cor",
+            InspectorTab::Audio => "Áudio",
+            InspectorTab::Time => "Tempo",
+        }
+    }
+}
+
+/// Fileira de abas com a mesma largura; devolve a aba clicada.
+fn tab_bar(
+    ui: &mut egui::Ui,
+    tabs: &[InspectorTab],
+    current: InspectorTab,
+) -> Option<InspectorTab> {
+    let rect = egui::Rect::from_min_size(
+        ui.cursor().min,
+        egui::vec2(ui.available_width(), theme::TOOLBAR_H),
+    );
+    ui.painter().rect_filled(rect, 0.0, theme::BG_DARK);
+    ui.painter().line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        egui::Stroke::new(1.0, theme::BORDER),
+    );
+    let w = rect.width() / tabs.len().max(1) as f32;
+    let mut clicked = None;
+    for (i, t) in tabs.iter().enumerate() {
+        let r = egui::Rect::from_min_size(
+            rect.min + egui::vec2(i as f32 * w, 0.0),
+            egui::vec2(w, rect.height()),
+        );
+        let resp = ui.interact(r, ui.id().with(("insp-tab", i)), egui::Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t.label()));
+        let on = *t == current;
+        if on {
+            ui.painter().rect_filled(r, 0.0, theme::BAR);
+            ui.painter().line_segment(
+                [
+                    r.left_bottom() + egui::vec2(6.0, -1.0),
+                    r.right_bottom() + egui::vec2(-6.0, -1.0),
+                ],
+                egui::Stroke::new(2.0, theme::ACCENT),
+            );
+        }
+        ui.painter().text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            t.label(),
+            theme::text(12.0),
+            if on || resp.hovered() {
+                egui::Color32::WHITE
+            } else {
+                theme::TEXT_DIM
+            },
+        );
+        if resp.clicked() {
+            clicked = Some(*t);
+        }
+    }
+    ui.advance_cursor_after_rect(rect);
+    clicked
+}
+
 impl Workspace {
     /// Linha de um parâmetro animável, aplicada a todos os `clips` (o primeiro manda no valor mostrado).
     #[allow(clippy::too_many_arguments)]
@@ -290,14 +367,53 @@ impl Workspace {
                 );
             });
         });
+        // Áudio de um clipe de vídeo: os clipes de áudio ligados a ele (como no Resolve).
+        let aclips: Vec<Clip> = if kind == TrackKind::Audio {
+            clips.clone()
+        } else {
+            project
+                .expand_linked(&clips.iter().map(|c| c.id).collect::<Vec<_>>())
+                .into_iter()
+                .filter(|c| {
+                    project
+                        .locate(*c)
+                        .and_then(|(t, _)| project.track(t))
+                        .is_some_and(|t| t.kind == TrackKind::Audio)
+                })
+                .filter_map(|c| project.clip(c).cloned())
+                .collect()
+        };
+        let mut tabs = Vec::new();
+        if matches!(first.source, ClipSource::Text(_)) && clips.len() == 1 {
+            tabs.push(InspectorTab::Title);
+        }
+        if kind == TrackKind::Video {
+            tabs.extend([InspectorTab::Video, InspectorTab::Color]);
+        }
+        if !aclips.is_empty() {
+            tabs.push(InspectorTab::Audio);
+        }
+        tabs.push(InspectorTab::Time);
+        let tab = if tabs.contains(&self.inspector_tab) {
+            self.inspector_tab
+        } else {
+            tabs[0]
+        };
+        if let Some(t) = tab_bar(ui, &tabs, tab) {
+            self.inspector_tab = t;
+        }
         let id = first.id;
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
                 ui.add_space(4.0);
                 match &first.source {
-                    ClipSource::Text(style) if clips.len() == 1 => self.text_section(ui, id, style),
-                    ClipSource::SolidColor(color) => {
+                    ClipSource::Text(style) if clips.len() == 1 => {
+                        if tab == InspectorTab::Title {
+                            self.text_section(ui, id, style)
+                        }
+                    }
+                    ClipSource::SolidColor(color) if tab == InspectorTab::Video => {
                         let mut c = *color;
                         section(ui, "Gerador", |ui| {
                             row(
@@ -323,7 +439,7 @@ impl Workspace {
                     }
                     _ => {}
                 }
-                if kind == TrackKind::Video {
+                if kind == TrackKind::Video && tab == InspectorTab::Video {
                     section(ui, "Transform", |ui| {
                         self.param_row(
                             ui,
@@ -425,6 +541,8 @@ impl Workspace {
                             }
                         }
                     });
+                }
+                if kind == TrackKind::Video && tab == InspectorTab::Color {
                     section(ui, "Cor  (Matiz / Saturação / Luminosidade)", |ui| {
                         self.param_row(ui, &clips, Param::Hue, "Matiz", 1.0, -180.0..=180.0, "°");
                         self.param_row(
@@ -457,151 +575,155 @@ impl Workspace {
                         }
                     });
                 }
-                section(ui, "Tempo", |ui| {
-                    let still = match &first.source {
-                        ClipSource::Media(m) => project
-                            .media(*m)
-                            .is_some_and(|m| m.info.kind == MediaKind::Image),
-                        _ => true,
-                    };
-                    // Duração exata, digitada em timecode (aplica um trim na borda final).
-                    let dur_id = ui.id().with(("dur", id));
-                    let mut text = ui
-                        .data_mut(|d| d.get_temp::<String>(dur_id))
-                        .unwrap_or_else(|| format_timecode(first.duration, fps));
-                    let mut commit = false;
-                    row(
-                        ui,
-                        "Duração",
-                        |ui| {
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(&mut text)
-                                    .desired_width(theme::VALUE_W + 20.0)
-                                    .font(egui::TextStyle::Monospace),
-                            );
-                            if resp.changed() {
-                                ui.data_mut(|d| d.insert_temp(dur_id, text.clone()));
-                            }
-                            if resp.lost_focus() {
-                                commit = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                ui.data_mut(|d| d.remove::<String>(dur_id));
-                            }
-                        },
-                        |_| {},
-                    );
-                    if commit && let Some(d) = parse_timecode(&text, fps, first.duration) {
-                        let delta = d.max(1) - first.duration;
-                        self.st.apply(Edit::Trim {
-                            clips: self.st.expanded(&[id]),
-                            edge: Edge::End,
-                            delta,
-                        });
-                    }
-                    if !still {
-                        let mut pct = first.speed * 100.0;
-                        let (mut set_speed, mut reset_speed) = (None, false);
+                if tab == InspectorTab::Time {
+                    section(ui, "Tempo", |ui| {
+                        let still = match &first.source {
+                            ClipSource::Media(m) => project
+                                .media(*m)
+                                .is_some_and(|m| m.info.kind == MediaKind::Image),
+                            _ => true,
+                        };
+                        // Duração exata, digitada em timecode (aplica um trim na borda final).
+                        let dur_id = ui.id().with(("dur", id));
+                        let mut text = ui
+                            .data_mut(|d| d.get_temp::<String>(dur_id))
+                            .unwrap_or_else(|| format_timecode(first.duration, fps));
+                        let mut commit = false;
                         row(
                             ui,
-                            "Velocidade",
+                            "Duração",
                             |ui| {
-                                if ui
-                                    .add(
-                                        DragValue::new(&mut pct)
-                                            .range(10.0..=1000.0)
-                                            .speed(1.0)
-                                            .suffix(" %"),
-                                    )
-                                    .changed()
-                                {
-                                    set_speed = Some(pct / 100.0);
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut text)
+                                        .desired_width(theme::VALUE_W + 20.0)
+                                        .font(egui::TextStyle::Monospace),
+                                );
+                                if resp.changed() {
+                                    ui.data_mut(|d| d.insert_temp(dur_id, text.clone()));
+                                }
+                                if resp.lost_focus() {
+                                    commit = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                    ui.data_mut(|d| d.remove::<String>(dur_id));
                                 }
                             },
-                            |ui| {
-                                ui.add_space(22.0);
-                                reset_speed = reset(ui, first.speed != 1.0);
-                            },
+                            |_| {},
                         );
-                        let speed = if reset_speed { Some(1.0) } else { set_speed };
-                        if let Some(speed) = speed {
-                            let all: Vec<_> = clips
-                                .iter()
-                                .flat_map(|c| self.st.expanded(&[c.id]))
-                                .collect();
-                            self.st.apply_coalescing(
-                                Edit::SetSpeed { clips: all, speed },
-                                "insp-speed",
+                        if commit && let Some(d) = parse_timecode(&text, fps, first.duration) {
+                            let delta = d.max(1) - first.duration;
+                            self.st.apply(Edit::Trim {
+                                clips: self.st.expanded(&[id]),
+                                edge: Edge::End,
+                                delta,
+                            });
+                        }
+                        if !still {
+                            let mut pct = first.speed * 100.0;
+                            let (mut set_speed, mut reset_speed) = (None, false);
+                            row(
+                                ui,
+                                "Velocidade",
+                                |ui| {
+                                    if ui
+                                        .add(
+                                            DragValue::new(&mut pct)
+                                                .range(10.0..=1000.0)
+                                                .speed(1.0)
+                                                .suffix(" %"),
+                                        )
+                                        .changed()
+                                    {
+                                        set_speed = Some(pct / 100.0);
+                                    }
+                                },
+                                |ui| {
+                                    ui.add_space(22.0);
+                                    reset_speed = reset(ui, first.speed != 1.0);
+                                },
+                            );
+                            let speed = if reset_speed { Some(1.0) } else { set_speed };
+                            if let Some(speed) = speed {
+                                let all: Vec<_> = clips
+                                    .iter()
+                                    .flat_map(|c| self.st.expanded(&[c.id]))
+                                    .collect();
+                                self.st.apply_coalescing(
+                                    Edit::SetSpeed { clips: all, speed },
+                                    "insp-speed",
+                                );
+                            }
+                        }
+                        for (label, value, is_in) in [
+                            ("Fade in", first.fade_in, true),
+                            ("Fade out", first.fade_out, false),
+                        ] {
+                            let mut f = value;
+                            row(
+                                ui,
+                                label,
+                                |ui| {
+                                    if ui
+                                        .add(
+                                            DragValue::new(&mut f)
+                                                .range(0..=first.duration)
+                                                .suffix(" fr"),
+                                        )
+                                        .changed()
+                                    {
+                                        self.apply_all(&clips, &format!("insp-{label}"), |c| {
+                                            Some(Edit::SetClip {
+                                                clip: c.id,
+                                                change: if is_in {
+                                                    ClipChange::FadeIn(f)
+                                                } else {
+                                                    ClipChange::FadeOut(f)
+                                                },
+                                            })
+                                        });
+                                    }
+                                },
+                                |_| {},
                             );
                         }
-                    }
-                    for (label, value, is_in) in [
-                        ("Fade in", first.fade_in, true),
-                        ("Fade out", first.fade_out, false),
-                    ] {
-                        let mut f = value;
-                        row(
-                            ui,
-                            label,
-                            |ui| {
-                                if ui
-                                    .add(
-                                        DragValue::new(&mut f)
-                                            .range(0..=first.duration)
-                                            .suffix(" fr"),
-                                    )
-                                    .changed()
-                                {
-                                    self.apply_all(&clips, &format!("insp-{label}"), |c| {
-                                        Some(Edit::SetClip {
-                                            clip: c.id,
-                                            change: if is_in {
-                                                ClipChange::FadeIn(f)
-                                            } else {
-                                                ClipChange::FadeOut(f)
+                        let joined = index > 0
+                            && project
+                                .track(track_id)
+                                .is_some_and(|t| t.clips[index - 1].end() == first.start);
+                        if joined {
+                            let mut d = first.dissolve_in;
+                            row(
+                                ui,
+                                "Dissolve",
+                                |ui| {
+                                    if ui
+                                        .add(
+                                            DragValue::new(&mut d)
+                                                .range(0..=first.duration)
+                                                .suffix(" fr"),
+                                        )
+                                        .on_hover_text(
+                                            "Cross dissolve com o clipe anterior (Ctrl+T)",
+                                        )
+                                        .changed()
+                                    {
+                                        self.st.apply_coalescing(
+                                            Edit::SetDissolve {
+                                                clip: id,
+                                                frames: d,
                                             },
-                                        })
-                                    });
-                                }
-                            },
-                            |_| {},
-                        );
-                    }
-                    let joined = index > 0
-                        && project
-                            .track(track_id)
-                            .is_some_and(|t| t.clips[index - 1].end() == first.start);
-                    if joined {
-                        let mut d = first.dissolve_in;
-                        row(
-                            ui,
-                            "Dissolve",
-                            |ui| {
-                                if ui
-                                    .add(
-                                        DragValue::new(&mut d)
-                                            .range(0..=first.duration)
-                                            .suffix(" fr"),
-                                    )
-                                    .on_hover_text("Cross dissolve com o clipe anterior (Ctrl+T)")
-                                    .changed()
-                                {
-                                    self.st.apply_coalescing(
-                                        Edit::SetDissolve {
-                                            clip: id,
-                                            frames: d,
-                                        },
-                                        "insp-dissolve",
-                                    );
-                                }
-                            },
-                            |_| {},
-                        );
-                    }
-                });
-                if kind == TrackKind::Audio {
+                                            "insp-dissolve",
+                                        );
+                                    }
+                                },
+                                |_| {},
+                            );
+                        }
+                    });
+                }
+                if tab == InspectorTab::Audio && !aclips.is_empty() {
                     section(ui, "Áudio", |ui| {
                         self.param_row(
                             ui,
-                            &clips,
+                            &aclips,
                             Param::VolumeDb,
                             "Volume",
                             1.0,

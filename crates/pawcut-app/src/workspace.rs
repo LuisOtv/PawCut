@@ -105,6 +105,8 @@ pub struct Workspace {
     )>,
     /// Altura/minimizado/escondido de cada faixa (só visual, não vai para o projeto).
     pub track_views: HashMap<pawcut_core::TrackId, crate::panels::timeline::TrackView>,
+    /// Aba escolhida no Inspector (fica a mesma ao trocar de clipe, quando existe).
+    pub inspector_tab: crate::panels::inspector::InspectorTab,
     /// Zoom do Timeline Viewer (0 = ajustar à janela) e deslocamento ao arrastar com o botão do meio.
     pub viewer_zoom: f32,
     pub viewer_pan: egui::Vec2,
@@ -190,6 +192,7 @@ impl Workspace {
             project_settings: None,
             proxy_jobs: Vec::new(),
             track_views: HashMap::new(),
+            inspector_tab: Default::default(),
             viewer_zoom: 0.0,
             viewer_pan: egui::Vec2::ZERO,
             safe_guides: false,
