@@ -56,6 +56,8 @@ pub(crate) fn dest_rect(
 
 /// Multiplicador de opacidade dos fades: 0 no primeiro e no último frame quando há fade.
 pub(crate) fn fade_factor(clip: &Clip, frame: Frame) -> f32 {
+    // Dentro de um dissolve o clipe aparece um pouco antes do início / depois do fim.
+    let frame = frame.clamp(clip.start, clip.end() - 1);
     let mut a = 1.0f32;
     if clip.fade_in > 0 {
         a = a.min((frame - clip.start) as f32 / clip.fade_in as f32);

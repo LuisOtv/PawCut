@@ -244,3 +244,149 @@ fn renderer_can_move_to_a_thread() {
     fn assert_send<T: Send>() {}
     assert_send::<pawcut_render::Renderer>();
 }
+
+#[test]
+fn dissolve_blends_the_two_clips() {
+    let mut ed = editor();
+    solid(&mut ed, 0, RED, 0, 30);
+    let b = solid(&mut ed, 0, BLUE, 30, 30);
+    ed.apply(Edit::SetDissolve {
+        clip: b,
+        frames: 10,
+    })
+    .unwrap();
+    let mut r = renderer();
+    let mid = px(&r.render_frame(ed.project(), 30, W, H).image, 160, 90);
+    assert!(
+        mid[0] > 90 && mid[0] < 160 && mid[2] > 90 && mid[2] < 160,
+        "meio do dissolve: {mid:?}"
+    );
+    assert!(near(
+        px(&r.render_frame(ed.project(), 24, W, H).image, 160, 90),
+        [255, 0, 0],
+        0
+    ));
+    assert!(near(
+        px(&r.render_frame(ed.project(), 36, W, H).image, 160, 90),
+        [0, 0, 255],
+        0
+    ));
+}
+
+#[test]
+fn opacity_keyframes_animate() {
+    let mut ed = editor();
+    let c = solid(&mut ed, 0, WHITE, 0, 100);
+    ed.apply(Edit::SetKeyframe {
+        clip: c,
+        param: Param::Opacity,
+        at: 0.0,
+        value: Some(0.0),
+    })
+    .unwrap();
+    ed.apply(Edit::SetKeyframe {
+        clip: c,
+        param: Param::Opacity,
+        at: 60.0,
+        value: Some(1.0),
+    })
+    .unwrap();
+    let mut r = renderer();
+    assert!(near(
+        px(&r.render_frame(ed.project(), 0, W, H).image, 160, 90),
+        [0, 0, 0],
+        0
+    ));
+    assert!(near(
+        px(&r.render_frame(ed.project(), 30, W, H).image, 160, 90),
+        [128, 128, 128],
+        2
+    ));
+    assert!(near(
+        px(&r.render_frame(ed.project(), 80, W, H).image, 160, 90),
+        [255, 255, 255],
+        0
+    ));
+}
+
+#[test]
+fn hue_shift_turns_red_into_green() {
+    let mut ed = editor();
+    let c = solid(&mut ed, 0, RED, 0, 30);
+    set(
+        &mut ed,
+        c,
+        ClipChange::Color(ColorAdjust {
+            hue: 120.0,
+            ..Default::default()
+        }),
+    );
+    let p = px(
+        &renderer().render_frame(ed.project(), 0, W, H).image,
+        160,
+        90,
+    );
+    assert!(p[1] > 240 && p[0] < 10, "{p:?}");
+}
+
+#[test]
+fn crop_and_flip_on_media() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ed = editor();
+    let m = media(
+        &mut ed,
+        &pawcut_testkit::png(dir.path(), "a.png", "red", 40, 40),
+    );
+    let c = put(
+        &mut ed,
+        TrackKind::Video,
+        0,
+        ClipSource::Media(m),
+        0,
+        0.0,
+        30,
+    );
+    let t = Transform {
+        crop: Crop {
+            left: 0.5,
+            ..Default::default()
+        },
+        ..Transform::default()
+    };
+    set(&mut ed, c, ClipChange::Transform(t));
+    let img = renderer().render_frame(ed.project(), 0, W, H).image;
+    assert!(
+        near(px(&img, 150, 90), [0, 0, 0], 0),
+        "metade esquerda recortada"
+    );
+    assert!(near(px(&img, 170, 90), [255, 0, 0], 4));
+}
+
+#[test]
+fn text_outline_draws_around_the_letters() {
+    let mut ed = editor();
+    let style = TextStyle {
+        text: "I".into(),
+        size: 80.0,
+        outline: 6.0,
+        outline_color: Rgba::new(255, 0, 0, 255),
+        ..TextStyle::default()
+    };
+    put(
+        &mut ed,
+        TrackKind::Video,
+        0,
+        ClipSource::Text(style),
+        0,
+        0.0,
+        30,
+    );
+    let img = renderer().render_frame(ed.project(), 0, W, H).image;
+    let reds = (40..140)
+        .flat_map(|y| (120..200).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let p = px(&img, x, y);
+            p[0] > 200 && p[1] < 60
+        });
+    assert!(reds.count() > 30, "sem contorno vermelho");
+}

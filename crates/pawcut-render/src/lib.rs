@@ -11,7 +11,8 @@ use std::sync::Arc;
 use pawcut_core::{Clip, ClipId, ClipSource, Frame, MediaKind, Project, Rgba};
 use pawcut_media::{MediaLibrary, RgbaImage};
 
-use crate::layout::{Fit, base_size, dest_rect, fade_factor};
+use crate::compose::DrawOpts;
+use crate::layout::{Fit, Rect, base_size, dest_rect, fade_factor};
 use crate::text::TextRasterizer;
 
 /// Cor da camada quando o arquivo não abre ("Media Offline").
@@ -48,44 +49,105 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> RenderedFrame {
-        let s = &project.settings;
-        let pj = (s.width as f32, s.height as f32);
-        let out = (width as f32, height as f32);
         let mut image = RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
         let mut offline = Vec::new();
         for track in project.video_tracks.iter().filter(|t| t.enabled) {
-            let Some(clip) = track.clip_at(frame) else {
-                continue;
-            };
-            let opacity = clip.transform.opacity * fade_factor(clip, frame);
-            if opacity <= 0.0 {
-                continue;
-            }
-            let t = &clip.transform;
-            match &clip.source {
-                ClipSource::SolidColor(color) => {
-                    let r = dest_rect(base_size(Fit::Fill, pj, pj), t, pj, out);
-                    compose::fill_rect(&mut image, r, *color, opacity);
-                }
-                ClipSource::Text(style) => {
-                    let k = width as f32 / pj.0 * t.scale.max(0.01);
-                    let img = self.text.rasterize(style, k);
-                    let base = (img.width() as f32 / k, img.height() as f32 / k);
-                    compose::draw_image(&mut image, &img, dest_rect(base, t, pj, out), opacity);
-                }
-                ClipSource::Media(_) => match self.media_layer(project, clip, frame) {
-                    Some((img, base)) => {
-                        compose::draw_image(&mut image, &img, dest_rect(base, t, pj, out), opacity)
-                    }
-                    None => {
-                        offline.push(clip.id);
-                        let r = dest_rect(base_size(Fit::Fill, pj, pj), t, pj, out);
-                        compose::fill_rect(&mut image, r, OFFLINE_COLOR, 1.0);
-                    }
-                },
+            // No dissolve, o clipe que sai vai inteiro e o que entra por cima com α:
+            // dá exatamente sai·(1−α) + entra·α.
+            let layers = track.layers_at(frame);
+            let dissolving = layers.len() == 2;
+            for (i, (clip, weight)) in layers.into_iter().enumerate() {
+                let weight = if dissolving && i == 0 { 1.0 } else { weight };
+                self.draw_clip(
+                    &mut image,
+                    project,
+                    clip,
+                    frame,
+                    weight,
+                    (width, height),
+                    &mut offline,
+                );
             }
         }
         RenderedFrame { image, offline }
+    }
+
+    /// Desenha um clipe (com transform/cor animados, crop, flip e fades) multiplicado por `weight`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_clip(
+        &mut self,
+        image: &mut RgbaImage,
+        project: &Project,
+        clip: &Clip,
+        frame: Frame,
+        weight: f32,
+        (width, height): (u32, u32),
+        offline: &mut Vec<ClipId>,
+    ) {
+        let s = &project.settings;
+        let pj = (s.width as f32, s.height as f32);
+        let out = (width as f32, height as f32);
+        let t = clip.transform_at(frame);
+        let opacity = t.opacity * fade_factor(clip, frame) * weight;
+        if opacity <= 0.0 {
+            return;
+        }
+        let color = clip.color_at(frame);
+        let color = (!color.is_identity()).then_some(color);
+        let k = t.crop;
+        let opts = DrawOpts {
+            u0: k.left,
+            u1: 1.0 - k.right,
+            v0: k.top,
+            v1: 1.0 - k.bottom,
+            flip_h: t.flip_h,
+            flip_v: t.flip_v,
+            color,
+        };
+        let cropped = |r: Rect| Rect {
+            x0: r.x0 + r.w * k.left,
+            y0: r.y0 + r.h * k.top,
+            w: r.w * (1.0 - k.left - k.right),
+            h: r.h * (1.0 - k.top - k.bottom),
+        };
+        match &clip.source {
+            ClipSource::SolidColor(c) => {
+                let r = cropped(dest_rect(base_size(Fit::Fill, pj, pj), &t, pj, out));
+                compose::fill_rect(image, r, *c, opacity, color.as_ref());
+            }
+            ClipSource::Text(style) => {
+                // Escala quantizada: zoom animado não rasteriza o texto de novo a cada frame.
+                let scale = (t.scale.max(0.01).log2() * 16.0).round() / 16.0;
+                let k = width as f32 / pj.0 * scale.exp2();
+                let img = self.text.rasterize(style, k);
+                let base = (
+                    img.width() as f32 / k * t.scale / scale.exp2(),
+                    img.height() as f32 / k * t.scale / scale.exp2(),
+                );
+                let unit = pawcut_core::Transform { scale: 1.0, ..t };
+                compose::draw_image(
+                    image,
+                    &img,
+                    cropped(dest_rect(base, &unit, pj, out)),
+                    opacity,
+                    &opts,
+                );
+            }
+            ClipSource::Media(_) => match self.media_layer(project, clip, frame) {
+                Some((img, base)) => compose::draw_image(
+                    image,
+                    &img,
+                    cropped(dest_rect(base, &t, pj, out)),
+                    opacity,
+                    &opts,
+                ),
+                None => {
+                    offline.push(clip.id);
+                    let r = dest_rect(base_size(Fit::Fill, pj, pj), &t, pj, out);
+                    compose::fill_rect(image, r, OFFLINE_COLOR, weight, None);
+                }
+            },
+        }
     }
 
     /// Pixels e tamanho-base de um clipe de mídia; `None` se o arquivo não abre.

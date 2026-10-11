@@ -173,3 +173,53 @@ fn missing_audio_is_silent() {
     );
     assert!(mix(&ed, 0, 100).iter().all(|v| *v == 0.0));
 }
+
+#[test]
+fn dissolve_crossfades_audio() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ed = editor();
+    let wav = kit::dc_audio(dir.path(), "a.wav", 0.5, 2.0);
+    audio_clip(&mut ed, &wav, 0, 0, 30);
+    let b = audio_clip(&mut ed, &wav, 0, 30, 30);
+    ed.apply(Edit::SetDissolve {
+        clip: b,
+        frames: 10,
+    })
+    .unwrap();
+    let out = mix(&ed, 0, 96_000);
+    // no meio do dissolve os dois somam ~0.5·(sen+cos)(45°) ≈ 0.707
+    let mid = out[2 * 48_000];
+    assert!((mid - 0.707).abs() < 0.02, "meio: {mid}");
+    assert!((out[2 * 20_000] - 0.5).abs() < 1e-6);
+    assert!((out[2 * 70_000] - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn volume_keyframes_ramp_the_level() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ed = editor();
+    let c = audio_clip(
+        &mut ed,
+        &kit::dc_audio(dir.path(), "a.wav", 0.5, 1.0),
+        0,
+        0,
+        30,
+    );
+    ed.apply(Edit::SetKeyframe {
+        clip: c,
+        param: Param::VolumeDb,
+        at: 0.0,
+        value: Some(-96.0),
+    })
+    .unwrap();
+    ed.apply(Edit::SetKeyframe {
+        clip: c,
+        param: Param::VolumeDb,
+        at: 20.0,
+        value: Some(0.0),
+    })
+    .unwrap();
+    let out = mix(&ed, 0, 48_000);
+    assert!(out[0] < 0.001);
+    assert!((out[2 * 40_000] - 0.5).abs() < 1e-4);
+}
