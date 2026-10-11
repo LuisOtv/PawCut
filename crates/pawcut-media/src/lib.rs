@@ -1,9 +1,11 @@
 //! Leitura de mídia para o PawCut: metadados, frames de vídeo, imagens e áudio.
 
+mod audio;
 mod error;
 mod probe;
 mod video;
 
+pub use audio::{Pcm, decode_audio, load_audio, peaks};
 pub use error::MediaError;
 pub use image::RgbaImage;
 pub use probe::probe;
