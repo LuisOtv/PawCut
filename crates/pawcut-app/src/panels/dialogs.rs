@@ -15,8 +15,6 @@ use crate::workspace::{Pending, Workspace};
 pub struct DeliverDialog {
     pub output: String,
     pub opts: DeliverOptions,
-    /// Preset rápido que gerou as opções atuais (`None` = personalizado).
-    pub preset: Option<usize>,
     pub only_in_out: bool,
     pub job: Option<ExportJob>,
     pub message: Option<Result<String, String>>,
@@ -202,60 +200,6 @@ impl DeliverOptions {
     }
 }
 
-/// Presets rápidos (preenchem as opções; dá para ajustar depois).
-pub const QUICK_PRESETS: [&str; 7] = [
-    "YouTube 1080p",
-    "YouTube 4K",
-    "Reels / TikTok / Shorts",
-    "Rápido 720p",
-    "Master ProRes",
-    "Só áudio MP3",
-    "Só áudio WAV",
-];
-
-pub fn quick_preset(i: usize) -> DeliverOptions {
-    let base = DeliverOptions::default();
-    match i {
-        0 => DeliverOptions {
-            resolution: 3,
-            ..base
-        },
-        1 => DeliverOptions {
-            codec: VideoCodec::H265,
-            resolution: 1,
-            crf: 20,
-            ..base
-        },
-        2 => DeliverOptions {
-            resolution: 6,
-            fps: 5,
-            crf: 20,
-            ..base
-        },
-        3 => DeliverOptions {
-            resolution: 4,
-            crf: 23,
-            speed: EncoderSpeed::Veryfast,
-            audio_kbps: 128,
-            ..base
-        },
-        4 => DeliverOptions {
-            format: Format::Mov,
-            codec: VideoCodec::ProRes,
-            ..base
-        },
-        5 => DeliverOptions {
-            format: Format::Mp3,
-            audio_kbps: 256,
-            ..base
-        },
-        _ => DeliverOptions {
-            format: Format::Wav,
-            ..base
-        },
-    }
-}
-
 pub struct NewProjectDialog {
     pub preset: usize,
     pub width: u32,
@@ -308,8 +252,7 @@ impl Workspace {
             };
             self.deliver = Some(DeliverDialog {
                 output: dir.join(format!("{stem}.mp4")).display().to_string(),
-                opts: quick_preset(0),
-                preset: Some(0),
+                opts: DeliverOptions::default(),
                 only_in_out: false,
                 job: None,
                 message: None,
@@ -483,32 +426,12 @@ impl Workspace {
         let mut pick_output = false;
         let mut still = false;
         let before = d.opts.clone();
-        let mut picked_preset = None;
         Window::new("Deliver — Exportar")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .default_width(560.0)
             .show(ctx, |ui| {
-                // Presets rápidos, como a fileira de presets do Render Settings do Resolve.
-                ui.label(RichText::new("Presets").strong());
-                ui.horizontal_wrapped(|ui| {
-                    for (i, name) in QUICK_PRESETS.iter().enumerate() {
-                        if ui.selectable_label(d.preset == Some(i), *name).clicked() {
-                            picked_preset = Some(i);
-                        }
-                    }
-                    ui.label(
-                        RichText::new(if d.preset.is_none() {
-                            "· personalizado"
-                        } else {
-                            ""
-                        })
-                        .weak(),
-                    );
-                });
-                ui.separator();
-
                 let label = |ui: &mut egui::Ui, text: &str| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(RichText::new(text).color(crate::theme::TEXT_DIM));
@@ -781,23 +704,17 @@ impl Workspace {
                     None => {}
                 }
             });
-        if let Some(i) = picked_preset {
-            d.opts = quick_preset(i);
-        }
         // Codec que não cabe no formato escolhido volta para o primeiro que cabe.
         if let Some(first) = d.opts.format.codecs().first()
             && !d.opts.format.codecs().contains(&d.opts.codec)
         {
             d.opts.codec = *first;
         }
-        if d.opts != before {
-            d.preset = picked_preset;
-            if d.opts.format != before.format {
-                // Troca a extensão do arquivo junto com o formato.
-                let mut out = PathBuf::from(d.output.trim());
-                out.set_extension(d.opts.format.ext());
-                d.output = out.display().to_string();
-            }
+        if d.opts.format != before.format {
+            // Troca a extensão do arquivo junto com o formato.
+            let mut out = PathBuf::from(d.output.trim());
+            out.set_extension(d.opts.format.ext());
+            d.output = out.display().to_string();
         }
         if pick_output {
             let ext = d.opts.format.ext();
@@ -1133,7 +1050,12 @@ mod tests {
     fn deliver_options_build_export_settings() {
         let project = Project::new(ProjectSettings::default());
         let (w, h) = (project.settings.width, project.settings.height);
-        let reels = quick_preset(2).export_settings(&project, "a.mp4".into(), None);
+        let reels = DeliverOptions {
+            resolution: 6,
+            fps: 5,
+            ..DeliverOptions::default()
+        }
+        .export_settings(&project, "a.mp4".into(), None);
         assert_eq!(reels.size, Some((1080, 1920)));
         assert_eq!(reels.fps, Some(FrameRate::new(30, 1)));
         let same = DeliverOptions::default().export_settings(&project, "a.mp4".into(), None);
@@ -1151,9 +1073,12 @@ mod tests {
         assert_eq!(s.audio_kbps, None);
         assert_eq!(s.size, Some((640, 360)));
         assert_eq!(s.range, Some((10, 20)));
+        let mp3 = DeliverOptions {
+            format: Format::Mp3,
+            ..DeliverOptions::default()
+        };
         assert_eq!(
-            quick_preset(5)
-                .export_settings(&project, "a.mp3".into(), None)
+            mp3.export_settings(&project, "a.mp3".into(), None)
                 .audio_only,
             Some(AudioFormat::Mp3)
         );

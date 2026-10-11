@@ -260,6 +260,7 @@ impl PawCutApp {
             for (panel, icon, label) in [
                 (Panel::MediaPool, Icon::MediaPool, "Media Pool"),
                 (Panel::Effects, Icon::Effects, "Effects"),
+                (Panel::Inspector, Icon::Inspector, "Inspector"),
             ] {
                 let on = self.layout.is_visible(panel);
                 if icons::button(ui, icon, 15.0, on, label).clicked() {
@@ -273,15 +274,27 @@ impl PawCutApp {
                 ui.add_space(10.0);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let on = self.layout.is_visible(Panel::Inspector);
-                ui.label(egui::RichText::new("Inspector").size(11.5).color(if on {
+                // Deliver: abre a janela de exportação (fecha se não estiver exportando).
+                let open = self.ws.deliver.is_some();
+                let tip = self.ws.tip("Exportar o vídeo", Action::Deliver);
+                ui.label(egui::RichText::new("Deliver").size(11.5).color(if open {
                     theme::TEXT
                 } else {
                     theme::TEXT_DIM
                 }));
-                if icons::button(ui, Icon::Inspector, 15.0, on, "Inspector").clicked() {
-                    self.toggle_panel(Panel::Inspector);
+                if icons::button(ui, Icon::DeliverPage, 15.0, open, &tip).clicked() {
+                    if !open {
+                        self.ws.open_deliver();
+                    } else if !self.ws.deliver.as_ref().is_some_and(|d| d.job.is_some()) {
+                        self.ws.deliver = None;
+                    }
                 }
+                ui.add_space(14.0);
+                ui.label(
+                    egui::RichText::new(self.status_text())
+                        .size(11.0)
+                        .color(theme::TEXT_DIM),
+                );
             });
         });
         let title = self.ws.st.title().replace(" — PawCut", "");
@@ -294,24 +307,9 @@ impl PawCutApp {
         );
     }
 
-    /// Barra de páginas do Resolve (embaixo, centralizada) e a linha de status.
-    fn page_bar(&mut self, ui: &mut egui::Ui) {
-        let rect = ui.max_rect();
-        ui.painter().text(
-            rect.left_center() + egui::vec2(12.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            "PawCut",
-            theme::text(14.0),
-            theme::TEXT_DIM,
-        );
-        // Direita: projeto, zoom, ferramenta, proxies e quando salvou.
-        let p = &self.ws.project_arc.settings;
-        let mut info = vec![format!("{}×{} · {} fps", p.width, p.height, p.fps.as_f64())];
-        info.push(format!("zoom {:.0}%", self.ws.tl.ppf / 3.0 * 100.0));
-        info.push(match self.ws.st.tool {
-            crate::state::Tool::Selection => "Seleção".into(),
-            crate::state::Tool::Blade => "Lâmina".into(),
-        });
+    /// Status discreto ao lado do Deliver: proxies, quando salvou, sem caixa de som.
+    fn status_text(&self) -> String {
+        let mut info = Vec::new();
         if !self.ws.proxy_jobs.is_empty() {
             info.push(format!("gerando {} proxy", self.ws.proxy_jobs.len()));
         }
@@ -333,66 +331,13 @@ impl PawCutApp {
         {
             info.push("sem saída de áudio".into());
         }
-        ui.painter().text(
-            rect.right_center() - egui::vec2(theme::PAD + 4.0, 0.0),
-            egui::Align2::RIGHT_CENTER,
-            info.join("   ·   "),
-            theme::text(11.0),
-            theme::TEXT_DIM,
-        );
-
-        let pages = egui::Rect::from_center_size(rect.center(), egui::vec2(170.0, rect.height()));
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                .max_rect(pages)
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-            |ui| {
-                let deliver_open = self.ws.deliver.is_some();
-                for (icon, label, is_deliver) in [
-                    (Icon::EditPage, "Edit", false),
-                    (Icon::DeliverPage, "Deliver", true),
-                ] {
-                    let on = deliver_open == is_deliver;
-                    let (r, resp) = ui
-                        .allocate_exact_size(egui::vec2(80.0, rect.height()), egui::Sense::click());
-                    if resp.hovered() {
-                        ui.painter()
-                            .rect_filled(r.shrink(2.0), 4.0, theme::BAR_LIGHT);
-                    }
-                    let color = if on { Color32::WHITE } else { theme::TEXT_DIM };
-                    icons::paint(
-                        ui.painter(),
-                        egui::Rect::from_center_size(
-                            r.center() - egui::vec2(0.0, 7.0),
-                            egui::vec2(18.0, 18.0),
-                        ),
-                        icon,
-                        if on { theme::ACCENT } else { color },
-                    );
-                    ui.painter().text(
-                        r.center() + egui::vec2(0.0, 12.0),
-                        egui::Align2::CENTER_CENTER,
-                        label,
-                        theme::text(10.5),
-                        color,
-                    );
-                    if resp.clicked() && !on {
-                        if is_deliver {
-                            self.ws.open_deliver();
-                        } else if !self.ws.deliver.as_ref().is_some_and(|d| d.job.is_some()) {
-                            // Exportação em andamento continua visível até terminar ou ser cancelada.
-                            self.ws.deliver = None;
-                        }
-                    }
-                }
-            },
-        );
+        info.join("  ·  ")
     }
 
     /// Avisos no canto de baixo, por cima de tudo, que somem sozinhos (clique fecha).
     fn toasts_ui(&mut self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
-        let mut y = screen.bottom() - 56.0;
+        let mut y = screen.bottom() - 16.0;
         let mut close = None;
         for (i, (text, error, born)) in self.ws.toasts.iter().enumerate().rev() {
             let age = born.elapsed().as_secs_f32();
@@ -567,10 +512,6 @@ impl eframe::App for PawCutApp {
             .exact_size(34.0)
             .frame(bar(theme::BAR))
             .show(ui, |ui| self.interface_bar(ui));
-        egui::Panel::bottom("pages")
-            .exact_size(44.0)
-            .frame(bar(theme::BAR))
-            .show(ui, |ui| self.page_bar(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let style = theme::dock_style(ui.style().as_ref());
             DockArea::new(&mut self.layout.dock)

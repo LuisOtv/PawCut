@@ -29,7 +29,6 @@ pub enum Icon {
     MediaPool,
     Effects,
     Inspector,
-    EditPage,
     DeliverPage,
     Insert,
     Overwrite,
@@ -278,22 +277,6 @@ pub fn paint(painter: &Painter, r: Rect, icon: Icon, c: Color32) {
                 painter.line_segment([p(r, 0.1, y), p(r, 0.9, y)], s);
                 painter.circle_filled(p(r, x, y), r.width() * 0.1, c);
             }
-        }
-        Icon::EditPage => {
-            painter.rect_filled(
-                Rect::from_min_max(p(r, 0.1, 0.22), p(r, 0.55, 0.42)),
-                1.0,
-                c,
-            );
-            painter.rect_filled(
-                Rect::from_min_max(p(r, 0.35, 0.58), p(r, 0.9, 0.78)),
-                1.0,
-                c,
-            );
-            painter.line_segment(
-                [p(r, 0.62, 0.1), p(r, 0.62, 0.9)],
-                Stroke::new(s.width, theme::PLAYHEAD),
-            );
         }
         Icon::DeliverPage => {
             painter.add(poly(vec![
