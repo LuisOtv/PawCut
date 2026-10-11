@@ -68,3 +68,18 @@ fn library_can_move_to_the_render_thread() {
     fn assert_send<T: Send>() {}
     assert_send::<MediaLibrary>();
 }
+
+#[test]
+fn audio_cache_stays_within_its_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = kit::dc_audio(dir.path(), "a.wav", 0.5, 1.0);
+    let b = kit::dc_audio(dir.path(), "b.wav", 0.25, 1.0);
+    let mut lib = MediaLibrary::new((64, 36), 48_000, None);
+    let first = lib.audio(&a, 1.0).unwrap();
+    lib.set_audio_budget(first.samples.len() * 4 + 1000);
+    lib.audio(&b, 1.0).unwrap();
+    assert!(lib.audio_bytes() <= first.samples.len() * 4 + 1000);
+    let again = lib.audio(&a, 1.0).unwrap();
+    assert!(!Arc::ptr_eq(&first, &again), "o primeiro foi despejado e decodificado de novo");
+    assert_eq!(*first, *again);
+}

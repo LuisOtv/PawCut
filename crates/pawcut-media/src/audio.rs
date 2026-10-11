@@ -164,42 +164,54 @@ fn cache_file(dir: &Path, path: &Path, sample_rate: u32, speed: f64) -> Option<P
 }
 
 /// Igual a `decode_audio`, mas guarda o resultado em `cache_dir` para abrir rápido da próxima vez.
-pub fn load_audio(
-    path: &Path,
-    sample_rate: u32,
-    speed: f64,
-    cache_dir: Option<&Path>,
-) -> Result<Pcm, MediaError> {
+pub fn load_audio(path: &Path, sample_rate: u32, speed: f64, cache_dir: Option<&Path>) -> Result<Pcm, MediaError> {
     let file = cache_dir.and_then(|d| cache_file(d, path, sample_rate, speed));
     if let Some(file) = &file
-        && let Ok(bytes) = fs::read(file)
+        && let Some(samples) = read_cache(file)
     {
-        let samples = bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|b| f32::from_le_bytes(*b))
-            .collect();
-        return Ok(Pcm {
-            sample_rate,
-            samples,
-        });
+        return Ok(Pcm { sample_rate, samples });
     }
     let pcm = decode_audio(path, sample_rate, speed)?;
     if let Some(file) = file {
-        let io = |source| MediaError::Cache {
-            path: file.clone(),
-            source,
-        };
-        if let Some(dir) = file.parent() {
-            fs::create_dir_all(dir).map_err(io)?;
-        }
-        let bytes: Vec<u8> = pcm.samples.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let tmp = file.with_extension("tmp");
-        fs::write(&tmp, bytes).map_err(io)?;
-        fs::rename(&tmp, &file).map_err(io)?;
+        write_cache(&file, &pcm.samples).map_err(|source| MediaError::Cache { path: file.clone(), source })?;
     }
     Ok(pcm)
+}
+
+/// Lê o cache em pedaços, sem guardar uma cópia inteira em bytes.
+fn read_cache(file: &Path) -> Option<Vec<f32>> {
+    use std::io::Read;
+    let mut f = fs::File::open(file).ok()?;
+    let len = f.metadata().ok()?.len() as usize;
+    let mut samples = Vec::with_capacity(len / 4);
+    let mut chunk = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut chunk).ok()?;
+        if n == 0 {
+            break;
+        }
+        // Os pedaços de 1 MiB são múltiplos de 4, exceto um final truncado (cache corrompido).
+        if n % 4 != 0 {
+            return None;
+        }
+        samples.extend(chunk[..n].as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)));
+    }
+    Some(samples)
+}
+
+fn write_cache(file: &Path, samples: &[f32]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = file.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let tmp = file.with_extension("tmp");
+    let mut out = std::io::BufWriter::new(fs::File::create(&tmp)?);
+    for v in samples {
+        out.write_all(&v.to_le_bytes())?;
+    }
+    out.flush()?;
+    drop(out);
+    fs::rename(&tmp, file)
 }
 
 /// Mínimo e máximo (mono) de cada um dos `buckets` pedaços iguais: a waveform da timeline.

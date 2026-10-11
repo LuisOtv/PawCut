@@ -14,6 +14,9 @@ use crate::{MediaError, Pcm, VideoSource, load_audio};
 /// Quantos frames de vídeo decodificados ficam guardados (cada um ocupa até o tamanho do projeto).
 const FRAME_CACHE: usize = 32;
 
+/// Quanto PCM decodificado fica na memória (1 h de estéreo 48 kHz ≈ 1,4 GB).
+const AUDIO_BUDGET: usize = 1_500_000_000;
+
 /// Pasta padrão do cache de áudio: `$XDG_CACHE_HOME/pawcut` ou `~/.cache/pawcut`.
 pub fn default_cache_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
@@ -87,7 +90,9 @@ pub struct MediaLibrary {
     videos: HashMap<PathBuf, VideoSource>,
     frames: LruCache<(PathBuf, i64), Arc<RgbaImage>>,
     images: HashMap<PathBuf, Arc<RgbaImage>>,
-    audio: HashMap<(PathBuf, u64), Arc<Pcm>>,
+    audio: LruCache<(PathBuf, u64), Arc<Pcm>>,
+    audio_bytes: usize,
+    audio_budget: usize,
     failed: HashSet<PathBuf>,
 }
 
@@ -101,7 +106,9 @@ impl MediaLibrary {
             videos: HashMap::new(),
             frames: LruCache::new(NonZeroUsize::new(FRAME_CACHE).expect("maior que zero")),
             images: HashMap::new(),
-            audio: HashMap::new(),
+            audio: LruCache::unbounded(),
+            audio_bytes: 0,
+            audio_budget: AUDIO_BUDGET,
             failed: HashSet::new(),
         }
     }
@@ -161,18 +168,39 @@ impl MediaLibrary {
         Ok(img)
     }
 
-    /// Áudio do arquivo já na velocidade `speed`.
+    /// Áudio do arquivo já na velocidade `speed`. Os menos usados saem da memória
+    /// quando o total passa do orçamento (voltam do cache em disco se pedidos de novo).
     pub fn audio(&mut self, path: &Path, speed: f64) -> Result<Arc<Pcm>, MediaError> {
         self.check(path)?;
         let key = (path.to_path_buf(), speed.to_bits());
         if let Some(pcm) = self.audio.get(&key) {
             return Ok(pcm.clone());
         }
-        let loaded =
-            load_audio(path, self.sample_rate, speed, self.cache_dir.as_deref()).map(Arc::new);
+        let loaded = load_audio(path, self.sample_rate, speed, self.cache_dir.as_deref()).map(Arc::new);
         let pcm = self.remember_failure(path, loaded)?;
-        self.audio.insert(key, pcm.clone());
+        self.audio_bytes += pcm.samples.len() * 4;
+        self.audio.put(key, pcm.clone());
+        self.evict_audio();
         Ok(pcm)
+    }
+
+    fn evict_audio(&mut self) {
+        while self.audio_bytes > self.audio_budget && self.audio.len() > 1 {
+            match self.audio.pop_lru() {
+                Some((_, old)) => self.audio_bytes -= old.samples.len() * 4,
+                None => break,
+            }
+        }
+    }
+
+    pub fn set_audio_budget(&mut self, bytes: usize) {
+        self.audio_budget = bytes;
+        self.evict_audio();
+    }
+
+    /// Bytes de PCM na memória agora.
+    pub fn audio_bytes(&self) -> usize {
+        self.audio_bytes
     }
 
     /// Esquece tudo sobre o arquivo (depois de um Relink ou de o arquivo voltar).
@@ -180,7 +208,12 @@ impl MediaLibrary {
         self.failed.remove(path);
         self.videos.remove(path);
         self.images.remove(path);
-        self.audio.retain(|(p, _), _| p != path);
+        let stale: Vec<_> = self.audio.iter().filter(|((p, _), _)| p == path).map(|(k, _)| k.clone()).collect();
+        for k in stale {
+            if let Some(old) = self.audio.pop(&k) {
+                self.audio_bytes -= old.samples.len() * 4;
+            }
+        }
         let stale: Vec<_> = self
             .frames
             .iter()
