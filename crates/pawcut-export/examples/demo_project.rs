@@ -82,6 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             y: 400.0,
             scale: 0.5,
             opacity: 0.8,
+            ..Default::default()
         }),
     })?;
     let title = TextStyle {
@@ -89,6 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         font: "Sans".into(),
         size: 96.0,
         color: Rgba::new(255, 255, 255, 255),
+        ..Default::default()
     };
     let t = ed.apply(Edit::Overwrite {
         at: 0,

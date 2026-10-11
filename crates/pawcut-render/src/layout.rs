@@ -88,6 +88,7 @@ mod tests {
             y: 20.0,
             scale: 0.5,
             opacity: 1.0,
+            ..Default::default()
         };
         let r = dest_rect(p, &t, p, p);
         assert_eq!(

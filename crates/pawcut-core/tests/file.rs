@@ -24,6 +24,7 @@ fn sample_editor() -> Editor {
         font: "Sans".into(),
         size: 72.0,
         color: Rgba::new(255, 255, 0, 255),
+        ..Default::default()
     });
     place(&mut ed, v2, text, 10, 0.0, 60);
     ed

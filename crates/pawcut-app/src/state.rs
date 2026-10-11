@@ -380,6 +380,7 @@ impl AppState {
                 font: "Sans".into(),
                 size: 96.0,
                 color: Rgba::new(255, 255, 255, 255),
+                ..Default::default()
             }),
             Generator::SolidColor => ClipSource::SolidColor(Rgba::new(40, 40, 40, 255)),
         };

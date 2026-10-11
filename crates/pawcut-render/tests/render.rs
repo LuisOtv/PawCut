@@ -107,6 +107,7 @@ fn position_is_from_center_with_y_up() {
             y: 45.0,
             scale: 0.25,
             opacity: 1.0,
+            ..Default::default()
         }),
     );
     let out = renderer().render_frame(ed.project(), 0, W, H);
@@ -218,6 +219,7 @@ fn text_is_drawn_around_the_center() {
         font: "Sans".into(),
         size: 40.0,
         color: WHITE,
+        ..Default::default()
     };
     put(
         &mut ed,

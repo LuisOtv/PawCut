@@ -17,6 +17,7 @@ fn set_transform_volume_and_fades() {
         y: -5.0,
         scale: 0.5,
         opacity: 0.8,
+        ..Default::default()
     };
     ed.apply(set(c, ClipChange::Transform(t))).unwrap();
     ed.apply(set(c, ClipChange::VolumeDb(-6.0))).unwrap();
@@ -66,6 +67,7 @@ fn only_generators_can_change_source() {
         font: "Sans".into(),
         size: 64.0,
         color: Rgba::new(255, 255, 255, 255),
+        ..Default::default()
     });
     ed.apply(set(g, ClipChange::Source(text.clone()))).unwrap();
     assert_eq!(clip(&ed, g).source, text);
@@ -235,6 +237,7 @@ fn non_finite_values_are_rejected() {
             font: "Sans".into(),
             size,
             color: Rgba::new(255, 255, 255, 255),
+            ..Default::default()
         })
     };
     let placed = ed.apply(Edit::Overwrite {
