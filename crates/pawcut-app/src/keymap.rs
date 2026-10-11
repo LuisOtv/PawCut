@@ -45,10 +45,18 @@ pub enum Action {
     ZoomIn,
     ZoomOut,
     ZoomToFit,
+    RippleTrimStart,
+    RippleTrimEnd,
+    Copy,
+    Paste,
+    AddMarker,
+    PrevMarker,
+    NextMarker,
+    AddDissolve,
 }
 
 impl Action {
-    pub const ALL: [Action; 37] = [
+    pub const ALL: [Action; 45] = [
         Action::PlayPause,
         Action::PlayForward,
         Action::Stop,
@@ -86,6 +94,14 @@ impl Action {
         Action::ZoomIn,
         Action::ZoomOut,
         Action::ZoomToFit,
+        Action::RippleTrimStart,
+        Action::RippleTrimEnd,
+        Action::Copy,
+        Action::Paste,
+        Action::AddMarker,
+        Action::PrevMarker,
+        Action::NextMarker,
+        Action::AddDissolve,
     ];
 
     pub fn label(self) -> &'static str {
@@ -127,6 +143,14 @@ impl Action {
             Action::ZoomIn => "Zoom +",
             Action::ZoomOut => "Zoom −",
             Action::ZoomToFit => "Zoom para caber",
+            Action::RippleTrimStart => "Cortar do início até o cursor (ripple)",
+            Action::RippleTrimEnd => "Cortar do cursor até o fim (ripple)",
+            Action::Copy => "Copiar clipes",
+            Action::Paste => "Colar no cursor",
+            Action::AddMarker => "Adicionar marcador",
+            Action::PrevMarker => "Marcador anterior",
+            Action::NextMarker => "Próximo marcador",
+            Action::AddDissolve => "Cross dissolve no corte",
         }
     }
 }
@@ -269,6 +293,14 @@ impl Keymap {
             (A::ZoomIn, vec![K::ctrl(Key::Equals), K::ctrl(Key::Plus)]),
             (A::ZoomOut, vec![K::ctrl(Key::Minus)]),
             (A::ZoomToFit, vec![K::shift(Key::Z)]),
+            (A::RippleTrimStart, vec![K::shift(Key::OpenBracket)]),
+            (A::RippleTrimEnd, vec![K::shift(Key::CloseBracket)]),
+            (A::Copy, vec![K::ctrl(Key::C)]),
+            (A::Paste, vec![K::ctrl(Key::V)]),
+            (A::AddMarker, vec![K::new(Key::M)]),
+            (A::PrevMarker, vec![K::shift(Key::ArrowUp)]),
+            (A::NextMarker, vec![K::shift(Key::ArrowDown)]),
+            (A::AddDissolve, vec![K::ctrl(Key::T)]),
         ];
         Self { bindings: b }
     }

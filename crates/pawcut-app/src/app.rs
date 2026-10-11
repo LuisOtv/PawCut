@@ -478,6 +478,7 @@ impl eframe::App for PawCutApp {
                     })
                     .unwrap_or_default(),
                 DragPayload::Generator(g) => format!("{g:?}"),
+                DragPayload::Dissolve => "Cross Dissolve".to_string(),
             };
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Tooltip,

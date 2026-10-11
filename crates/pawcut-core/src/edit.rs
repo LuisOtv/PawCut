@@ -155,6 +155,12 @@ pub enum Edit {
         at: f64,
         value: Option<f32>,
     },
+    /// Cola cópias completas de clipes em `at` (o `start` de cada um é o deslocamento),
+    /// por cima do que houver; ganham ids novos e os links são refeitos entre as cópias.
+    Paste {
+        at: Frame,
+        clips: Vec<(TrackId, Clip)>,
+    },
     /// Tira todos os keyframes do parâmetro (volta ao valor fixo).
     ClearKeyframes {
         clip: ClipId,
@@ -290,6 +296,7 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
             Ok(Outcome::default())
         }
         Edit::SetDissolve { clip, frames } => set_dissolve(p, clip, frames),
+        Edit::Paste { at, clips } => paste(p, at, clips),
         Edit::RippleTrimToPlayhead { clips, edge, at } => ripple_trim_to(p, clips, edge, at),
         Edit::SetKeyframe {
             clip,
@@ -906,4 +913,39 @@ fn ripple_trim_to(
         Edge::End => delete(p, right, true)?,
     };
     Ok(Outcome::default())
+}
+
+fn paste(p: &mut Project, at: Frame, clips: Vec<(TrackId, Clip)>) -> Result<Outcome, EditError> {
+    if clips.is_empty() {
+        return Err(EditError::InvalidValue("nada para colar"));
+    }
+    for (tid, c) in &clips {
+        let track = unlocked_track(p, *tid)?;
+        let draft = Placement {
+            track: *tid,
+            draft: ClipDraft {
+                source: c.source.clone(),
+                source_start: c.source_start,
+                duration: 1,
+            },
+        };
+        validate_draft(p, &draft)?;
+        if c.duration < 1 || at + c.start < 0 {
+            return Err(EditError::InvalidValue("clipe colado inválido"));
+        }
+        let _ = track;
+    }
+    let mut links = HashMap::new();
+    let mut out = Outcome::default();
+    for (tid, mut c) in clips {
+        c.id = ClipId(p.ids.fresh());
+        c.start += at;
+        c.dissolve_in = 0;
+        let (track, ids) = p.track_and_ids(tid).ok_or(EditError::TrackNotFound(tid))?;
+        c.link = relink(c.link, &mut links, ids);
+        clear_range(track, c.start, c.end(), ids);
+        out.clips.push(c.id);
+        insert_sorted(track, c);
+    }
+    Ok(out)
 }

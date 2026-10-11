@@ -428,3 +428,40 @@ fn hovering_a_media_previews_it_at_the_mouse_position() {
         "tirando o mouse volta para a timeline"
     );
 }
+
+#[test]
+fn dragging_the_fade_handle_sets_the_fade() {
+    let mut h = harness(with_solid);
+    let center = h.state().tl_point(TrackKind::Video, 0, 0.0);
+    // alça do fade in: canto de cima à esquerda (4 px para dentro), metade da altura da linha acima do centro
+    let handle = egui::pos2(center.x + 4.0, center.y - 25.0 + 4.0);
+    let to = egui::pos2(h.state().tl_point(TrackKind::Video, 0, 30.0).x, handle.y);
+    drag(&mut h, handle, to);
+    let c = &h.state().st.project().video_tracks[0].clips[0];
+    assert!((28..=32).contains(&c.fade_in), "fade in {}", c.fade_in);
+    assert_eq!(
+        v1_spans(&h),
+        vec![(0, 150)],
+        "a alça não move nem apara o clipe"
+    );
+}
+
+#[test]
+fn keyboard_markers_ripple_trim_and_paste() {
+    let mut h = harness(with_solid);
+    h.state_mut().st.set_playhead(40);
+    h.key_press(egui::Key::M);
+    h.run_steps(2);
+    assert_eq!(h.state().st.project().markers.len(), 1);
+    h.key_press_modifiers(Modifiers::SHIFT, egui::Key::OpenBracket);
+    h.run_steps(2);
+    assert_eq!(v1_spans(&h), vec![(0, 110)]);
+    assert_eq!(h.state().st.playhead, 0);
+    let c = h.state().st.project().video_tracks[0].clips[0].id;
+    h.state_mut().st.select(c, false);
+    h.key_press_modifiers(Modifiers::CTRL, egui::Key::C);
+    h.state_mut().st.set_playhead(200);
+    h.key_press_modifiers(Modifiers::CTRL, egui::Key::V);
+    h.run_steps(2);
+    assert_eq!(v1_spans(&h), vec![(0, 110), (200, 310)]);
+}

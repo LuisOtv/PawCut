@@ -3,12 +3,15 @@
 use pawcut_core::{Clip, ClipSource, Frame, Param, Project};
 use pawcut_media::MediaLibrary;
 
+/// Janela `[início, fim)` em frames.
+type Window = Option<(Frame, Frame)>;
+
 /// Trecho em que o clipe soa, já contando os dissolves: `(início, fim)` em frames,
 /// mais a janela do dissolve de entrada e a do de saída (do clipe seguinte).
 fn audible(
     clips: &[Clip],
     i: usize,
-) -> (Frame, Frame, Option<(Frame, Frame)>, Option<(Frame, Frame)>) {
+) -> (Frame, Frame, Window, Window) {
     let c = &clips[i];
     let into = c
         .dissolve_window()
@@ -66,7 +69,7 @@ pub(crate) fn mix(
                 .is_some_and(|k| !k.is_empty());
             let fixed_gain = 10f32.powf(clip.volume_db / 20.0);
             let samples_per_frame = sr as f64 / fps.as_f64();
-            let window = |w: Option<(Frame, Frame)>| w.map(|(x, y)| (to_sample(x), to_sample(y)));
+            let window = |w: Window| w.map(|(x, y)| (to_sample(x), to_sample(y)));
             let (into, out_of) = (window(into), window(out_of));
             for n in a..b {
                 let mut g = if animated {

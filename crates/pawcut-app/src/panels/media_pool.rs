@@ -243,40 +243,28 @@ impl Workspace {
         });
         ui.add_space(6.0);
         ui.indent("toolbox", |ui| {
-            ui.label(
-                egui::RichText::new("Títulos")
-                    .color(theme::TEXT_DIM)
-                    .small(),
-            );
-            self.toolbox_item(ui, "Texto", theme::CLIP_TITLE, Generator::Text);
+            ui.label(egui::RichText::new("Transições").color(theme::TEXT_DIM).small());
+            self.toolbox_entry(ui, "Cross Dissolve", Color32::from_rgb(0x8a, 0x8a, 0x95), DragPayload::Dissolve);
             ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new("Geradores")
-                    .color(theme::TEXT_DIM)
-                    .small(),
-            );
-            self.toolbox_item(
-                ui,
-                "Cor sólida",
-                theme::CLIP_GENERATOR,
-                Generator::SolidColor,
-            );
+            ui.label(egui::RichText::new("Títulos").color(theme::TEXT_DIM).small());
+            self.toolbox_item(ui, "Título", theme::CLIP_TITLE, Generator::Text);
+            self.toolbox_item(ui, "Lower third", theme::CLIP_TITLE, Generator::LowerThird);
+            self.toolbox_item(ui, "Legenda", theme::CLIP_TITLE, Generator::Caption);
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Geradores").color(theme::TEXT_DIM).small());
+            self.toolbox_item(ui, "Cor sólida", theme::CLIP_GENERATOR, Generator::SolidColor);
             ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("Arraste para uma faixa de vídeo, ou dê dois cliques.")
-                    .color(theme::TEXT_DIM)
-                    .small(),
-            );
+            ui.label(egui::RichText::new("Arraste para a timeline (transições: em cima de um corte), ou dê dois cliques.").color(theme::TEXT_DIM).small());
         });
     }
 
-    fn toolbox_item(
+    fn toolbox_entry(
         &mut self,
         ui: &mut egui::Ui,
         label: &str,
         color: Color32,
-        generator: Generator,
-    ) {
+        payload: DragPayload,
+    ) -> egui::Response {
         let (rect, resp) = ui.allocate_exact_size(
             vec2(ui.available_width() - 8.0, 26.0),
             Sense::click_and_drag(),
@@ -299,8 +287,24 @@ impl Workspace {
             theme::text(12.5),
             theme::TEXT,
         );
-        resp.dnd_set_drag_payload(DragPayload::Generator(generator));
-        if resp.double_clicked() {
+        resp.dnd_set_drag_payload(payload);
+        if resp.double_clicked() && payload == DragPayload::Dissolve {
+            self.st.add_dissolve();
+        }
+        resp
+    }
+
+    fn toolbox_item(
+        &mut self,
+        ui: &mut egui::Ui,
+        label: &str,
+        color: Color32,
+        generator: Generator,
+    ) {
+        if self
+            .toolbox_entry(ui, label, color, DragPayload::Generator(generator))
+            .double_clicked()
+        {
             let track = self.project_arc.video_tracks.len();
             self.st.drop_generator(generator, track, self.st.playhead);
         }

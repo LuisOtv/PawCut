@@ -85,6 +85,93 @@ impl Workspace {
         self.confirm_ui(ctx);
         self.recovery_ui(ctx);
         self.export_quit_ui(ctx);
+        self.marker_ui(ctx);
+    }
+
+    fn marker_ui(&mut self, ctx: &egui::Context) {
+        let Some(frame) = self.editing_marker else {
+            return;
+        };
+        let Some(mut marker) = self
+            .project_arc
+            .markers
+            .iter()
+            .find(|m| m.frame == frame)
+            .cloned()
+        else {
+            self.editing_marker = None;
+            return;
+        };
+        let fps = self.project_arc.settings.fps;
+        let mut open = true;
+        let mut changed = false;
+        let mut delete = false;
+        Window::new(format!("Marcador {}", format_timecode(frame, fps)))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Nota");
+                changed |= ui
+                    .add(
+                        egui::TextEdit::multiline(&mut marker.note)
+                            .desired_rows(3)
+                            .desired_width(260.0),
+                    )
+                    .changed();
+                ui.horizontal(|ui| {
+                    for (r, g, b) in [
+                        (70, 140, 230),
+                        (90, 200, 120),
+                        (240, 200, 70),
+                        (240, 120, 50),
+                        (220, 70, 70),
+                        (180, 110, 220),
+                    ] {
+                        let c = pawcut_core::Rgba::new(r, g, b, 255);
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
+                        ui.painter()
+                            .rect_filled(rect, 3.0, egui::Color32::from_rgb(r, g, b));
+                        if marker.color == c {
+                            ui.painter().rect_stroke(
+                                rect,
+                                3.0,
+                                egui::Stroke::new(2.0, egui::Color32::WHITE),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                        if resp.clicked() {
+                            marker.color = c;
+                            changed = true;
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Apagar marcador").clicked() {
+                        delete = true;
+                    }
+                });
+            });
+        if delete {
+            self.st.apply(pawcut_core::Edit::SetMarker {
+                frame,
+                marker: None,
+            });
+            self.editing_marker = None;
+        } else if changed {
+            self.st.apply_coalescing(
+                pawcut_core::Edit::SetMarker {
+                    frame,
+                    marker: Some(marker),
+                },
+                &format!("marker-{frame}"),
+            );
+        }
+        if !open {
+            self.editing_marker = None;
+        }
     }
 
     fn deliver_ui(&mut self, ctx: &egui::Context) {

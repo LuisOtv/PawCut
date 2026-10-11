@@ -92,6 +92,8 @@ pub struct Workspace {
     /// Fechar o app assim que a exportação em andamento terminar (ou for cancelada).
     pub quit_after_export: bool,
     pub export_quit_prompt: bool,
+    /// Marcador aberto para edição (duplo clique na régua).
+    pub editing_marker: Option<Frame>,
     /// Mídia sob o mouse no Media Pool e a posição (0..1) na miniatura: o viewer mostra ela.
     pub hover_preview: Option<(MediaId, f32)>,
     pub hover_preview_next: Option<(MediaId, f32)>,
@@ -140,6 +142,7 @@ impl Workspace {
             quit_after_export: false,
             export_quit_prompt: false,
             file_dialog: None,
+            editing_marker: None,
             hover_preview: None,
             hover_preview_next: None,
             source_panel_visible: false,
@@ -505,6 +508,14 @@ impl Workspace {
             Action::Deliver => self.open_deliver(),
             Action::ZoomIn => self.zoom(1.4),
             Action::ZoomOut => self.zoom(1.0 / 1.4),
+            Action::RippleTrimStart => st.ripple_trim(pawcut_core::Edge::Start),
+            Action::RippleTrimEnd => st.ripple_trim(pawcut_core::Edge::End),
+            Action::Copy => st.copy_selection(),
+            Action::Paste => st.paste(),
+            Action::AddMarker => st.add_marker(),
+            Action::PrevMarker => st.go_to_marker(false),
+            Action::NextMarker => st.go_to_marker(true),
+            Action::AddDissolve => st.add_dissolve(),
             Action::ZoomToFit => {
                 let w = self.tl_width;
                 self.zoom_to_fit(w);

@@ -2,8 +2,8 @@
 
 use egui::{Align2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 use pawcut_core::{
-    Clip, ClipId, ClipSource, Edge, Edit, Frame, MediaKind, Project, TrackFlags, TrackKind,
-    format_timecode,
+    Clip, ClipChange, ClipId, ClipSource, Edge, Edit, Frame, MediaKind, Project, TrackFlags,
+    TrackKind, format_timecode,
 };
 
 use super::DragPayload;
@@ -30,6 +30,11 @@ pub struct Row {
 #[derive(Debug, Clone)]
 enum TlDrag {
     Scrub,
+    /// Alça de fade no canto de cima do clipe.
+    Fade {
+        clip: ClipId,
+        edge: Edge,
+    },
     Move {
         anchor: ClipId,
         clips: Vec<ClipId>,
@@ -316,7 +321,10 @@ impl Workspace {
         let pointer = lanes_resp.interact_pointer_pos().or(lanes_resp.hover_pos());
         let hovered_clip = pointer.and_then(|pos| self.hit_clip(&p, &layout, pos));
 
-        if let Some((_, edge)) = hovered_clip.filter(|_| self.tl.drag.is_none()) {
+        let fade_hit = pointer.and_then(|pos| self.hit_fade(&p, &layout, pos));
+        if fade_hit.is_some() && self.tl.drag.is_none() && self.st.tool == Tool::Selection {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        } else if let Some((_, edge)) = hovered_clip.filter(|_| self.tl.drag.is_none()) {
             let icon = match (self.st.tool, edge) {
                 (Tool::Blade, _) => CursorIcon::Crosshair,
                 (_, Some(_)) => CursorIcon::ResizeHorizontal,
@@ -332,39 +340,49 @@ impl Workspace {
                 .or(lanes_resp.interact_pointer_pos())
         {
             let grab = self.frame_at(pos.x, layout.left).round() as Frame;
-            match (self.st.tool, self.hit_clip(&p, &layout, pos)) {
-                (Tool::Selection, Some((clip, edge))) => {
-                    if !self.st.selection.contains(&clip) {
-                        self.st.select(clip, false);
-                    }
-                    match edge {
-                        Some(edge) => {
-                            let clips = self.st.expanded(&[clip]);
-                            self.tl.drag = Some(TlDrag::Trim {
-                                anchor: clip,
-                                clips,
-                                edge,
-                                grab,
-                            });
+            let fade = if self.st.tool == Tool::Selection {
+                self.hit_fade(&p, &layout, pos)
+            } else {
+                None
+            };
+            if let Some((clip, edge)) = fade {
+                self.st.select(clip, false);
+                self.tl.drag = Some(TlDrag::Fade { clip, edge });
+            } else {
+                match (self.st.tool, self.hit_clip(&p, &layout, pos)) {
+                    (Tool::Selection, Some((clip, edge))) => {
+                        if !self.st.selection.contains(&clip) {
+                            self.st.select(clip, false);
                         }
-                        None => {
-                            let clips = self.st.expanded(&self.st.selection.clone());
-                            if let Some(origin) = row_of(&p, clip) {
-                                self.tl.drag = Some(TlDrag::Move {
+                        match edge {
+                            Some(edge) => {
+                                let clips = self.st.expanded(&[clip]);
+                                self.tl.drag = Some(TlDrag::Trim {
                                     anchor: clip,
                                     clips,
+                                    edge,
                                     grab,
-                                    origin,
                                 });
+                            }
+                            None => {
+                                let clips = self.st.expanded(&self.st.selection.clone());
+                                if let Some(origin) = row_of(&p, clip) {
+                                    self.tl.drag = Some(TlDrag::Move {
+                                        anchor: clip,
+                                        clips,
+                                        grab,
+                                        origin,
+                                    });
+                                }
                             }
                         }
                     }
+                    (_, None) => {
+                        self.stop();
+                        self.tl.drag = Some(TlDrag::Scrub);
+                    }
+                    _ => {}
                 }
-                (_, None) => {
-                    self.stop();
-                    self.tl.drag = Some(TlDrag::Scrub);
-                }
-                _ => {}
             }
         }
 
@@ -377,6 +395,24 @@ impl Workspace {
             let now = self.frame_at(pos.x, layout.left).round() as Frame;
             match self.tl.drag.clone() {
                 Some(TlDrag::Scrub) => self.st.set_playhead(now),
+                Some(TlDrag::Fade { clip, edge }) => {
+                    if let Some(c) = p.clip(clip) {
+                        let frames = match edge {
+                            Edge::Start => now - c.start,
+                            Edge::End => c.end() - now,
+                        }
+                        .clamp(0, c.duration);
+                        let change = if edge == Edge::Start {
+                            ClipChange::FadeIn(frames)
+                        } else {
+                            ClipChange::FadeOut(frames)
+                        };
+                        self.st.apply_coalescing(
+                            Edit::SetClip { clip, change },
+                            &format!("fade-drag-{clip:?}"),
+                        );
+                    }
+                }
                 Some(TlDrag::Move {
                     anchor,
                     clips,
@@ -425,7 +461,7 @@ impl Workspace {
             if let (Some(drag), Some(pos)) = (self.tl.drag.take(), pos) {
                 let now = self.frame_at(pos.x, layout.left).round() as Frame;
                 match drag {
-                    TlDrag::Scrub => {}
+                    TlDrag::Scrub | TlDrag::Fade { .. } => {}
                     TlDrag::Move {
                         anchor,
                         clips,
@@ -561,6 +597,10 @@ impl Workspace {
                 DragPayload::Generator(_) => {
                     self.st.say("Títulos e geradores vão nas faixas de vídeo")
                 }
+                DragPayload::Dissolve => {
+                    self.st.set_playhead(at);
+                    self.st.add_dissolve();
+                }
             }
         }
 
@@ -650,7 +690,45 @@ impl Workspace {
             );
             ruler_painter.rect_filled(r, 0.0, theme::ACCENT.gamma_multiply(0.6));
         }
+        // Marcadores (bandeirinhas) na régua.
+        let mut marker_hover = None;
+        for m in &p.markers {
+            let x = self.x_of(m.frame as f32, layout.left);
+            if x < layout.left - 8.0 || x > area.right() + 8.0 {
+                continue;
+            }
+            let c = Color32::from_rgb(m.color.r, m.color.g, m.color.b);
+            let top = ruler.top() + 15.0;
+            ruler_painter.add(egui::Shape::convex_polygon(
+                vec![
+                    pos2(x - 5.0, top),
+                    pos2(x + 5.0, top),
+                    pos2(x + 5.0, top + 8.0),
+                    pos2(x, top + 13.0),
+                    pos2(x - 5.0, top + 8.0),
+                ],
+                c,
+                Stroke::new(1.0, Color32::BLACK),
+            ));
+            if let Some(h) = ui.input(|i| i.pointer.hover_pos())
+                && ruler.contains(h)
+                && (h.x - x).abs() <= 6.0
+            {
+                marker_hover = Some(m.clone());
+            }
+        }
         let ruler_resp = ui.interact(ruler, ui.id().with("ruler"), Sense::click_and_drag());
+        if let Some(m) = &marker_hover {
+            let tip = if m.note.is_empty() {
+                "Marcador (duplo clique para editar)".to_string()
+            } else {
+                m.note.clone()
+            };
+            ruler_resp.clone().on_hover_text_at_pointer(tip);
+            if ruler_resp.double_clicked() {
+                self.editing_marker = Some(m.frame);
+            }
+        }
         if (ruler_resp.clicked() || ruler_resp.dragged())
             && let Some(pos) = ruler_resp.interact_pointer_pos()
         {
@@ -803,6 +881,67 @@ impl Workspace {
             self.paint_waveform(painter, p, clip, content);
         }
         self.paint_fades(painter, clip, r);
+        if let Some((a, _)) = clip.dissolve_window() {
+            // Caixa da transição centrada no corte, como no Resolve.
+            let x0 = r.left() + (a - clip.start) as f32 * self.tl.ppf;
+            let x1 = x0 + clip.dissolve_in as f32 * self.tl.ppf;
+            let bx = Rect::from_min_max(pos2(x0, r.top() + LABEL_H), pos2(x1, r.bottom()));
+            painter.rect_filled(bx, 2.0, Color32::from_white_alpha(45));
+            painter.rect_stroke(
+                bx,
+                2.0,
+                Stroke::new(1.0, Color32::from_white_alpha(150)),
+                StrokeKind::Inside,
+            );
+            painter.line_segment(
+                [bx.left_bottom(), bx.right_top()],
+                Stroke::new(1.0, Color32::from_white_alpha(150)),
+            );
+        }
+        let selected_now = self.st.selection.contains(&clip.id);
+        if hovered || selected_now {
+            // Alças de fade nos cantos de cima.
+            for x in [
+                r.left() + clip.fade_in as f32 * self.tl.ppf,
+                r.right() - clip.fade_out as f32 * self.tl.ppf,
+            ] {
+                let hdl = Rect::from_center_size(
+                    pos2(x.clamp(r.left() + 4.0, r.right() - 4.0), r.top() + 4.0),
+                    vec2(8.0, 8.0),
+                );
+                painter.rect_filled(hdl, 1.0, Color32::WHITE);
+                painter.rect_stroke(
+                    hdl,
+                    1.0,
+                    Stroke::new(1.0, Color32::BLACK),
+                    StrokeKind::Inside,
+                );
+            }
+        }
+        if selected_now {
+            // Losangos dos keyframes (no tempo da fonte → posição na timeline).
+            for keys in clip.keyframes.values() {
+                for k in keys {
+                    let f = clip.start as f64 + (k.at - clip.source_start) / clip.speed;
+                    let x = r.left() + (f as f32 - clip.start as f32) * self.tl.ppf;
+                    if x < r.left() || x > r.right() {
+                        continue;
+                    }
+                    let c = pos2(x, r.bottom() - 6.0);
+                    let pts = vec![
+                        c + vec2(0.0, -4.5),
+                        c + vec2(4.5, 0.0),
+                        c + vec2(0.0, 4.5),
+                        c + vec2(-4.5, 0.0),
+                    ];
+                    painter.add(egui::Shape::convex_polygon(
+                        pts,
+                        theme::ACCENT,
+                        Stroke::new(1.0, Color32::BLACK),
+                    ));
+                }
+            }
+        }
 
         let selected = self.st.selection.contains(&clip.id);
         let stroke = if selected {
@@ -1141,6 +1280,27 @@ impl Workspace {
         }
     }
 
+    /// Alça de fade sob o ponteiro (cantos de cima do clipe).
+    fn hit_fade(&self, p: &Project, layout: &Layout, pos: Pos2) -> Option<(ClipId, Edge)> {
+        let (clip, _) = self.hit_clip(p, layout, pos)?;
+        let rect = layout.rect_of(layout.row_at(pos.y)?)?;
+        if pos.y > rect.top() + LABEL_H + 2.0 {
+            return None;
+        }
+        let c = p.clip(clip)?;
+        let x0 = self.x_of(c.start as f32, layout.left);
+        let x1 = self.x_of(c.end() as f32, layout.left);
+        let xin = (x0 + c.fade_in as f32 * self.tl.ppf).clamp(x0 + 4.0, x1 - 4.0);
+        let xout = (x1 - c.fade_out as f32 * self.tl.ppf).clamp(x0 + 4.0, x1 - 4.0);
+        if (pos.x - xin).abs() <= 6.0 {
+            Some((clip, Edge::Start))
+        } else if (pos.x - xout).abs() <= 6.0 {
+            Some((clip, Edge::End))
+        } else {
+            None
+        }
+    }
+
     /// Clipe sob o ponteiro e, se for perto da borda, qual borda.
     fn hit_clip(&self, p: &Project, layout: &Layout, pos: Pos2) -> Option<(ClipId, Option<Edge>)> {
         if !layout.lanes.contains(pos) {
@@ -1340,6 +1500,7 @@ impl Workspace {
         match payload {
             DragPayload::Media(m) => p.media(m).and_then(|m| m.info.duration).unwrap_or(still),
             DragPayload::Generator(_) => still,
+            DragPayload::Dissolve => p.settings.fps.nominal(),
         }
     }
 }

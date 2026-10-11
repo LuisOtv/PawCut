@@ -226,3 +226,38 @@ fn version_1_projects_still_open() {
     let loaded = from_json(&value.to_string()).unwrap();
     assert!(loaded.markers.is_empty());
 }
+
+#[test]
+fn paste_places_full_copies_with_new_ids_and_links() {
+    let mut ed = new_editor();
+    let m = add_video(&mut ed, 300, true);
+    let (vc, ac) = place_av(&mut ed, m, 0, 0.0, 50);
+    let t = Transform {
+        x: 40.0,
+        ..Transform::default()
+    };
+    ed.apply(Edit::SetClip {
+        clip: vc,
+        change: ClipChange::Transform(t),
+    })
+    .unwrap();
+    let p = ed.project().clone();
+    let copy = |id: ClipId| {
+        let (tid, _) = p.locate(id).unwrap();
+        let mut c = p.clip(id).unwrap().clone();
+        c.start -= 0; // deslocamento relativo ao primeiro clipe copiado
+        (tid, c)
+    };
+    let out = ed
+        .apply(Edit::Paste {
+            at: 100,
+            clips: vec![copy(vc), copy(ac)],
+        })
+        .unwrap();
+    assert_eq!(out.clips.len(), 2);
+    let (nv, na) = (clip(&ed, out.clips[0]), clip(&ed, out.clips[1]));
+    assert_eq!((nv.start, nv.end()), (100, 150));
+    assert_eq!(nv.transform.x, 40.0);
+    assert!(nv.link.is_some() && nv.link == na.link && nv.link != clip(&ed, vc).link);
+    assert_ne!(nv.id, vc);
+}

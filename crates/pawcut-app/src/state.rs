@@ -16,6 +16,10 @@ pub enum Tool {
 pub enum Generator {
     Text,
     SolidColor,
+    /// Lower third: nome embaixo à esquerda com caixa.
+    LowerThird,
+    /// Legenda: texto embaixo, centralizado, com contorno.
+    Caption,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +62,8 @@ pub struct AppState {
     pub offline: HashSet<MediaId>,
     /// Mensagem para a barra de status.
     pub status: Option<String>,
+    /// Clipes copiados: faixa de origem e o clipe com `start` relativo ao primeiro.
+    pub clipboard: Vec<(TrackKind, usize, Clip)>,
 }
 
 /// Duração padrão de geradores e imagens soltos na timeline: 5 segundos.
@@ -82,6 +88,7 @@ impl AppState {
             mark_out: None,
             offline: HashSet::new(),
             status: None,
+            clipboard: Vec::new(),
         };
         s.saved_revision = s.editor.revision();
         s.refresh_offline();
@@ -374,15 +381,47 @@ impl AppState {
     }
 
     pub fn drop_generator(&mut self, generator: Generator, track_index: usize, at: Frame) {
-        let source = match generator {
-            Generator::Text => ClipSource::Text(TextStyle {
-                text: "Título".into(),
-                font: "Sans".into(),
-                size: 96.0,
-                color: Rgba::new(255, 255, 255, 255),
-                ..Default::default()
-            }),
-            Generator::SolidColor => ClipSource::SolidColor(Rgba::new(40, 40, 40, 255)),
+        let (w, h) = (
+            self.project().settings.width as f32,
+            self.project().settings.height as f32,
+        );
+        let (source, placement) = match generator {
+            Generator::Text => (
+                ClipSource::Text(TextStyle {
+                    bold: true,
+                    shadow: true,
+                    ..TextStyle::default()
+                }),
+                None,
+            ),
+            Generator::SolidColor => (ClipSource::SolidColor(Rgba::new(40, 40, 40, 255)), None),
+            Generator::LowerThird => (
+                ClipSource::Text(TextStyle {
+                    text: "Nome Sobrenome\nCargo ou descrição".into(),
+                    size: 44.0,
+                    align: TextAlign::Left,
+                    background: true,
+                    ..TextStyle::default()
+                }),
+                Some(Transform {
+                    x: -w * 0.25,
+                    y: -h * 0.32,
+                    ..Transform::default()
+                }),
+            ),
+            Generator::Caption => (
+                ClipSource::Text(TextStyle {
+                    text: "Legenda".into(),
+                    size: 52.0,
+                    bold: true,
+                    outline: 4.0,
+                    ..TextStyle::default()
+                }),
+                Some(Transform {
+                    y: -h * 0.38,
+                    ..Transform::default()
+                }),
+            ),
         };
         let track = self.ensure_track(TrackKind::Video, track_index);
         let duration = default_still_frames(self.project());
@@ -395,8 +434,156 @@ impl AppState {
             at: at.max(0),
             items: vec![Placement { track, draft }],
         }) {
+            if let (Some(t), Some(&c)) = (placement, o.clips.first()) {
+                self.apply(Edit::SetClip {
+                    clip: c,
+                    change: ClipChange::Transform(t),
+                });
+            }
             self.selection = o.clips;
         }
+    }
+
+    /// Shift+[ / Shift+]: corta do início até o cursor (ou do cursor até o fim) e fecha o buraco.
+    /// Vale para a seleção, ou para tudo sob o cursor se nada estiver selecionado.
+    pub fn ripple_trim(&mut self, edge: Edge) {
+        let at = self.playhead;
+        let p = self.project();
+        let clips: Vec<ClipId> = if self.selection.is_empty() {
+            p.all_tracks()
+                .filter(|t| !t.locked)
+                .filter_map(|t| t.clip_at(at))
+                .map(|c| c.id)
+                .collect()
+        } else {
+            self.expanded(&self.selection.clone())
+        };
+        let cut_start = clips
+            .iter()
+            .filter_map(|c| p.clip(*c))
+            .filter(|c| c.contains(at))
+            .map(|c| c.start)
+            .min();
+        if self
+            .apply(Edit::RippleTrimToPlayhead { clips, edge, at })
+            .is_some()
+            && edge == Edge::Start
+            && let Some(s) = cut_start
+        {
+            // O que vinha depois do cursor foi puxado para o ponto do corte.
+            self.playhead = s;
+        }
+    }
+
+    pub fn copy_selection(&mut self) {
+        let p = self.project().clone();
+        let ids = self.expanded(&self.selection.clone());
+        let mut items: Vec<(TrackKind, usize, Clip)> = ids
+            .iter()
+            .filter_map(|id| {
+                let (tid, _) = p.locate(*id)?;
+                let t = p.track(tid)?;
+                let index = p.tracks(t.kind).iter().position(|x| x.id == tid)?;
+                Some((t.kind, index, p.clip(*id)?.clone()))
+            })
+            .collect();
+        let Some(first) = items.iter().map(|(_, _, c)| c.start).min() else {
+            self.say("Selecione clipes para copiar");
+            return;
+        };
+        for (_, _, c) in &mut items {
+            c.start -= first;
+        }
+        let n = items.len();
+        self.clipboard = items;
+        self.say(format!("{n} clipe(s) copiado(s)"));
+    }
+
+    /// Cola os clipes copiados no cursor, nas mesmas faixas (criando-as se preciso).
+    pub fn paste(&mut self) {
+        if self.clipboard.is_empty() {
+            return;
+        }
+        let items = self.clipboard.clone();
+        let mut clips = Vec::new();
+        for (kind, index, c) in items {
+            clips.push((self.ensure_track(kind, index), c));
+        }
+        let len = clips.iter().map(|(_, c)| c.end()).max().unwrap_or(0);
+        if let Some(o) = self.apply(Edit::Paste {
+            at: self.playhead,
+            clips,
+        }) {
+            self.selection = o.clips;
+            self.playhead += len;
+        }
+    }
+
+    pub fn add_marker(&mut self) {
+        let marker = Marker {
+            frame: self.playhead,
+            color: Rgba::new(70, 140, 230, 255),
+            note: String::new(),
+        };
+        self.apply(Edit::SetMarker {
+            frame: self.playhead,
+            marker: Some(marker),
+        });
+    }
+
+    pub fn go_to_marker(&mut self, forward: bool) {
+        let frames = self.project().markers.iter().map(|m| m.frame);
+        let target = if forward {
+            frames.filter(|f| *f > self.playhead).min()
+        } else {
+            frames.filter(|f| *f < self.playhead).max()
+        };
+        if let Some(f) = target {
+            self.playhead = f;
+        }
+    }
+
+    /// Corte mais próximo do cursor (até 1 s de distância) com clipes encostados.
+    fn nearest_cut(&self) -> Option<Frame> {
+        let p = self.project();
+        let window = p.settings.fps.nominal();
+        p.all_tracks()
+            .filter(|t| !t.locked)
+            .flat_map(|t| {
+                t.clips
+                    .windows(2)
+                    .filter(|w| w[0].end() == w[1].start)
+                    .map(|w| w[1].start)
+            })
+            .filter(|f| (f - self.playhead).abs() <= window)
+            .min_by_key(|f| (f - self.playhead).abs())
+    }
+
+    /// Ctrl+T: cross dissolve de 1 segundo no corte mais perto do cursor (vídeo e áudio).
+    pub fn add_dissolve(&mut self) {
+        let Some(cut) = self.nearest_cut() else {
+            self.say("Nenhum corte perto do cursor");
+            return;
+        };
+        let frames = self.project().settings.fps.nominal();
+        let targets: Vec<ClipId> = self
+            .project()
+            .all_tracks()
+            .filter(|t| !t.locked)
+            .flat_map(|t| {
+                t.clips
+                    .windows(2)
+                    .filter(|w| w[0].end() == cut && w[1].start == cut)
+                    .map(|w| w[1].id)
+            })
+            .collect();
+        for id in targets {
+            self.apply_coalescing(
+                Edit::SetDissolve { clip: id, frames },
+                &format!("dissolve-{cut}"),
+            );
+        }
+        self.editor.end_coalescing();
     }
 
     // ---------- Source Viewer ----------
@@ -752,5 +939,57 @@ mod tests {
         let m = add_video(&mut s, 90, false);
         s.refresh_offline();
         assert!(s.offline.contains(&m));
+    }
+
+    #[test]
+    fn ripple_trim_start_pulls_the_rest_and_moves_playhead_to_the_cut() {
+        let mut s = state();
+        let m = add_video(&mut s, 300, true);
+        s.drop_media(m, TrackKind::Video, 0, 0);
+        s.selection.clear();
+        s.set_playhead(40);
+        s.ripple_trim(Edge::Start);
+        assert_eq!(spans(&s, TrackKind::Video, 0), vec![(0, 260)]);
+        assert_eq!(spans(&s, TrackKind::Audio, 0), vec![(0, 260)]);
+        assert_eq!(s.playhead, 0);
+        s.set_playhead(100);
+        s.ripple_trim(Edge::End);
+        assert_eq!(spans(&s, TrackKind::Video, 0), vec![(0, 100)]);
+    }
+
+    #[test]
+    fn copy_paste_keeps_tracks_and_link() {
+        let mut s = state();
+        let m = add_video(&mut s, 90, true);
+        s.drop_media(m, TrackKind::Video, 0, 0);
+        s.copy_selection();
+        s.set_playhead(200);
+        s.paste();
+        assert_eq!(spans(&s, TrackKind::Video, 0), vec![(0, 90), (200, 290)]);
+        assert_eq!(spans(&s, TrackKind::Audio, 0), vec![(0, 90), (200, 290)]);
+        let p = s.project();
+        assert_eq!(
+            p.video_tracks[0].clips[1].link,
+            p.audio_tracks[0].clips[1].link
+        );
+        assert_eq!(s.playhead, 290);
+    }
+
+    #[test]
+    fn markers_and_dissolve_from_the_keyboard() {
+        let mut s = state();
+        s.drop_generator(Generator::SolidColor, 0, 0);
+        s.drop_generator(Generator::SolidColor, 0, 150);
+        s.set_playhead(20);
+        s.add_marker();
+        s.set_playhead(100);
+        s.add_marker();
+        s.go_to_marker(false);
+        assert_eq!(s.playhead, 20);
+        s.go_to_marker(true);
+        assert_eq!(s.playhead, 100);
+        s.set_playhead(140);
+        s.add_dissolve();
+        assert_eq!(s.project().video_tracks[0].clips[1].dissolve_in, 30);
     }
 }
