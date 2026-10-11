@@ -88,6 +88,8 @@ fn editing_after_load_does_not_reuse_ids() {
     assert_eq!(ids.len(), unique.len());
 }
 
+type Tamper = Box<dyn Fn(&mut serde_json::Value)>;
+
 fn tampered(edit: impl Fn(&mut serde_json::Value)) -> Result<Project, ProjectFileError> {
     let ed = sample_editor();
     let mut value: serde_json::Value =
@@ -98,7 +100,7 @@ fn tampered(edit: impl Fn(&mut serde_json::Value)) -> Result<Project, ProjectFil
 
 #[test]
 fn files_with_impossible_values_are_refused() {
-    let cases: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
+    let cases: Vec<(&str, Tamper)> = vec![
         (
             "fps zero",
             Box::new(|v| v["settings"]["fps"]["num"] = 0.into()),
