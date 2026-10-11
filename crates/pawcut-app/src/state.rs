@@ -101,7 +101,9 @@ impl AppState {
             .path
             .as_ref()
             .and_then(|p| p.file_stem())
-            .map_or("Sem título".to_string(), |s| s.to_string_lossy().into_owned());
+            .map_or("Sem título".to_string(), |s| {
+                s.to_string_lossy().into_owned()
+            });
         format!("{}{name} — PawCut", if self.is_dirty() { "● " } else { "" })
     }
 
@@ -148,7 +150,11 @@ impl AppState {
 
     /// Seleção com os parceiros ligados quando Linked Selection está ligado.
     pub fn expanded(&self, clips: &[ClipId]) -> Vec<ClipId> {
-        if self.linked_selection { self.project().expand_linked(clips) } else { clips.to_vec() }
+        if self.linked_selection {
+            self.project().expand_linked(clips)
+        } else {
+            clips.to_vec()
+        }
     }
 
     pub fn select(&mut self, clip: ClipId, additive: bool) {
@@ -169,7 +175,11 @@ impl AppState {
     }
 
     pub fn select_all(&mut self) {
-        self.selection = self.project().all_tracks().flat_map(|t| t.clips.iter().map(|c| c.id)).collect();
+        self.selection = self
+            .project()
+            .all_tracks()
+            .flat_map(|t| t.clips.iter().map(|c| c.id))
+            .collect();
     }
 
     // ---------- navegação ----------
@@ -182,7 +192,11 @@ impl AppState {
         match self.active_monitor {
             Monitor::Timeline => self.set_playhead(self.playhead + delta),
             Monitor::Source => {
-                let max = self.source_length().unwrap_or(Frame::MAX).saturating_sub(1).max(0);
+                let max = self
+                    .source_length()
+                    .unwrap_or(Frame::MAX)
+                    .saturating_sub(1)
+                    .max(0);
                 self.source.playhead = (self.source.playhead + delta).clamp(0, max);
             }
         }
@@ -232,13 +246,19 @@ impl AppState {
         } else {
             BladeTarget::Clips(self.expanded(&self.selection.clone()))
         };
-        self.apply(Edit::Blade { at: self.playhead, target });
+        self.apply(Edit::Blade {
+            at: self.playhead,
+            target,
+        });
     }
 
     /// Lâmina numa posição: corta o clipe (e os ligados, se Linked Selection).
     pub fn blade_clip(&mut self, clip: ClipId, at: Frame) {
         let clips = self.expanded(&[clip]);
-        self.apply(Edit::Blade { at, target: BladeTarget::Clips(clips) });
+        self.apply(Edit::Blade {
+            at,
+            target: BladeTarget::Clips(clips),
+        });
     }
 
     pub fn delete_selection(&mut self, ripple: bool) {
@@ -246,7 +266,11 @@ impl AppState {
             return;
         }
         let clips = self.expanded(&self.selection.clone());
-        let edit = if ripple { Edit::RippleDelete { clips } } else { Edit::Delete { clips } };
+        let edit = if ripple {
+            Edit::RippleDelete { clips }
+        } else {
+            Edit::Delete { clips }
+        };
         if self.apply(edit).is_some() {
             self.selection.clear();
         }
@@ -257,8 +281,16 @@ impl AppState {
             return;
         }
         let p = self.project();
-        let any_linked = self.selection.iter().filter_map(|c| p.clip(*c)).any(|c| c.link.is_some());
-        let clips = if any_linked { p.expand_linked(&self.selection) } else { self.selection.clone() };
+        let any_linked = self
+            .selection
+            .iter()
+            .filter_map(|c| p.clip(*c))
+            .any(|c| c.link.is_some());
+        let clips = if any_linked {
+            p.expand_linked(&self.selection)
+        } else {
+            self.selection.clone()
+        };
         if any_linked {
             self.apply(Edit::Unlink { clips });
             self.say("Áudio e vídeo separados");
@@ -276,23 +308,45 @@ impl AppState {
     }
 
     /// Itens a colocar para uma mídia: vídeo em V`index` e o áudio dele em A`index` (ligados).
-    fn media_items(&mut self, media: MediaId, track_index: usize, kind: TrackKind, from: f64, len: Frame) -> Vec<Placement> {
-        let Some(m) = self.project().media(media).cloned() else { return Vec::new() };
-        let draft = || ClipDraft { source: ClipSource::Media(media), source_start: from, duration: len };
+    fn media_items(
+        &mut self,
+        media: MediaId,
+        track_index: usize,
+        kind: TrackKind,
+        from: f64,
+        len: Frame,
+    ) -> Vec<Placement> {
+        let Some(m) = self.project().media(media).cloned() else {
+            return Vec::new();
+        };
+        let draft = || ClipDraft {
+            source: ClipSource::Media(media),
+            source_start: from,
+            duration: len,
+        };
         let mut items = Vec::new();
         match (m.info.kind, kind) {
             (MediaKind::Video { has_audio }, TrackKind::Video) => {
-                items.push(Placement { track: self.ensure_track(TrackKind::Video, track_index), draft: draft() });
+                items.push(Placement {
+                    track: self.ensure_track(TrackKind::Video, track_index),
+                    draft: draft(),
+                });
                 if has_audio {
-                    items.push(Placement { track: self.ensure_track(TrackKind::Audio, track_index), draft: draft() });
+                    items.push(Placement {
+                        track: self.ensure_track(TrackKind::Audio, track_index),
+                        draft: draft(),
+                    });
                 }
             }
-            (MediaKind::Image, TrackKind::Video) => {
-                items.push(Placement { track: self.ensure_track(TrackKind::Video, track_index), draft: draft() })
-            }
-            (MediaKind::Video { has_audio: true } | MediaKind::Audio, TrackKind::Audio) => {
-                items.push(Placement { track: self.ensure_track(TrackKind::Audio, track_index), draft: draft() })
-            }
+            (MediaKind::Image, TrackKind::Video) => items.push(Placement {
+                track: self.ensure_track(TrackKind::Video, track_index),
+                draft: draft(),
+            }),
+            (MediaKind::Video { has_audio: true } | MediaKind::Audio, TrackKind::Audio) => items
+                .push(Placement {
+                    track: self.ensure_track(TrackKind::Audio, track_index),
+                    draft: draft(),
+                }),
             _ => self.say("Esse tipo de mídia não vai nessa faixa"),
         }
         items
@@ -300,13 +354,21 @@ impl AppState {
 
     /// Solta uma mídia do Media Pool na faixa `track_index` do tipo `kind`, em `at` (overwrite).
     pub fn drop_media(&mut self, media: MediaId, kind: TrackKind, track_index: usize, at: Frame) {
-        let Some(m) = self.project().media(media).cloned() else { return };
-        let len = m.info.duration.unwrap_or_else(|| default_still_frames(self.project()));
+        let Some(m) = self.project().media(media).cloned() else {
+            return;
+        };
+        let len = m
+            .info
+            .duration
+            .unwrap_or_else(|| default_still_frames(self.project()));
         let items = self.media_items(media, track_index, kind, 0.0, len);
         if items.is_empty() {
             return;
         }
-        if let Some(o) = self.apply(Edit::Overwrite { at: at.max(0), items }) {
+        if let Some(o) = self.apply(Edit::Overwrite {
+            at: at.max(0),
+            items,
+        }) {
             self.selection = o.clips;
         }
     }
@@ -323,8 +385,15 @@ impl AppState {
         };
         let track = self.ensure_track(TrackKind::Video, track_index);
         let duration = default_still_frames(self.project());
-        let draft = ClipDraft { source, source_start: 0.0, duration };
-        if let Some(o) = self.apply(Edit::Overwrite { at: at.max(0), items: vec![Placement { track, draft }] }) {
+        let draft = ClipDraft {
+            source,
+            source_start: 0.0,
+            duration,
+        };
+        if let Some(o) = self.apply(Edit::Overwrite {
+            at: at.max(0),
+            items: vec![Placement { track, draft }],
+        }) {
             self.selection = o.clips;
         }
     }
@@ -333,11 +402,18 @@ impl AppState {
 
     pub fn source_length(&self) -> Option<Frame> {
         let m = self.project().media(self.source.media?)?;
-        Some(m.info.duration.unwrap_or_else(|| default_still_frames(self.project())))
+        Some(
+            m.info
+                .duration
+                .unwrap_or_else(|| default_still_frames(self.project())),
+        )
     }
 
     pub fn open_in_source(&mut self, media: MediaId) {
-        self.source = SourceMonitor { media: Some(media), ..SourceMonitor::default() };
+        self.source = SourceMonitor {
+            media: Some(media),
+            ..SourceMonitor::default()
+        };
         self.active_monitor = Monitor::Source;
     }
 
@@ -345,11 +421,19 @@ impl AppState {
         match self.active_monitor {
             Monitor::Source => {
                 let f = self.source.playhead;
-                if is_in { self.source.mark_in = Some(f) } else { self.source.mark_out = Some(f + 1) }
+                if is_in {
+                    self.source.mark_in = Some(f)
+                } else {
+                    self.source.mark_out = Some(f + 1)
+                }
             }
             Monitor::Timeline => {
                 let f = self.playhead;
-                if is_in { self.mark_in = Some(f) } else { self.mark_out = Some(f + 1) }
+                if is_in {
+                    self.mark_in = Some(f)
+                } else {
+                    self.mark_out = Some(f + 1)
+                }
             }
         }
     }
@@ -367,11 +451,19 @@ impl AppState {
             self.say("Abra uma mídia no Source Viewer (duplo clique no Media Pool)");
             return;
         };
-        let Some(len) = self.source_length() else { return };
+        let Some(len) = self.source_length() else {
+            return;
+        };
         let from = self.source.mark_in.unwrap_or(0).clamp(0, len - 1);
         let to = self.source.mark_out.unwrap_or(len).clamp(from + 1, len);
-        let Some(kind) = self.project().media(media).map(|m| m.info.kind) else { return };
-        let track_kind = if kind == MediaKind::Audio { TrackKind::Audio } else { TrackKind::Video };
+        let Some(kind) = self.project().media(media).map(|m| m.info.kind) else {
+            return;
+        };
+        let track_kind = if kind == MediaKind::Audio {
+            TrackKind::Audio
+        } else {
+            TrackKind::Video
+        };
         let items = self.media_items(media, 0, track_kind, from as f64, to - from);
         if items.is_empty() {
             return;
@@ -410,7 +502,11 @@ impl AppState {
             }
         }
         if let Some(e) = errors.first() {
-            self.say(if errors.len() > 1 { format!("{e} (e mais {} erros)", errors.len() - 1) } else { e.clone() });
+            self.say(if errors.len() > 1 {
+                format!("{e} (e mais {} erros)", errors.len() - 1)
+            } else {
+                e.clone()
+            });
         } else if ok > 0 {
             self.say(format!("{ok} arquivo(s) importado(s)"));
         }
@@ -429,8 +525,13 @@ impl AppState {
     }
 
     pub fn refresh_offline(&mut self) {
-        self.offline =
-            self.project().media.iter().filter(|m| !m.info.path.exists()).map(|m| m.id).collect();
+        self.offline = self
+            .project()
+            .media
+            .iter()
+            .filter(|m| !m.info.path.exists())
+            .map(|m| m.id)
+            .collect();
     }
 
     // ---------- arquivo ----------
@@ -473,7 +574,11 @@ mod tests {
     }
 
     fn spans(s: &AppState, kind: TrackKind, i: usize) -> Vec<(Frame, Frame)> {
-        s.project().tracks(kind)[i].clips.iter().map(|c| (c.start, c.end())).collect()
+        s.project().tracks(kind)[i]
+            .clips
+            .iter()
+            .map(|c| (c.start, c.end()))
+            .collect()
     }
 
     #[test]
@@ -510,7 +615,10 @@ mod tests {
         s.select(v, false);
         s.set_playhead(60);
         s.blade_at_playhead();
-        assert_eq!(spans(&s, TrackKind::Audio, 0), vec![(0, 30), (30, 60), (60, 90)]);
+        assert_eq!(
+            spans(&s, TrackKind::Audio, 0),
+            vec![(0, 30), (30, 60), (60, 90)]
+        );
     }
 
     #[test]
@@ -542,7 +650,10 @@ mod tests {
         s.select(v, false);
         assert_eq!(s.selection.len(), 2);
         s.select(v, true);
-        assert!(s.selection.is_empty(), "clique com shift num selecionado tira o grupo");
+        assert!(
+            s.selection.is_empty(),
+            "clique com shift num selecionado tira o grupo"
+        );
     }
 
     #[test]
@@ -589,7 +700,10 @@ mod tests {
         assert_eq!(s.playhead, 30, "o cursor vai para o fim do que entrou");
         s.set_playhead(15);
         s.place_from_source(PlaceMode::Insert);
-        assert_eq!(spans(&s, TrackKind::Video, 0), vec![(0, 15), (15, 45), (45, 60)]);
+        assert_eq!(
+            spans(&s, TrackKind::Video, 0),
+            vec![(0, 15), (15, 45), (45, 60)]
+        );
         s.place_from_source(PlaceMode::Append);
         assert_eq!(spans(&s, TrackKind::Video, 0).last(), Some(&(60, 90)));
     }

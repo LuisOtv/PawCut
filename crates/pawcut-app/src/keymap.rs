@@ -141,20 +141,45 @@ pub struct KeyChord {
 
 impl KeyChord {
     pub const fn new(key: Key) -> Self {
-        Self { key, ctrl: false, shift: false, alt: false }
+        Self {
+            key,
+            ctrl: false,
+            shift: false,
+            alt: false,
+        }
     }
     pub const fn ctrl(key: Key) -> Self {
-        Self { key, ctrl: true, shift: false, alt: false }
+        Self {
+            key,
+            ctrl: true,
+            shift: false,
+            alt: false,
+        }
     }
     pub const fn shift(key: Key) -> Self {
-        Self { key, ctrl: false, shift: true, alt: false }
+        Self {
+            key,
+            ctrl: false,
+            shift: true,
+            alt: false,
+        }
     }
     pub const fn ctrl_shift(key: Key) -> Self {
-        Self { key, ctrl: true, shift: true, alt: false }
+        Self {
+            key,
+            ctrl: true,
+            shift: true,
+            alt: false,
+        }
     }
 
     pub fn from_event(key: Key, m: Modifiers) -> Self {
-        Self { key, ctrl: m.ctrl || m.command, shift: m.shift, alt: m.alt }
+        Self {
+            key,
+            ctrl: m.ctrl || m.command,
+            shift: m.shift,
+            alt: m.alt,
+        }
     }
 
     /// Texto como "Ctrl+Shift+B".
@@ -197,18 +222,40 @@ impl Keymap {
             (A::GoToEnd, vec![K::new(Key::End)]),
             (A::MarkIn, vec![K::new(Key::I)]),
             (A::MarkOut, vec![K::new(Key::O)]),
-            (A::ClearMarks, vec![KeyChord { key: Key::X, ctrl: false, shift: false, alt: true }]),
+            (
+                A::ClearMarks,
+                vec![KeyChord {
+                    key: Key::X,
+                    ctrl: false,
+                    shift: false,
+                    alt: true,
+                }],
+            ),
             (A::SelectionTool, vec![K::new(Key::A)]),
             (A::BladeTool, vec![K::new(Key::B)]),
             (A::ToggleSnapping, vec![K::new(Key::N)]),
             (A::ToggleLinkedSelection, vec![K::ctrl_shift(Key::L)]),
-            (A::BladeAtPlayhead, vec![K::ctrl(Key::B), K::ctrl(Key::Backslash)]),
+            (
+                A::BladeAtPlayhead,
+                vec![K::ctrl(Key::B), K::ctrl(Key::Backslash)],
+            ),
             (A::Delete, vec![K::new(Key::Backspace), K::new(Key::Delete)]),
-            (A::RippleDelete, vec![K::shift(Key::Backspace), K::shift(Key::Delete)]),
+            (
+                A::RippleDelete,
+                vec![K::shift(Key::Backspace), K::shift(Key::Delete)],
+            ),
             (A::InsertEdit, vec![K::new(Key::F9)]),
             (A::OverwriteEdit, vec![K::new(Key::F10)]),
             (A::AppendEdit, vec![K::shift(Key::F12)]),
-            (A::LinkUnlink, vec![KeyChord { key: Key::L, ctrl: true, shift: false, alt: true }]),
+            (
+                A::LinkUnlink,
+                vec![KeyChord {
+                    key: Key::L,
+                    ctrl: true,
+                    shift: false,
+                    alt: true,
+                }],
+            ),
             (A::SelectAll, vec![K::ctrl(Key::A)]),
             (A::Deselect, vec![K::ctrl_shift(Key::A)]),
             (A::Undo, vec![K::ctrl(Key::Z)]),
@@ -227,11 +274,17 @@ impl Keymap {
     }
 
     pub fn chords(&self, action: Action) -> &[KeyChord] {
-        self.bindings.iter().find(|(a, _)| *a == action).map_or(&[], |(_, c)| c.as_slice())
+        self.bindings
+            .iter()
+            .find(|(a, _)| *a == action)
+            .map_or(&[], |(_, c)| c.as_slice())
     }
 
     pub fn action_for(&self, chord: &KeyChord) -> Option<Action> {
-        self.bindings.iter().find(|(_, cs)| cs.contains(chord)).map(|(a, _)| *a)
+        self.bindings
+            .iter()
+            .find(|(_, cs)| cs.contains(chord))
+            .map(|(a, _)| *a)
     }
 
     /// Ação (diferente de `action`) que já usa `chord`.
@@ -259,8 +312,12 @@ impl Keymap {
     /// Lê do disco; ações novas (que o arquivo não conhece) ficam com o padrão.
     pub fn load(path: &Path) -> Self {
         let mut map = Self::defaults();
-        let Ok(text) = std::fs::read_to_string(path) else { return map };
-        let Ok(saved) = serde_json::from_str::<Keymap>(&text) else { return map };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return map;
+        };
+        let Ok(saved) = serde_json::from_str::<Keymap>(&text) else {
+            return map;
+        };
         let saved: HashMap<Action, Vec<KeyChord>> = saved.bindings.into_iter().collect();
         for (action, chords) in &mut map.bindings {
             if let Some(s) = saved.get(action) {
@@ -274,7 +331,10 @@ impl Keymap {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, serde_json::to_string_pretty(self).map_err(std::io::Error::other)?)
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(self).map_err(std::io::Error::other)?,
+        )
     }
 }
 
@@ -297,10 +357,22 @@ mod tests {
     #[test]
     fn resolve_style_defaults() {
         let k = Keymap::defaults();
-        assert_eq!(k.action_for(&KeyChord::ctrl(Key::B)), Some(Action::BladeAtPlayhead));
-        assert_eq!(k.action_for(&KeyChord::shift(Key::Backspace)), Some(Action::RippleDelete));
-        assert_eq!(k.action_for(&KeyChord::new(Key::B)), Some(Action::BladeTool));
-        assert_eq!(k.action_for(&KeyChord::new(Key::F10)), Some(Action::OverwriteEdit));
+        assert_eq!(
+            k.action_for(&KeyChord::ctrl(Key::B)),
+            Some(Action::BladeAtPlayhead)
+        );
+        assert_eq!(
+            k.action_for(&KeyChord::shift(Key::Backspace)),
+            Some(Action::RippleDelete)
+        );
+        assert_eq!(
+            k.action_for(&KeyChord::new(Key::B)),
+            Some(Action::BladeTool)
+        );
+        assert_eq!(
+            k.action_for(&KeyChord::new(Key::F10)),
+            Some(Action::OverwriteEdit)
+        );
     }
 
     #[test]
@@ -316,7 +388,11 @@ mod tests {
 
     #[test]
     fn chord_display_and_modifiers() {
-        let m = Modifiers { ctrl: true, shift: true, ..Modifiers::NONE };
+        let m = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::NONE
+        };
         let c = KeyChord::from_event(Key::Z, m);
         assert_eq!(c, KeyChord::ctrl_shift(Key::Z));
         assert_eq!(c.display(), "Ctrl+Shift+Z");
@@ -330,7 +406,13 @@ mod tests {
         k.set(Action::BladeAtPlayhead, KeyChord::new(Key::C));
         k.save(&path).unwrap();
         let loaded = Keymap::load(&path);
-        assert_eq!(loaded.action_for(&KeyChord::new(Key::C)), Some(Action::BladeAtPlayhead));
-        assert_eq!(Keymap::load(&dir.path().join("nao-existe.json")), Keymap::defaults());
+        assert_eq!(
+            loaded.action_for(&KeyChord::new(Key::C)),
+            Some(Action::BladeAtPlayhead)
+        );
+        assert_eq!(
+            Keymap::load(&dir.path().join("nao-existe.json")),
+            Keymap::defaults()
+        );
     }
 }
