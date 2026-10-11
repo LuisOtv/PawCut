@@ -157,12 +157,31 @@ impl PawCutApp {
                 }
             });
             ui.menu_button("Editar", |ui| {
-                self.item(ui, "Desfazer", Action::Undo);
-                self.item(ui, "Refazer", Action::Redo);
+                // Mostra o que vai ser desfeito ("Desfazer: Mover clipe").
+                let undo = match self.ws.st.editor.undo_label() {
+                    Some(l) => format!("Desfazer: {l}"),
+                    None => "Desfazer".into(),
+                };
+                let redo = match self.ws.st.editor.redo_label() {
+                    Some(l) => format!("Refazer: {l}"),
+                    None => "Refazer".into(),
+                };
+                let (can_undo, can_redo) = (
+                    self.ws.st.editor.undo_label().is_some(),
+                    self.ws.st.editor.redo_label().is_some(),
+                );
+                ui.add_enabled_ui(can_undo, |ui| self.item(ui, &undo, Action::Undo));
+                ui.add_enabled_ui(can_redo, |ui| self.item(ui, &redo, Action::Redo));
+                ui.separator();
+                self.item(ui, "Copiar", Action::Copy);
+                self.item(ui, "Colar", Action::Paste);
+                self.item(ui, "Colar atributos", Action::PasteAttributes);
                 ui.separator();
                 self.item(ui, "Cortar no cursor", Action::BladeAtPlayhead);
                 self.item(ui, "Apagar", Action::Delete);
                 self.item(ui, "Apagar com ripple", Action::RippleDelete);
+                self.item(ui, "Extrair In/Out (fecha o buraco)", Action::ExtractInOut);
+                self.item(ui, "Levantar In/Out (deixa o buraco)", Action::LiftInOut);
                 self.item(ui, "Ligar / separar áudio e vídeo", Action::LinkUnlink);
                 ui.separator();
                 self.item(ui, "Insert do Source", Action::InsertEdit);
@@ -170,6 +189,7 @@ impl PawCutApp {
                 self.item(ui, "Append do Source", Action::AppendEdit);
                 ui.separator();
                 self.item(ui, "Selecionar tudo", Action::SelectAll);
+                self.item(ui, "Selecionar daqui para frente", Action::SelectForward);
                 self.item(ui, "Tirar seleção", Action::Deselect);
                 ui.separator();
                 if ui.button("Preferences — atalhos de teclado…").clicked() {
@@ -182,6 +202,11 @@ impl PawCutApp {
                 self.item(ui, "Ferramenta lâmina", Action::BladeTool);
                 self.item(ui, "Snapping", Action::ToggleSnapping);
                 self.item(ui, "Seleção ligada", Action::ToggleLinkedSelection);
+                self.item(ui, "Skimming (prévia sob o mouse)", Action::ToggleSkimming);
+                ui.separator();
+                self.item(ui, "Empurrar 1 frame para trás", Action::NudgeLeft);
+                self.item(ui, "Empurrar 1 frame para frente", Action::NudgeRight);
+                self.item(ui, "Mostrar no Media Pool", Action::ShowInPool);
                 ui.separator();
                 if ui.button("Adicionar faixa de vídeo").clicked() {
                     ui.close();
@@ -279,9 +304,26 @@ impl PawCutApp {
             theme::text(14.0),
             theme::TEXT_DIM,
         );
-        let mut status = String::new();
-        if let Some(msg) = &self.ws.st.status {
-            status = msg.clone();
+        // Direita: projeto, zoom, ferramenta, proxies e quando salvou.
+        let p = &self.ws.project_arc.settings;
+        let mut info = vec![format!("{}×{} · {} fps", p.width, p.height, p.fps.as_f64())];
+        info.push(format!("zoom {:.0}%", self.ws.tl.ppf / 3.0 * 100.0));
+        info.push(match self.ws.st.tool {
+            crate::state::Tool::Selection => "Seleção".into(),
+            crate::state::Tool::Blade => "Lâmina".into(),
+        });
+        if !self.ws.proxy_jobs.is_empty() {
+            info.push(format!("gerando {} proxy", self.ws.proxy_jobs.len()));
+        }
+        if let Some(t) = self.ws.last_saved {
+            let m = t.elapsed().as_secs() / 60;
+            info.push(if m == 0 {
+                "salvo agora".into()
+            } else {
+                format!("salvo há {m} min")
+            });
+        } else if self.ws.st.is_dirty() {
+            info.push("não salvo".into());
         }
         if !self
             .ws
@@ -289,14 +331,14 @@ impl PawCutApp {
             .has_device
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            status = format!("{status}  ·  sem saída de áudio");
+            info.push("sem saída de áudio".into());
         }
         ui.painter().text(
-            rect.right_center() - egui::vec2(12.0, 0.0),
+            rect.right_center() - egui::vec2(theme::PAD + 4.0, 0.0),
             egui::Align2::RIGHT_CENTER,
-            status,
-            theme::text(11.5),
-            Color32::from_rgb(230, 200, 130),
+            info.join("   ·   "),
+            theme::text(11.0),
+            theme::TEXT_DIM,
         );
 
         let pages = egui::Rect::from_center_size(rect.center(), egui::vec2(170.0, rect.height()));
@@ -345,6 +387,59 @@ impl PawCutApp {
                 }
             },
         );
+    }
+
+    /// Avisos no canto de baixo, por cima de tudo, que somem sozinhos (clique fecha).
+    fn toasts_ui(&mut self, ctx: &egui::Context) {
+        let screen = ctx.content_rect();
+        let mut y = screen.bottom() - 56.0;
+        let mut close = None;
+        for (i, (text, error, born)) in self.ws.toasts.iter().enumerate().rev() {
+            let age = born.elapsed().as_secs_f32();
+            let life = if *error { 8.0 } else { 4.0 };
+            let alpha = ((life - age) / 0.4).clamp(0.0, 1.0) * (age / 0.15).clamp(0.0, 1.0);
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new(("toast", i)),
+            ));
+            let galley = painter.layout(text.clone(), theme::text(12.5), Color32::WHITE, 360.0);
+            let size = galley.size() + egui::vec2(28.0, 16.0);
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(screen.right() - size.x - 16.0, y - size.y),
+                size,
+            );
+            let bg = if *error {
+                Color32::from_rgb(110, 30, 34)
+            } else {
+                theme::BAR_LIGHT
+            };
+            painter.rect_filled(rect, 6.0, bg.gamma_multiply(alpha));
+            painter.rect_filled(
+                egui::Rect::from_min_size(rect.min, egui::vec2(4.0, rect.height())),
+                2.0,
+                (if *error {
+                    Color32::from_rgb(240, 90, 80)
+                } else {
+                    theme::ACCENT
+                })
+                .gamma_multiply(alpha),
+            );
+            painter.galley(
+                rect.min + egui::vec2(16.0, 8.0),
+                galley,
+                Color32::WHITE.gamma_multiply(alpha),
+            );
+            if ctx.input(|inp| {
+                inp.pointer.primary_clicked()
+                    && inp.pointer.interact_pos().is_some_and(|p| rect.contains(p))
+            }) {
+                close = Some(i);
+            }
+            y = rect.top() - 8.0;
+        }
+        if let Some(i) = close {
+            self.ws.toasts.remove(i);
+        }
     }
 
     /// Aviso por cima de tudo enquanto arquivos do sistema são arrastados sobre a janela.
@@ -457,6 +552,9 @@ impl eframe::App for PawCutApp {
         let ctx = ui.ctx().clone();
         self.ws.begin_frame(&ctx);
         self.ws.source_panel_visible = self.layout.is_visible(Panel::SourceViewer);
+        if self.ws.reveal_in_pool {
+            self.layout.reveal(Panel::MediaPool);
+        }
         let bar = |fill| {
             egui::Frame::new()
                 .fill(fill)
@@ -485,6 +583,7 @@ impl eframe::App for PawCutApp {
         self.ws.dialogs_ui(&ctx);
 
         self.file_drop_overlay(&ctx);
+        self.toasts_ui(&ctx);
         // Rótulo que acompanha o ponteiro ao arrastar do Media Pool / Toolbox.
         if let Some(payload) = egui::DragAndDrop::payload::<DragPayload>(&ctx)
             && let Some(pos) = ctx.pointer_hover_pos()

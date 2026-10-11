@@ -310,3 +310,17 @@ fn undo_and_redo_have_names() {
     assert_eq!(ed.redo_label(), Some("Overwrite"));
     assert_eq!(ed.undo_label(), None);
 }
+
+#[test]
+fn delete_range_leaves_a_gap() {
+    let mut ed = new_editor();
+    let v1 = v(&ed, 0);
+    place(&mut ed, v1, solid(), 0, 0.0, 100);
+    ed.apply(Edit::DeleteRange {
+        tracks: vec![v1],
+        start: 30,
+        end: 50,
+    })
+    .unwrap();
+    assert_eq!(spans(&ed, v1), vec![(0, 30), (50, 100)]);
+}

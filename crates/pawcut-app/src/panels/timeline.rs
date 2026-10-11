@@ -1,9 +1,11 @@
 //! A timeline: régua, cabeçalhos das faixas, clipes e as interações de edição (visual do Resolve).
 
 use egui::{Align2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
+use std::collections::HashMap;
+
 use pawcut_core::{
-    Clip, ClipChange, ClipId, ClipSource, Edge, Edit, Frame, MediaKind, Project, TrackFlags,
-    TrackKind, format_timecode,
+    Clip, ClipChange, ClipId, ClipSource, Edge, Edit, Frame, MediaKind, Project, Track, TrackFlags,
+    TrackId, TrackKind, format_timecode, parse_timecode,
 };
 
 use super::DragPayload;
@@ -15,6 +17,11 @@ use crate::workspace::Workspace;
 const HEADER_W: f32 = 196.0;
 const RULER_H: f32 = 30.0;
 const TRACK_H: f32 = 50.0;
+const COLLAPSED_H: f32 = 24.0;
+const MIN_TRACK_H: f32 = 32.0;
+const MAX_TRACK_H: f32 = 180.0;
+/// Botões do cabeçalho da faixa: todos do mesmo tamanho, na linha de cima.
+const HDR_BTN: f32 = 20.0;
 const ZONE_H: f32 = 22.0;
 const LABEL_H: f32 = 15.0;
 const EDGE_GRAB: f32 = 6.0;
@@ -27,9 +34,63 @@ pub struct Row {
     pub index: usize,
 }
 
+/// Como uma faixa aparece na timeline (só visual; não vai para o arquivo do projeto).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackView {
+    pub height: f32,
+    pub collapsed: bool,
+    pub hidden: bool,
+}
+
+impl Default for TrackView {
+    fn default() -> Self {
+        Self {
+            height: TRACK_H,
+            collapsed: false,
+            hidden: false,
+        }
+    }
+}
+
+impl TrackView {
+    fn row_h(&self) -> f32 {
+        if self.collapsed {
+            COLLAPSED_H
+        } else {
+            self.height
+        }
+    }
+}
+
+/// Buraco entre dois clipes que contém `at` (só conta se houver um clipe depois).
+pub fn gap_at(track: &Track, at: Frame) -> Option<(Frame, Frame)> {
+    if track.clips.iter().any(|c| at >= c.start && at < c.end()) {
+        return None;
+    }
+    let start = track
+        .clips
+        .iter()
+        .filter(|c| c.end() <= at)
+        .map(|c| c.end())
+        .max()
+        .unwrap_or(0);
+    let end = track
+        .clips
+        .iter()
+        .filter(|c| c.start > at)
+        .map(|c| c.start)
+        .min()?;
+    Some((start, end))
+}
+
 #[derive(Debug, Clone)]
 enum TlDrag {
     Scrub,
+    /// Retângulo de seleção começando em `origin`; `base` é a seleção anterior (Shift/Ctrl).
+    Marquee {
+        origin: Pos2,
+        base: Vec<ClipId>,
+    },
     /// Alça de fade no canto de cima do clipe.
     Fade {
         clip: ClipId,
@@ -58,6 +119,9 @@ pub struct TimelineView {
     pub v_scroll: f32,
     drag: Option<TlDrag>,
     menu_clip: Option<ClipId>,
+    /// Texto do timecode sendo digitado no canto da timeline.
+    tc_edit: Option<String>,
+    last_scrub: Option<Frame>,
 }
 
 impl Default for TimelineView {
@@ -68,6 +132,8 @@ impl Default for TimelineView {
             v_scroll: 0.0,
             drag: None,
             menu_clip: None,
+            tc_edit: None,
+            last_scrub: None,
         }
     }
 }
@@ -81,12 +147,13 @@ struct Layout {
 }
 
 impl Layout {
-    fn new(p: &Project, area: Rect, v_scroll: f32) -> Self {
+    fn new(p: &Project, area: Rect, v_scroll: f32, views: &HashMap<TrackId, TrackView>) -> Self {
         let mut rows = Vec::new();
         let top = area.top() + RULER_H - v_scroll;
         let mut y = top;
         let lane =
             |y: f32, h: f32| Rect::from_min_max(pos2(area.left(), y), pos2(area.right(), y + h));
+        let view = |t: &Track| views.get(&t.id).copied().unwrap_or_default();
         let vlen = p.video_tracks.len();
         rows.push((
             Row {
@@ -97,26 +164,34 @@ impl Layout {
         ));
         y += ZONE_H;
         for i in (0..vlen).rev() {
+            let v = view(&p.video_tracks[i]);
+            if v.hidden {
+                continue;
+            }
             rows.push((
                 Row {
                     kind: TrackKind::Video,
                     index: i,
                 },
-                lane(y, TRACK_H),
+                lane(y, v.row_h()),
             ));
-            y += TRACK_H;
+            y += v.row_h();
         }
         y += 6.0;
         let alen = p.audio_tracks.len();
         for i in 0..alen {
+            let v = view(&p.audio_tracks[i]);
+            if v.hidden {
+                continue;
+            }
             rows.push((
                 Row {
                     kind: TrackKind::Audio,
                     index: i,
                 },
-                lane(y, TRACK_H),
+                lane(y, v.row_h()),
             ));
-            y += TRACK_H;
+            y += v.row_h();
         }
         rows.push((
             Row {
@@ -219,7 +294,93 @@ fn ruler_step(ppf: f32, fps: i64, min_px: f32) -> Frame {
         .unwrap_or(600 * fps)
 }
 
+/// Retângulos (da esquerda para a direita) dos `n` botões do cabeçalho, alinhados à direita.
+fn header_buttons(h: Rect, n: usize) -> Vec<Rect> {
+    let cy = h.top() + COLLAPSED_H / 2.0;
+    let right = h.right() - theme::PAD;
+    (0..n)
+        .map(|i| {
+            let x = right - (n - i) as f32 * (HDR_BTN + 2.0) + 2.0;
+            Rect::from_min_size(pos2(x, cy - HDR_BTN / 2.0), vec2(HDR_BTN, HDR_BTN))
+        })
+        .collect()
+}
+
+enum HdrGlyph {
+    Icon(Icon),
+    Letter(&'static str),
+}
+
+/// Botão 20×20 do cabeçalho da faixa; `on` é a cor quando ligado. Devolve se foi clicado.
+fn hdr_toggle(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    rect: Rect,
+    id: (&str, TrackId),
+    glyph: HdrGlyph,
+    on: Option<Color32>,
+    tip: &str,
+) -> bool {
+    let resp = ui
+        .interact(
+            rect.intersect(painter.clip_rect()),
+            ui.id().with(id),
+            Sense::click(),
+        )
+        .on_hover_text(tip);
+    let bg = match on {
+        Some(c) => c,
+        None if resp.hovered() => theme::BAR_LIGHT.gamma_multiply(1.4),
+        None => theme::BAR_LIGHT,
+    };
+    painter.rect_filled(rect, 3.0, bg);
+    let fg = if on.is_some() {
+        Color32::BLACK
+    } else if resp.hovered() {
+        Color32::WHITE
+    } else {
+        theme::TEXT
+    };
+    match glyph {
+        HdrGlyph::Icon(i) => icons::paint(
+            painter,
+            Rect::from_center_size(rect.center(), vec2(12.0, 12.0)),
+            i,
+            fg,
+        ),
+        HdrGlyph::Letter(t) => {
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                t,
+                theme::text(11.0),
+                fg,
+            );
+        }
+    }
+    resp.clicked()
+}
+
+fn toolbar_sep(ui: &mut egui::Ui) {
+    ui.add_space(4.0);
+    let (r, _) = ui.allocate_exact_size(vec2(1.0, 16.0), Sense::hover());
+    ui.painter().rect_filled(r, 0.0, theme::BORDER);
+    ui.add_space(4.0);
+}
+
 impl Workspace {
+    /// Toca ~80 ms de áudio no frame (scrub com som, como arrastar a agulha).
+    fn scrub_audio(&mut self, frame: Frame) {
+        if self.tl.last_scrub == Some(frame) {
+            return;
+        }
+        self.tl.last_scrub = Some(frame);
+        let s = &self.project_arc.settings;
+        let at = s.fps.frame_to_sample(frame, s.sample_rate);
+        let len = s.sample_rate as i64 / 12;
+        self.audio.scrub(self.project_arc.clone(), at, len);
+    }
+
     fn x_of(&self, frame: f32, left: f32) -> f32 {
         left + (frame - self.tl.scroll) * self.tl.ppf
     }
@@ -249,12 +410,12 @@ impl Workspace {
         self.tl_width = area.width();
         self.tl_area = area;
         let visible_h = area.height() - RULER_H;
-        let content_h = Layout::new(&p, area, 0.0).content_h;
+        let content_h = Layout::new(&p, area, 0.0, &self.track_views).content_h;
         self.tl.v_scroll = self
             .tl
             .v_scroll
             .clamp(0.0, (content_h - visible_h).max(0.0));
-        let layout = Layout::new(&p, area, self.tl.v_scroll);
+        let layout = Layout::new(&p, area, self.tl.v_scroll, &self.track_views);
         let painter = ui.painter_at(area);
         painter.rect_filled(area, 0.0, theme::BG_DARK);
 
@@ -379,22 +540,64 @@ impl Workspace {
                     }
                     (_, None) => {
                         self.stop();
-                        self.tl.drag = Some(TlDrag::Scrub);
+                        let (alt, additive) =
+                            ui.input(|i| (i.modifiers.alt, i.modifiers.shift || i.modifiers.ctrl));
+                        self.tl.drag = Some(if alt {
+                            TlDrag::Scrub
+                        } else {
+                            TlDrag::Marquee {
+                                origin: pos,
+                                base: if additive {
+                                    self.st.selection.clone()
+                                } else {
+                                    Vec::new()
+                                },
+                            }
+                        });
                     }
                     _ => {}
                 }
             }
         }
 
+        if lanes_resp.drag_started() {
+            self.selected_gap = None;
+        }
         let mut snap_line: Option<Frame> = None;
         let mut ghosts: Vec<(Rect, bool)> = Vec::new();
+        let mut marquee: Option<Rect> = None;
         if let Some(pos) = lanes_resp
             .interact_pointer_pos()
             .filter(|_| lanes_resp.dragged())
         {
             let now = self.frame_at(pos.x, layout.left).round() as Frame;
             match self.tl.drag.clone() {
-                Some(TlDrag::Scrub) => self.st.set_playhead(now),
+                Some(TlDrag::Scrub) => {
+                    self.st.set_playhead(now);
+                    self.scrub_audio(now);
+                }
+                Some(TlDrag::Marquee { origin, base }) => {
+                    let r = Rect::from_two_pos(origin, pos);
+                    marquee = Some(r);
+                    let f0 = self.frame_at(r.left(), layout.left);
+                    let f1 = self.frame_at(r.right(), layout.left);
+                    let mut sel = base;
+                    for (row, rect) in &layout.rows {
+                        if rect.bottom() < r.top() || rect.top() > r.bottom() {
+                            continue;
+                        }
+                        let Some(t) = p.tracks(row.kind).get(row.index) else {
+                            continue;
+                        };
+                        for c in &t.clips {
+                            if c.end() as f32 > f0 && (c.start as f32) < f1 && !sel.contains(&c.id)
+                            {
+                                sel.push(c.id);
+                            }
+                        }
+                    }
+                    self.st.selection = sel;
+                }
                 Some(TlDrag::Fade { clip, edge }) => {
                     if let Some(c) = p.clip(clip) {
                         let frames = match edge {
@@ -461,7 +664,7 @@ impl Workspace {
             if let (Some(drag), Some(pos)) = (self.tl.drag.take(), pos) {
                 let now = self.frame_at(pos.x, layout.left).round() as Frame;
                 match drag {
-                    TlDrag::Scrub | TlDrag::Fade { .. } => {}
+                    TlDrag::Scrub | TlDrag::Fade { .. } | TlDrag::Marquee { .. } => {}
                     TlDrag::Move {
                         anchor,
                         clips,
@@ -530,6 +733,7 @@ impl Workspace {
             && let Some(pos) = lanes_resp.interact_pointer_pos()
         {
             let additive = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
+            self.selected_gap = None;
             match (self.st.tool, self.hit_clip(&p, &layout, pos)) {
                 (Tool::Blade, Some((clip, _))) => {
                     let raw = self.frame_at(pos.x, layout.left).round() as Frame;
@@ -542,6 +746,12 @@ impl Workspace {
                     self.st.selection.clear();
                     let f = self.frame_at(pos.x, layout.left).round() as Frame;
                     self.st.set_playhead(f);
+                    // Clicar num buraco entre clipes seleciona ele (Delete fecha).
+                    self.selected_gap = layout
+                        .row_at(pos.y)
+                        .and_then(|row| p.tracks(row.kind).get(row.index))
+                        .filter(|t| !t.locked && gap_at(t, f).is_some())
+                        .map(|t| (t.id, f));
                 }
             }
             self.st.active_monitor = Monitor::Timeline;
@@ -614,6 +824,22 @@ impl Workspace {
             let Some(track) = p.tracks(row.kind).get(row.index) else {
                 continue;
             };
+            if let Some((tid, at)) = self.selected_gap
+                && tid == track.id
+                && let Some((a, b)) = gap_at(track, at)
+            {
+                let g = Rect::from_min_max(
+                    pos2(self.x_of(a as f32, layout.left), rect.top() + 2.0),
+                    pos2(self.x_of(b as f32, layout.left), rect.bottom() - 2.0),
+                );
+                lanes_painter.rect_filled(g, 2.0, theme::ACCENT.gamma_multiply(0.22));
+                lanes_painter.rect_stroke(
+                    g,
+                    2.0,
+                    Stroke::new(1.0, theme::ACCENT),
+                    StrokeKind::Inside,
+                );
+            }
             for clip in &track.clips {
                 let x0 = self.x_of(clip.start as f32, layout.left);
                 let x1 = self.x_of(clip.end() as f32, layout.left);
@@ -642,6 +868,15 @@ impl Workspace {
                 theme::ACCENT.gamma_multiply(if is_drop { 0.25 } else { 0.18 }),
             );
             lanes_painter.rect_stroke(g, 2.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
+        }
+        if let Some(m) = marquee {
+            lanes_painter.rect_filled(m, 0.0, Color32::from_white_alpha(18));
+            lanes_painter.rect_stroke(
+                m,
+                0.0,
+                Stroke::new(1.0, Color32::from_white_alpha(160)),
+                StrokeKind::Inside,
+            );
         }
 
         // ---------- régua ----------
@@ -734,8 +969,14 @@ impl Workspace {
         {
             self.stop();
             self.st.active_monitor = Monitor::Timeline;
-            self.st
-                .set_playhead(self.frame_at(pos.x, layout.left).round() as Frame);
+            let f = self.frame_at(pos.x, layout.left).round().max(0.0) as Frame;
+            self.st.set_playhead(f);
+            if ruler_resp.dragged() {
+                self.scrub_audio(f);
+            }
+        }
+        if !ruler_resp.dragged() && !matches!(self.tl.drag, Some(TlDrag::Scrub)) {
+            self.tl.last_scrub = None;
         }
 
         // ---------- linha do mouse, snapping e cursor ----------
@@ -750,9 +991,18 @@ impl Workspace {
         {
             let frame = self.frame_at(pos.x, layout.left).round().max(0.0);
             let x = self.x_of(frame, layout.left);
+            // Skimming (S): o viewer mostra o frame sob o mouse, sem mexer no cursor.
+            let skim = self.skimming && !self.playback.is_playing();
+            if skim {
+                self.skim_next = Some(frame as Frame);
+            }
             painter.line_segment(
                 [pos2(x, ruler.top()), pos2(x, area.bottom())],
-                Stroke::new(1.0, Color32::from_white_alpha(70)),
+                if skim {
+                    Stroke::new(1.0, Color32::from_rgb(240, 120, 90))
+                } else {
+                    Stroke::new(1.0, Color32::from_white_alpha(70))
+                },
             );
             let label = format_timecode(frame as Frame, fps);
             let galley = painter.layout_no_wrap(label, theme::mono(10.5), Color32::WHITE);
@@ -791,16 +1041,10 @@ impl Workspace {
 
         // ---------- cabeçalhos ----------
         self.track_headers(ui, &painter, &p, &layout, area);
-        // Timecode grande no canto, como no Resolve.
+        // Timecode grande no canto, como no Resolve. Clique para digitar um tempo.
         let tc = Rect::from_min_size(area.min, vec2(HEADER_W, RULER_H));
         painter.rect_filled(tc, 0.0, theme::BG_DARK);
-        painter.text(
-            tc.left_center() + vec2(10.0, 0.0),
-            Align2::LEFT_CENTER,
-            format_timecode(self.st.playhead, fps),
-            theme::mono(17.0),
-            theme::TIMECODE,
-        );
+        self.timecode_entry(ui, tc, fps);
         ui.advance_cursor_after_rect(area);
     }
 
@@ -853,29 +1097,51 @@ impl Workspace {
         );
         let content = Rect::from_min_max(pos2(r.left(), label.bottom()), r.max);
 
-        // Miniatura no começo dos clipes de vídeo/imagem (como a tira de frames do Resolve).
+        // Tira de frames: começo, fim e meio do clipe, conforme couber (como no Resolve).
         if kind == TrackKind::Video
             && let ClipSource::Media(m) = &clip.source
-            && let Some(media) = p.media(*m)
+            && let Some(media) = p.media(*m).cloned()
             && content.width() > 30.0
+            && content.height() > 12.0
             && let Some(tex) = self.thumbnail(*m, &media.info.path, media.info.kind)
         {
             let size = tex.size_vec2();
             let h = content.height() - 2.0;
-            let w = (h * size.x / size.y).min(content.width() - 2.0);
-            let thumb = Rect::from_min_size(content.min + vec2(1.0, 1.0), vec2(w, h));
-            painter
-                .with_clip_rect(content.intersect(painter.clip_rect()))
-                .image(
-                    tex.id(),
-                    thumb,
-                    Rect::from_min_max(pos2(0.0, 0.0), pos2(w / (h * size.x / size.y), 1.0)),
-                    if active {
-                        Color32::WHITE
-                    } else {
-                        Color32::from_gray(110)
-                    },
+            let tw = h * size.x / size.y;
+            let fps = p.settings.fps.as_f64();
+            let at = |f: Frame| clip.source_time_at(f) / fps;
+            let mut slots = vec![(content.left() + 1.0, at(clip.start))];
+            if content.width() >= 2.0 * tw + 6.0 {
+                slots.push((content.right() - 1.0 - tw, at(clip.end() - 1)));
+            }
+            if content.width() >= 3.0 * tw + 12.0 {
+                slots.push((
+                    content.center().x - tw / 2.0,
+                    at(clip.start + clip.duration / 2),
+                ));
+            }
+            let thumbs_painter = painter.with_clip_rect(content.intersect(painter.clip_rect()));
+            let tint = if active {
+                Color32::WHITE
+            } else {
+                Color32::from_gray(110)
+            };
+            for (x, seconds) in slots {
+                let t = if media.info.kind == MediaKind::Image {
+                    tex.clone()
+                } else {
+                    self.strip_frame(&media.info.path, seconds)
+                        .unwrap_or_else(|| tex.clone())
+                };
+                let w = tw.min(content.width() - 2.0);
+                let rect = Rect::from_min_size(pos2(x, content.top() + 1.0), vec2(w, h));
+                thumbs_painter.image(
+                    t.id(),
+                    rect,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(w / tw, 1.0)),
+                    tint,
                 );
+            }
         }
         if kind == TrackKind::Audio {
             self.paint_waveform(painter, p, clip, content);
@@ -975,6 +1241,62 @@ impl Workspace {
         }
     }
 
+    /// Campo de timecode: mostra o tempo do cursor; clique para digitar (1:00, +30, 150f…).
+    fn timecode_entry(&mut self, ui: &mut egui::Ui, tc: Rect, fps: pawcut_core::FrameRate) {
+        let field = tc.shrink2(vec2(6.0, 3.0));
+        if let Some(text) = self.tl.tc_edit.as_mut() {
+            let id = ui.id().with("tc-edit");
+            let resp = ui.put(
+                field,
+                egui::TextEdit::singleline(text)
+                    .id(id)
+                    .font(theme::mono(15.0))
+                    .text_color(theme::TIMECODE)
+                    .margin(vec2(4.0, 2.0)),
+            );
+            if !resp.has_focus() && !resp.lost_focus() {
+                resp.request_focus();
+            }
+            let (enter, esc) = ui.input(|i| {
+                (
+                    i.key_pressed(egui::Key::Enter),
+                    i.key_pressed(egui::Key::Escape),
+                )
+            });
+            if resp.lost_focus() || esc {
+                let text = self.tl.tc_edit.take().unwrap_or_default();
+                if enter && !esc {
+                    match parse_timecode(&text, fps, self.st.playhead) {
+                        Some(f) => {
+                            self.stop();
+                            self.st.set_playhead(f.max(0));
+                        }
+                        None => self.st.warn(format!("Timecode inválido: {text}")),
+                    }
+                }
+            }
+            return;
+        }
+        let resp = ui
+            .interact(tc, ui.id().with("tc"), Sense::click())
+            .on_hover_text("Clique e digite um tempo: 1:00:00, 10:00, +30, -1:00 ou 150f")
+            .on_hover_cursor(CursorIcon::Text);
+        ui.painter().text(
+            tc.left_center() + vec2(10.0, 0.0),
+            Align2::LEFT_CENTER,
+            format_timecode(self.st.playhead, fps),
+            theme::mono(17.0),
+            if resp.hovered() {
+                Color32::WHITE
+            } else {
+                theme::TIMECODE
+            },
+        );
+        if resp.clicked() {
+            self.tl.tc_edit = Some(format_timecode(self.st.playhead, fps));
+        }
+    }
+
     fn track_headers(
         &mut self,
         ui: &mut egui::Ui,
@@ -994,6 +1316,11 @@ impl Workspace {
             pos2(layout.left, area.bottom()),
         );
         let painter = &painter.with_clip_rect(below);
+        let hidden: Vec<TrackId> = p
+            .all_tracks()
+            .filter(|t| self.track_views.get(&t.id).is_some_and(|v| v.hidden))
+            .map(|t| t.id)
+            .collect();
 
         for (row, rect) in &layout.rows {
             if rect.bottom() <= below.top() + 4.0 || rect.top() >= below.bottom() - 4.0 {
@@ -1006,17 +1333,50 @@ impl Workspace {
                 } else {
                     "+ faixa de áudio"
                 };
+                let line = h.shrink2(vec2(theme::PAD, 1.0));
                 let resp = ui.put(
-                    h.shrink2(vec2(8.0, 1.0)),
+                    Rect::from_min_size(line.min, vec2(110.0, line.height())),
                     egui::Button::new(egui::RichText::new(label).small().color(theme::TEXT_DIM))
                         .frame(false),
                 );
                 if resp.clicked() {
                     self.st.apply(Edit::AddTrack(row.kind));
                 }
+                if !hidden.is_empty()
+                    && ui
+                        .put(
+                            Rect::from_min_max(pos2(line.right() - 70.0, line.top()), line.max),
+                            egui::Button::new(
+                                egui::RichText::new(format!("{} oculta(s)", hidden.len()))
+                                    .small()
+                                    .color(theme::ACCENT),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text("Mostrar as faixas escondidas")
+                        .clicked()
+                {
+                    for t in &hidden {
+                        self.track_views.entry(*t).or_default().hidden = false;
+                    }
+                }
                 continue;
             };
-            painter.rect_filled(h, 0.0, Color32::from_rgb(0x25, 0x25, 0x29));
+            let view = self.track_views.get(&track.id).copied().unwrap_or_default();
+            let active = self
+                .st
+                .selection
+                .iter()
+                .any(|c| track.clips.iter().any(|x| x.id == *c));
+            painter.rect_filled(
+                h,
+                0.0,
+                if active {
+                    Color32::from_rgb(0x2c, 0x2c, 0x33)
+                } else {
+                    Color32::from_rgb(0x25, 0x25, 0x29)
+                },
+            );
             painter.line_segment(
                 [h.left_bottom(), h.right_bottom()],
                 Stroke::new(1.0, theme::BORDER),
@@ -1026,30 +1386,129 @@ impl Workspace {
                 TrackKind::Video => (theme::CLIP_VIDEO_LABEL, format!("Vídeo {}", row.index + 1)),
                 TrackKind::Audio => (theme::CLIP_AUDIO_LABEL, format!("Áudio {}", row.index + 1)),
             };
-            let badge = Rect::from_min_size(h.min + vec2(8.0, 7.0), vec2(30.0, 18.0));
+            // Tarja colorida do tipo da faixa.
+            painter.rect_filled(
+                Rect::from_min_size(h.min, vec2(3.0, h.height())),
+                0.0,
+                badge_color,
+            );
+
+            // O cabeçalho inteiro: menu e duplo clique (registrado antes dos botões, que ganham).
+            let hresp = ui.interact(
+                h.intersect(below),
+                ui.id().with(("hdr", track.id)),
+                Sense::click(),
+            );
+            if hresp.double_clicked() {
+                self.track_views.entry(track.id).or_default().collapsed = !view.collapsed;
+            }
+            hresp.context_menu(|ui| {
+                let gaps = track
+                    .clips
+                    .windows(2)
+                    .filter(|w| w[1].start > w[0].end())
+                    .count()
+                    + usize::from(track.clips.first().is_some_and(|c| c.start > 0));
+                if ui
+                    .add_enabled(
+                        gaps > 0 && !track.locked,
+                        egui::Button::new(format!("Fechar todos os buracos ({gaps})")),
+                    )
+                    .clicked()
+                {
+                    self.st.apply(Edit::CloseAllGaps { track: track.id });
+                    ui.close();
+                }
+                ui.separator();
+                let collapse = if view.collapsed {
+                    "Expandir faixa"
+                } else {
+                    "Minimizar faixa"
+                };
+                if ui.button(collapse).clicked() {
+                    self.track_views.entry(track.id).or_default().collapsed = !view.collapsed;
+                    ui.close();
+                }
+                if ui.button("Altura padrão").clicked() {
+                    let v = self.track_views.entry(track.id).or_default();
+                    v.height = TRACK_H;
+                    v.collapsed = false;
+                    ui.close();
+                }
+                if ui.button("Esconder faixa").clicked() {
+                    self.track_views.entry(track.id).or_default().hidden = true;
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button(format!("Apagar faixa {label}")).clicked() {
+                    self.st.apply(Edit::RemoveTrack(track.id));
+                    ui.close();
+                }
+            });
+
+            // Linha de cima: setinha, etiqueta, nome e botões, todos centrados no mesmo y.
+            let cy = h.top() + COLLAPSED_H / 2.0;
+            let chev = Rect::from_center_size(pos2(h.left() + 16.0, cy), vec2(16.0, 16.0));
+            let cresp = ui
+                .interact(chev, ui.id().with(("chev", track.id)), Sense::click())
+                .on_hover_text(if view.collapsed {
+                    "Expandir faixa (duplo clique no cabeçalho)"
+                } else {
+                    "Minimizar faixa (duplo clique no cabeçalho)"
+                });
+            let cc = if cresp.hovered() {
+                Color32::WHITE
+            } else {
+                theme::TEXT_DIM
+            };
+            let c = chev.center();
+            let tri = if view.collapsed {
+                vec![
+                    c + vec2(-2.5, -4.0),
+                    c + vec2(3.5, 0.0),
+                    c + vec2(-2.5, 4.0),
+                ]
+            } else {
+                vec![
+                    c + vec2(-4.0, -2.5),
+                    c + vec2(4.0, -2.5),
+                    c + vec2(0.0, 3.5),
+                ]
+            };
+            painter.add(egui::Shape::convex_polygon(tri, cc, Stroke::NONE));
+            if cresp.clicked() {
+                self.track_views.entry(track.id).or_default().collapsed = !view.collapsed;
+            }
+            let badge = Rect::from_min_size(pos2(h.left() + 28.0, cy - 9.0), vec2(28.0, 18.0));
             painter.rect_filled(badge, 3.0, badge_color);
             painter.text(
                 badge.center(),
                 Align2::CENTER_CENTER,
                 &label,
-                theme::text(12.0),
+                theme::text(11.5),
                 Color32::WHITE,
             );
             painter.text(
-                pos2(badge.right() + 8.0, badge.center().y),
+                pos2(badge.right() + 8.0, cy),
                 Align2::LEFT_CENTER,
                 &name,
                 theme::text(12.0),
-                theme::TEXT,
+                if track.enabled {
+                    theme::TEXT
+                } else {
+                    theme::TEXT_DIM
+                },
             );
-            let count = track.clips.len();
-            painter.text(
-                pos2(h.right() - 8.0, badge.center().y),
-                Align2::RIGHT_CENTER,
-                format!("{count} clipe{}", if count == 1 { "" } else { "s" }),
-                theme::text(10.5),
-                theme::TEXT_DIM,
-            );
+            if !view.collapsed && h.height() >= 44.0 {
+                let count = track.clips.len();
+                painter.text(
+                    pos2(badge.right() + 8.0, cy + 18.0),
+                    Align2::LEFT_CENTER,
+                    format!("{count} clipe{}", if count == 1 { "" } else { "s" }),
+                    theme::text(10.5),
+                    theme::TEXT_DIM,
+                );
+            }
 
             let mut flags = TrackFlags {
                 locked: track.locked,
@@ -1057,94 +1516,107 @@ impl Workspace {
                 muted: track.muted,
                 solo: track.solo,
             };
-            let mut changed = false;
-            let buttons = Rect::from_min_max(
-                pos2(h.left() + 6.0, h.bottom() - 25.0),
-                pos2(h.right() - 6.0, h.bottom() - 2.0),
-            );
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(buttons)
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                |ui| {
-                    ui.set_clip_rect(below);
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    let lock_icon = if track.locked {
-                        Icon::Lock
-                    } else {
-                        Icon::Unlock
-                    };
-                    if icons::button(ui, lock_icon, 13.0, track.locked, "Travar faixa").clicked() {
-                        flags.locked = !flags.locked;
-                        changed = true;
-                    }
-                    match row.kind {
-                        TrackKind::Video => {
-                            if icons::button(
-                                ui,
-                                Icon::Monitor,
-                                13.0,
-                                !track.enabled,
-                                if track.enabled {
-                                    "Desligar faixa"
-                                } else {
-                                    "Ligar faixa"
-                                },
-                            )
-                            .clicked()
-                            {
-                                flags.enabled = !flags.enabled;
-                                changed = true;
-                            }
-                        }
-                        TrackKind::Audio => {
-                            let toggle = |ui: &mut egui::Ui,
-                                          text: &str,
-                                          on: bool,
-                                          color: Color32,
-                                          tip: &str| {
-                                let b = egui::Button::new(
-                                    egui::RichText::new(text).size(11.0).color(if on {
-                                        Color32::BLACK
-                                    } else {
-                                        theme::TEXT
-                                    }),
-                                )
-                                .fill(if on { color } else { theme::BAR_LIGHT })
-                                .min_size(vec2(20.0, 18.0));
-                                ui.add(b).on_hover_text(tip).clicked()
-                            };
-                            if toggle(ui, "M", track.muted, Color32::from_rgb(230, 80, 70), "Mudo")
-                            {
-                                flags.muted = !flags.muted;
-                                changed = true;
-                            }
-                            if toggle(ui, "S", track.solo, Color32::from_rgb(235, 200, 70), "Solo")
-                            {
-                                flags.solo = !flags.solo;
-                                changed = true;
-                            }
-                        }
-                    }
+            let n = if row.kind == TrackKind::Video { 2 } else { 3 };
+            let slots = header_buttons(h, n);
+            let red = Color32::from_rgb(230, 80, 70);
+            let yellow = Color32::from_rgb(235, 200, 70);
+            if hdr_toggle(
+                ui,
+                painter,
+                slots[0],
+                ("lock", track.id),
+                HdrGlyph::Icon(if track.locked {
+                    Icon::Lock
+                } else {
+                    Icon::Unlock
+                }),
+                track.locked.then_some(theme::ACCENT),
+                if track.locked {
+                    "Destravar faixa"
+                } else {
+                    "Travar faixa"
                 },
-            );
-            if changed {
+            ) {
+                flags.locked = !flags.locked;
+            }
+            match row.kind {
+                TrackKind::Video => {
+                    if hdr_toggle(
+                        ui,
+                        painter,
+                        slots[1],
+                        ("enable", track.id),
+                        HdrGlyph::Icon(Icon::Monitor),
+                        (!track.enabled).then_some(red),
+                        if track.enabled {
+                            "Desligar faixa"
+                        } else {
+                            "Ligar faixa"
+                        },
+                    ) {
+                        flags.enabled = !flags.enabled;
+                    }
+                }
+                TrackKind::Audio => {
+                    if hdr_toggle(
+                        ui,
+                        painter,
+                        slots[1],
+                        ("mute", track.id),
+                        HdrGlyph::Letter("M"),
+                        track.muted.then_some(red),
+                        "Mudo",
+                    ) {
+                        flags.muted = !flags.muted;
+                    }
+                    if hdr_toggle(
+                        ui,
+                        painter,
+                        slots[2],
+                        ("solo", track.id),
+                        HdrGlyph::Letter("S"),
+                        track.solo.then_some(yellow),
+                        "Solo",
+                    ) {
+                        flags.solo = !flags.solo;
+                    }
+                }
+            }
+            if flags.locked != track.locked
+                || flags.enabled != track.enabled
+                || flags.muted != track.muted
+                || flags.solo != track.solo
+            {
                 self.st.apply(Edit::SetTrackFlags {
                     track: track.id,
                     flags,
                 });
             }
-            let hresp = ui.interact(
-                Rect::from_min_size(h.min, vec2(h.width(), 30.0)).intersect(below),
-                ui.id().with(("hdr", track.id)),
-                Sense::click(),
-            );
-            hresp.context_menu(|ui| {
-                if ui.button(format!("Apagar faixa {label}")).clicked() {
-                    self.st.apply(Edit::RemoveTrack(track.id));
-                    ui.close();
+
+            // Borda de baixo: arrastar muda a altura da faixa.
+            if !view.collapsed {
+                let grip = Rect::from_min_max(
+                    pos2(h.left(), h.bottom() - 3.0),
+                    pos2(layout.lanes.right(), h.bottom() + 2.0),
+                );
+                let gresp = ui
+                    .interact(
+                        grip.intersect(below),
+                        ui.id().with(("grip", track.id)),
+                        Sense::drag(),
+                    )
+                    .on_hover_cursor(CursorIcon::ResizeVertical);
+                if gresp.hovered() || gresp.dragged() {
+                    painter.line_segment(
+                        [pos2(h.left(), h.bottom()), pos2(h.right(), h.bottom())],
+                        Stroke::new(2.0, theme::ACCENT),
+                    );
                 }
-            });
+                if gresp.dragged() {
+                    let v = self.track_views.entry(track.id).or_default();
+                    v.height = (v.height + gresp.drag_delta().y).clamp(MIN_TRACK_H, MAX_TRACK_H);
+                }
+            }
         }
     }
 
@@ -1161,79 +1633,69 @@ impl Workspace {
     }
 
     fn timeline_toolbar(&mut self, ui: &mut egui::Ui) {
-        theme::header_strip(ui, 32.0, |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
+        use crate::keymap::Action;
+        let tips = [
+            self.tip("Seleção", Action::SelectionTool),
+            self.tip("Lâmina", Action::BladeTool),
+            self.tip("Insert do Source", Action::InsertEdit),
+            self.tip("Overwrite do Source", Action::OverwriteEdit),
+            self.tip("Append do Source", Action::AppendEdit),
+            self.tip("Snapping", Action::ToggleSnapping),
+            self.tip(
+                "Seleção ligada (áudio + vídeo)",
+                Action::ToggleLinkedSelection,
+            ),
+            self.tip(
+                "Skimming: o viewer mostra o frame sob o mouse",
+                Action::ToggleSkimming,
+            ),
+            self.tip("Zoom para caber", Action::ZoomToFit),
+            self.tip("Mais zoom", Action::ZoomIn),
+            self.tip("Menos zoom", Action::ZoomOut),
+        ];
+        theme::toolbar(ui, |ui| {
+            let sz = theme::ICON;
             if icons::button(
                 ui,
                 Icon::Select,
-                15.0,
+                sz,
                 self.st.tool == Tool::Selection,
-                "Ferramenta de seleção (A)",
+                &tips[0],
             )
             .clicked()
             {
                 self.st.tool = Tool::Selection;
             }
-            if icons::button(
-                ui,
-                Icon::Blade,
-                15.0,
-                self.st.tool == Tool::Blade,
-                "Lâmina (B)",
-            )
-            .clicked()
-            {
+            if icons::button(ui, Icon::Blade, sz, self.st.tool == Tool::Blade, &tips[1]).clicked() {
                 self.st.tool = Tool::Blade;
             }
-            ui.add_space(10.0);
-            if icons::button(ui, Icon::Insert, 15.0, false, "Insert do Source (F9)").clicked() {
+            toolbar_sep(ui);
+            if icons::button(ui, Icon::Insert, sz, false, &tips[2]).clicked() {
                 self.st.place_from_source(PlaceMode::Insert);
             }
-            if icons::button(
-                ui,
-                Icon::Overwrite,
-                15.0,
-                false,
-                "Overwrite do Source (F10)",
-            )
-            .clicked()
-            {
+            if icons::button(ui, Icon::Overwrite, sz, false, &tips[3]).clicked() {
                 self.st.place_from_source(PlaceMode::Overwrite);
             }
-            if icons::button(
-                ui,
-                Icon::Append,
-                15.0,
-                false,
-                "Append do Source (Shift+F12)",
-            )
-            .clicked()
-            {
+            if icons::button(ui, Icon::Append, sz, false, &tips[4]).clicked() {
                 self.st.place_from_source(PlaceMode::Append);
             }
-            ui.add_space(10.0);
-            if icons::button(ui, Icon::Magnet, 15.0, self.st.snapping, "Snapping (N)").clicked() {
+            toolbar_sep(ui);
+            if icons::button(ui, Icon::Magnet, sz, self.st.snapping, &tips[5]).clicked() {
                 self.st.snapping = !self.st.snapping;
             }
-            if icons::button(
-                ui,
-                Icon::Link,
-                15.0,
-                self.st.linked_selection,
-                "Seleção ligada (Ctrl+Shift+L)",
-            )
-            .clicked()
-            {
+            if icons::button(ui, Icon::Link, sz, self.st.linked_selection, &tips[6]).clicked() {
                 self.st.linked_selection = !self.st.linked_selection;
             }
+            if icons::button(ui, Icon::Skim, sz, self.skimming, &tips[7]).clicked() {
+                self.skimming = !self.skimming;
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                if icons::button(ui, Icon::Fit, 15.0, false, "Zoom para caber (Shift+Z)").clicked()
-                {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if icons::button(ui, Icon::Fit, sz, false, &tips[8]).clicked() {
                     let w = self.tl_width;
                     self.zoom_to_fit(w);
                 }
-                if icons::button(ui, Icon::Plus, 13.0, false, "Zoom + (Ctrl+=)").clicked() {
+                if icons::button(ui, Icon::Plus, sz - 2.0, false, &tips[9]).clicked() {
                     self.zoom(1.4);
                 }
                 let mut z = self.tl.ppf.ln();
@@ -1242,7 +1704,7 @@ impl Workspace {
                     let factor = z.exp() / self.tl.ppf;
                     self.zoom(factor);
                 }
-                if icons::button(ui, Icon::Minus, 13.0, false, "Zoom − (Ctrl+-)").clicked() {
+                if icons::button(ui, Icon::Minus, sz - 2.0, false, &tips[10]).clicked() {
                     self.zoom(1.0 / 1.4);
                 }
             });
@@ -1250,6 +1712,7 @@ impl Workspace {
     }
 
     fn clip_menu(&mut self, ui: &mut egui::Ui) {
+        use crate::keymap::Action;
         if self.st.selection.is_empty() {
             ui.label("Nenhum clipe");
             return;
@@ -1268,6 +1731,27 @@ impl Workspace {
         }
         if ui.button("Ligar / separar áudio e vídeo").clicked() {
             self.st.toggle_link();
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                self.st.attributes.is_some(),
+                egui::Button::new("Colar atributos")
+                    .shortcut_text(self.shortcut(Action::PasteAttributes)),
+            )
+            .clicked()
+        {
+            self.st.paste_attributes();
+            ui.close();
+        }
+        if ui
+            .add(
+                egui::Button::new("Mostrar no Media Pool")
+                    .shortcut_text(self.shortcut(Action::ShowInPool)),
+            )
+            .clicked()
+        {
+            self.show_in_pool();
             ui.close();
         }
         if let Some(c) = self.tl.menu_clip
@@ -1482,17 +1966,41 @@ impl Workspace {
     /// Ponto na linha da faixa (`kind`, `index`) no `frame`, na última timeline desenhada.
     #[cfg(test)]
     pub fn tl_point(&self, kind: TrackKind, index: usize, frame: f32) -> Pos2 {
-        let layout = Layout::new(&self.project_arc, self.tl_area, self.tl.v_scroll);
+        let layout = Layout::new(
+            &self.project_arc,
+            self.tl_area,
+            self.tl.v_scroll,
+            &self.track_views,
+        );
         let r = layout.rect_of(Row { kind, index }).expect("linha existe");
         pos2(self.x_of(frame, layout.left), r.center().y)
+    }
+
+    /// Retângulo da linha da faixa na última timeline desenhada (para os testes).
+    #[cfg(test)]
+    pub fn tl_row_rect(&self, kind: TrackKind, index: usize) -> Rect {
+        let layout = Layout::new(
+            &self.project_arc,
+            self.tl_area,
+            self.tl.v_scroll,
+            &self.track_views,
+        );
+        layout.rect_of(Row { kind, index }).expect("linha existe")
     }
 
     /// Centro do botão de travar no cabeçalho da faixa (para os testes).
     #[cfg(test)]
     pub fn tl_lock_button(&self, kind: TrackKind, index: usize) -> Pos2 {
-        let layout = Layout::new(&self.project_arc, self.tl_area, self.tl.v_scroll);
+        let layout = Layout::new(
+            &self.project_arc,
+            self.tl_area,
+            self.tl.v_scroll,
+            &self.track_views,
+        );
         let r = layout.rect_of(Row { kind, index }).expect("linha existe");
-        pos2(r.left() + 6.0 + 10.5, r.bottom() - 13.5)
+        let h = Rect::from_min_max(r.min, pos2(layout.left - 1.0, r.max.y));
+        let n = if kind == TrackKind::Video { 2 } else { 3 };
+        header_buttons(h, n)[0].center()
     }
 
     fn payload_len(&self, p: &Project, payload: DragPayload) -> Frame {

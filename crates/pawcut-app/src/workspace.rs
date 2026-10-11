@@ -15,7 +15,7 @@ use crate::panels::dialogs::{DeliverDialog, NewProjectDialog};
 use crate::panels::timeline::TimelineView;
 use crate::state::{AppState, Monitor, PlaceMode, Tool};
 
-const AUTOSAVE_EVERY: Duration = Duration::from_secs(300);
+const AUTOSAVE_EVERY: Duration = Duration::from_secs(120);
 const MEDIA_EXTENSIONS: [&str; 18] = [
     "mp4", "mov", "mkv", "webm", "avi", "m4v", "mts", "mp3", "wav", "flac", "ogg", "m4a", "aac",
     "png", "jpg", "jpeg", "webp", "bmp",
@@ -66,6 +66,9 @@ pub struct Workspace {
     pub preview: PreviewWorker,
     pub audio: AudioPlayer,
     pub waveforms: Waveforms,
+    pub frame_thumbs: crate::engine::FrameThumbs,
+    /// Texturas da tira de frames: (arquivo, meio segundo) → textura (None = falhou).
+    pub strip: HashMap<(std::path::PathBuf, i64), Option<TextureHandle>>,
     pub tex_timeline: Option<TextureHandle>,
     pub tex_source: Option<TextureHandle>,
     pub thumbs: HashMap<MediaId, Option<TextureHandle>>,
@@ -100,6 +103,31 @@ pub struct Workspace {
         PathBuf,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
     )>,
+    /// Altura/minimizado/escondido de cada faixa (só visual, não vai para o projeto).
+    pub track_views: HashMap<pawcut_core::TrackId, crate::panels::timeline::TrackView>,
+    /// Zoom do Timeline Viewer (0 = ajustar à janela) e deslocamento ao arrastar com o botão do meio.
+    pub viewer_zoom: f32,
+    pub viewer_pan: egui::Vec2,
+    /// Guias de área segura (ação 90%, títulos 80%).
+    pub safe_guides: bool,
+    /// Skimming: o viewer mostra o frame sob o mouse na timeline.
+    pub skimming: bool,
+    pub skim_frame: Option<Frame>,
+    pub skim_next: Option<Frame>,
+    /// Buraco selecionado (faixa, frame dentro dele): Delete fecha.
+    pub selected_gap: Option<(pawcut_core::TrackId, Frame)>,
+    /// Pedido de mostrar/rolar até `pool_highlight` no Media Pool.
+    pub reveal_in_pool: bool,
+    /// Avisos na tela: texto, erro?, quando apareceu.
+    pub toasts: Vec<(String, bool, Instant)>,
+    /// Último salvamento (manual ou autosave), para a barra de baixo.
+    pub last_saved: Option<Instant>,
+    /// Media Pool: tamanho dos blocos, modo lista e busca.
+    pub pool_tile: f32,
+    pub pool_list: bool,
+    pub pool_search: String,
+    /// Mídia destacada no Media Pool ("Mostrar no Media Pool").
+    pub pool_highlight: Option<MediaId>,
     /// Parâmetros de "Remover silêncios".
     pub silence_threshold: f32,
     pub silence_min: f64,
@@ -129,6 +157,11 @@ impl Workspace {
             preview,
             audio: AudioPlayer::spawn(48_000),
             waveforms: Waveforms::new(),
+            frame_thumbs: {
+                let c = ctx.clone();
+                crate::engine::FrameThumbs::spawn(move || c.request_repaint())
+            },
+            strip: HashMap::new(),
             tex_timeline: None,
             tex_source: None,
             thumbs: HashMap::new(),
@@ -156,6 +189,21 @@ impl Workspace {
             editing_marker: None,
             project_settings: None,
             proxy_jobs: Vec::new(),
+            track_views: HashMap::new(),
+            viewer_zoom: 0.0,
+            viewer_pan: egui::Vec2::ZERO,
+            safe_guides: false,
+            skimming: false,
+            skim_frame: None,
+            skim_next: None,
+            selected_gap: None,
+            reveal_in_pool: false,
+            toasts: Vec::new(),
+            last_saved: None,
+            pool_tile: 132.0,
+            pool_list: false,
+            pool_search: String::new(),
+            pool_highlight: None,
             silence_threshold: -40.0,
             silence_min: 0.5,
             hover_preview: None,
@@ -170,7 +218,12 @@ impl Workspace {
 
     pub fn refresh_project_arc(&mut self) {
         if self.st.editor.revision() != self.project_rev {
+            let was_empty = self.project_arc.duration() == 0;
             self.project_arc = Arc::new(self.st.project().clone());
+            if was_empty && self.project_arc.duration() > 0 && self.project_rev != u64::MAX {
+                let w = self.tl_width;
+                self.zoom_to_fit(w);
+            }
             self.project_rev = self.st.editor.revision();
             if matches!(self.playback, Playback::Timeline { audio: true, .. }) {
                 self.audio.update_project(self.project_arc.clone());
@@ -184,6 +237,21 @@ impl Workspace {
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
         self.refresh_project_arc();
         self.hover_preview = self.hover_preview_next.take();
+        self.skim_frame = self.skim_next.take();
+        for (text, error) in self.st.notices.drain(..) {
+            self.toasts.retain(|t| t.0 != text);
+            self.toasts.push((text, error, Instant::now()));
+        }
+        let now = Instant::now();
+        self.toasts.retain(|(_, error, born)| {
+            now.duration_since(*born) < Duration::from_secs(if *error { 8 } else { 4 })
+        });
+        if self.toasts.len() > 4 {
+            self.toasts.drain(..self.toasts.len() - 4);
+        }
+        if !self.toasts.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         while let Ok(r) = self.preview.results.try_recv() {
             let size = [r.image.width() as usize, r.image.height() as usize];
             let img = egui::ColorImage::from_rgba_unmultiplied(size, r.image.as_raw());
@@ -453,6 +521,45 @@ impl Workspace {
         }
     }
 
+    /// Shift+F: destaca no Media Pool a mídia do clipe selecionado.
+    pub fn show_in_pool(&mut self) {
+        let p = self.project_arc.clone();
+        let media = self
+            .st
+            .selection
+            .iter()
+            .filter_map(|c| p.clip(*c))
+            .find_map(|c| match c.source {
+                pawcut_core::ClipSource::Media(m) => Some(m),
+                _ => None,
+            });
+        match media {
+            Some(m) => {
+                self.pool_highlight = Some(m);
+                self.pool_search.clear();
+                self.reveal_in_pool = true;
+            }
+            None => self.st.warn("Selecione um clipe de mídia na timeline"),
+        }
+    }
+
+    /// Atalho atual da ação, para mostrar nos menus ("" se não tiver).
+    pub fn shortcut(&self, action: Action) -> String {
+        self.keymap
+            .chords(action)
+            .first()
+            .map(|c| c.display())
+            .unwrap_or_default()
+    }
+
+    /// Texto de dica com o atalho atual da ação (lido do keymap).
+    pub fn tip(&self, text: &str, action: Action) -> String {
+        match self.keymap.chords(action).first() {
+            Some(c) => format!("{text}  ({})", c.display()),
+            None => text.to_string(),
+        }
+    }
+
     pub fn run_action(&mut self, action: Action) {
         let st = &mut self.st;
         match action {
@@ -502,6 +609,13 @@ impl Workspace {
                 });
             }
             Action::BladeAtPlayhead => st.blade_at_playhead(),
+            Action::Delete | Action::RippleDelete
+                if self.selected_gap.is_some() && st.selection.is_empty() =>
+            {
+                if let Some((track, at)) = self.selected_gap.take() {
+                    self.st.apply(pawcut_core::Edit::CloseGap { track, at });
+                }
+            }
             Action::Delete => st.delete_selection(false),
             Action::RippleDelete => st.delete_selection(true),
             Action::InsertEdit => st.place_from_source(PlaceMode::Insert),
@@ -532,6 +646,24 @@ impl Workspace {
             Action::PrevMarker => st.go_to_marker(false),
             Action::NextMarker => st.go_to_marker(true),
             Action::AddDissolve => st.add_dissolve(),
+            Action::ExtractInOut => st.extract_in_out(true),
+            Action::LiftInOut => st.extract_in_out(false),
+            Action::NudgeLeft => st.nudge(-1),
+            Action::NudgeRight => st.nudge(1),
+            Action::NudgeLeft10 => st.nudge(-10),
+            Action::NudgeRight10 => st.nudge(10),
+            Action::SelectForward => st.select_forward(),
+            Action::PasteAttributes => st.paste_attributes(),
+            Action::ToggleSkimming => {
+                self.skimming = !self.skimming;
+                let on = self.skimming;
+                self.st.say(if on {
+                    "Skimming ligado: o viewer segue o mouse na timeline"
+                } else {
+                    "Skimming desligado"
+                });
+            }
+            Action::ShowInPool => self.show_in_pool(),
             Action::ZoomToFit => {
                 let w = self.tl_width;
                 self.zoom_to_fit(w);
@@ -562,6 +694,30 @@ impl Workspace {
                 )
             })
             .clone()
+    }
+
+    /// Miniatura do vídeo `path` perto de `seconds` (para a tira de frames); pede se faltar.
+    pub fn strip_frame(&mut self, path: &Path, seconds: f64) -> Option<TextureHandle> {
+        for (key, img) in self.frame_thumbs.take_done() {
+            let tex = img.map(|img| {
+                let size = [img.width() as usize, img.height() as usize];
+                let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+                self.ctx.load_texture(
+                    format!("strip-{}-{}", key.0.display(), key.1),
+                    color,
+                    TextureOptions::LINEAR,
+                )
+            });
+            self.strip.insert(key, tex);
+        }
+        let key = crate::engine::FrameThumbs::key(path, seconds);
+        match self.strip.get(&key) {
+            Some(t) => t.clone(),
+            None => {
+                self.frame_thumbs.request(key);
+                None
+            }
+        }
     }
 
     pub fn forget_media(&mut self, id: MediaId) {
@@ -800,6 +956,7 @@ impl Workspace {
     fn save_to(&mut self, path: &Path) -> bool {
         match self.st.save_to(path) {
             Ok(()) => {
+                self.last_saved = Some(Instant::now());
                 config::remember_recent(path);
                 self.discard_autosave();
                 self.refresh_autosave_path();
@@ -822,6 +979,7 @@ impl Workspace {
 
     /// Grava o autosave desta sessão agora.
     pub fn autosave_now(&mut self) {
+        self.last_saved = Some(Instant::now());
         if self.autosave_path.as_os_str().is_empty() {
             self.refresh_autosave_path();
         }
@@ -847,6 +1005,8 @@ impl Workspace {
     pub fn forget_path(&mut self, path: &Path) {
         self.preview.forget(path);
         self.audio.forget(path);
+        self.frame_thumbs.forget(path);
+        self.strip.retain(|(p, _), _| p != path);
         self.requested_timeline = None;
         self.requested_source = None;
     }

@@ -167,6 +167,12 @@ pub enum Edit {
         start: Frame,
         end: Frame,
     },
+    /// Tira o intervalo `[start, end)` das faixas deixando o buraco (Lift).
+    DeleteRange {
+        tracks: Vec<TrackId>,
+        start: Frame,
+        end: Frame,
+    },
     /// Fecha o buraco da faixa que contém `at` (puxa o que vem depois).
     CloseGap {
         track: TrackId,
@@ -344,9 +350,8 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
             }
             Ok(Outcome::default())
         }
-        Edit::RippleDeleteRange { tracks, start, end } => {
-            ripple_delete_range(p, tracks, start, end)
-        }
+        Edit::RippleDeleteRange { tracks, start, end } => delete_range(p, tracks, start, end, true),
+        Edit::DeleteRange { tracks, start, end } => delete_range(p, tracks, start, end, false),
         Edit::RippleTrimToPlayhead { clips, edge, at } => ripple_trim_to(p, clips, edge, at),
         Edit::SetKeyframe {
             clip,
@@ -1000,11 +1005,12 @@ fn paste(p: &mut Project, at: Frame, clips: Vec<(TrackId, Clip)>) -> Result<Outc
     Ok(out)
 }
 
-fn ripple_delete_range(
+fn delete_range(
     p: &mut Project,
     tracks: Vec<TrackId>,
     start: Frame,
     end: Frame,
+    ripple: bool,
 ) -> Result<Outcome, EditError> {
     if start >= end || start < 0 {
         return Err(EditError::InvalidValue("intervalo inválido"));
@@ -1032,8 +1038,10 @@ fn ripple_delete_range(
         track
             .clips
             .retain(|c| !(c.start >= start && c.end() <= end));
-        for c in track.clips.iter_mut().filter(|c| c.start >= end) {
-            c.start -= end - start;
+        if ripple {
+            for c in track.clips.iter_mut().filter(|c| c.start >= end) {
+                c.start -= end - start;
+            }
         }
     }
     Ok(Outcome::default())
@@ -1074,6 +1082,7 @@ impl Edit {
             Edit::SetKeyframe { .. } | Edit::ClearKeyframes { .. } => "Keyframe",
             Edit::Paste { .. } => "Colar",
             Edit::RippleDeleteRange { .. } => "Remover trecho",
+            Edit::DeleteRange { .. } => "Apagar trecho",
             Edit::CloseGap { .. } => "Fechar buraco",
             Edit::CloseAllGaps { .. } => "Fechar buracos",
         }

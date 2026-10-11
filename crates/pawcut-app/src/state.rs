@@ -62,6 +62,10 @@ pub struct AppState {
     pub offline: HashSet<MediaId>,
     /// Mensagem para a barra de status.
     pub status: Option<String>,
+    /// Clipe de onde "colar atributos" copia (o primeiro do último Ctrl+C).
+    pub attributes: Option<Clip>,
+    /// Avisos para a interface mostrar (texto, é erro?).
+    pub notices: Vec<(String, bool)>,
     /// Clipes copiados: faixa de origem e o clipe com `start` relativo ao primeiro.
     pub clipboard: Vec<(TrackKind, usize, Clip)>,
 }
@@ -89,6 +93,8 @@ impl AppState {
             offline: HashSet::new(),
             status: None,
             clipboard: Vec::new(),
+            notices: Vec::new(),
+            attributes: None,
         };
         s.saved_revision = s.editor.revision();
         s.refresh_offline();
@@ -115,7 +121,16 @@ impl AppState {
     }
 
     pub fn say(&mut self, msg: impl Into<String>) {
-        self.status = Some(msg.into());
+        let msg = msg.into();
+        self.notices.push((msg.clone(), false));
+        self.status = Some(msg);
+    }
+
+    /// Aviso de erro (vermelho, fica mais tempo).
+    pub fn warn(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        self.notices.push((msg.clone(), true));
+        self.status = Some(msg);
     }
 
     /// Aplica uma edição; erros que não são "nada mudou" vão para a barra de status.
@@ -124,7 +139,7 @@ impl AppState {
             Ok(o) => Some(o),
             Err(EditError::NoChange) => None,
             Err(e) => {
-                self.say(e.to_string());
+                self.warn(e.to_string());
                 None
             }
         }
@@ -495,6 +510,7 @@ impl AppState {
             c.start -= first;
         }
         let n = items.len();
+        self.attributes = items.first().map(|(_, _, c)| c.clone());
         self.clipboard = items;
         self.say(format!("{n} clipe(s) copiado(s)"));
     }
@@ -668,6 +684,111 @@ impl AppState {
         ));
     }
 
+    /// Extract (ripple) ou Lift do trecho In/Out em todas as faixas destravadas.
+    pub fn extract_in_out(&mut self, ripple: bool) {
+        let (Some(a), Some(b)) = (self.mark_in, self.mark_out) else {
+            self.warn("Marque In (I) e Out (O) na timeline primeiro");
+            return;
+        };
+        if b <= a {
+            return;
+        }
+        let tracks: Vec<TrackId> = self
+            .project()
+            .all_tracks()
+            .filter(|t| !t.locked)
+            .map(|t| t.id)
+            .collect();
+        let edit = if ripple {
+            Edit::RippleDeleteRange {
+                tracks,
+                start: a,
+                end: b,
+            }
+        } else {
+            Edit::DeleteRange {
+                tracks,
+                start: a,
+                end: b,
+            }
+        };
+        if self.apply(edit).is_some() {
+            self.selection.clear();
+            if ripple {
+                self.playhead = a;
+                self.mark_out = None;
+            }
+        }
+    }
+
+    /// Empurra a seleção `delta` frames (vírgula/ponto).
+    pub fn nudge(&mut self, delta: Frame) {
+        if self.selection.is_empty() {
+            return;
+        }
+        let clips = self.expanded(&self.selection.clone());
+        self.apply(Edit::Move {
+            clips,
+            delta,
+            video_track_delta: 0,
+            audio_track_delta: 0,
+        });
+    }
+
+    /// Seleciona todos os clipes que começam no cursor ou depois (para empurrar o resto).
+    pub fn select_forward(&mut self) {
+        let at = self.playhead;
+        self.selection = self
+            .project()
+            .all_tracks()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.start >= at)
+            .map(|c| c.id)
+            .collect();
+    }
+
+    /// Cola transform, cor, volume, fades e velocidade do clipe copiado nos selecionados.
+    pub fn paste_attributes(&mut self) {
+        let Some(src) = self.attributes.clone() else {
+            self.warn("Copie um clipe (Ctrl+C) antes de colar atributos");
+            return;
+        };
+        let targets: Vec<ClipId> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|c| *c != src.id)
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        for id in &targets {
+            let id = *id;
+            for change in [
+                ClipChange::Transform(src.transform),
+                ClipChange::Color(src.color),
+                ClipChange::VolumeDb(src.volume_db),
+                ClipChange::FadeIn(src.fade_in),
+                ClipChange::FadeOut(src.fade_out),
+            ] {
+                let _ = self
+                    .editor
+                    .apply_coalescing(Edit::SetClip { clip: id, change }, "paste-attributes");
+            }
+            if (src.speed - 1.0).abs() > 1e-9 {
+                let _ = self.editor.apply_coalescing(
+                    Edit::SetSpeed {
+                        clips: vec![id],
+                        speed: src.speed,
+                    },
+                    "paste-attributes",
+                );
+            }
+        }
+        self.editor.end_coalescing();
+        self.say(format!("Atributos colados em {} clipe(s)", targets.len()));
+    }
+
     // ---------- Source Viewer ----------
 
     pub fn source_length(&self) -> Option<Frame> {
@@ -750,6 +871,42 @@ impl AppState {
             }
             self.selection = o.clips;
         }
+    }
+
+    /// Edição pela sobreposição do viewer: Insert/Overwrite/Append no cursor (`Some`) ou
+    /// "Place on Top" (`None`): numa faixa nova acima de tudo que ocupa aquele trecho.
+    pub fn place_media(&mut self, media: MediaId, mode: Option<PlaceMode>) {
+        let playhead = self.playhead;
+        match mode {
+            Some(mode) => {
+                self.open_in_source(media);
+                self.place_from_source(mode);
+            }
+            None => {
+                let Some(m) = self.project().media(media).cloned() else {
+                    return;
+                };
+                let len = m
+                    .info
+                    .duration
+                    .unwrap_or_else(|| default_still_frames(self.project()));
+                let kind = if m.info.kind == MediaKind::Audio {
+                    TrackKind::Audio
+                } else {
+                    TrackKind::Video
+                };
+                let (a, b) = (playhead, playhead + len);
+                let index = self
+                    .project()
+                    .tracks(kind)
+                    .iter()
+                    .rposition(|t| t.clips.iter().any(|c| c.start < b && c.end() > a))
+                    .map_or(0, |i| i + 1);
+                self.ensure_track(kind, index);
+                self.drop_media(media, kind, index, playhead);
+            }
+        }
+        self.active_monitor = Monitor::Timeline;
     }
 
     // ---------- mídia ----------
@@ -1091,5 +1248,52 @@ mod tests {
         assert_eq!(s.project().audio_tracks[0].clips.len(), 2);
         s.undo();
         assert_eq!(s.project().duration(), before, "um desfazer volta tudo");
+    }
+
+    #[test]
+    fn extract_lift_nudge_select_forward_and_paste_attributes() {
+        let mut s = state();
+        s.drop_generator(Generator::SolidColor, 0, 0);
+        s.mark_in = Some(30);
+        s.mark_out = Some(60);
+        s.extract_in_out(false);
+        assert_eq!(spans(&s, TrackKind::Video, 0), vec![(0, 30), (60, 150)]);
+        s.undo();
+        s.extract_in_out(true);
+        assert_eq!(spans(&s, TrackKind::Video, 0), vec![(0, 30), (30, 120)]);
+        assert_eq!(s.playhead, 30);
+        s.set_playhead(30);
+        s.select_forward();
+        assert_eq!(s.selection.len(), 1);
+        s.nudge(10);
+        assert_eq!(spans(&s, TrackKind::Video, 0), vec![(0, 30), (40, 130)]);
+        // atributos
+        let first = s.project().video_tracks[0].clips[0].id;
+        s.apply(Edit::SetClip {
+            clip: first,
+            change: ClipChange::Transform(Transform {
+                scale: 0.5,
+                ..Transform::default()
+            }),
+        });
+        s.select(first, false);
+        s.copy_selection();
+        let second = s.project().video_tracks[0].clips[1].id;
+        s.select(second, false);
+        s.paste_attributes();
+        assert_eq!(s.project().clip(second).unwrap().transform.scale, 0.5);
+    }
+
+    #[test]
+    fn place_on_top_uses_a_free_track_above() {
+        let mut s = state();
+        let media = add_video(&mut s, 60, false);
+        s.drop_media(media, TrackKind::Video, 0, 0);
+        s.set_playhead(10);
+        s.place_media(media, None);
+        assert_eq!(spans(&s, TrackKind::Video, 1), vec![(10, 70)]);
+        s.set_playhead(200);
+        s.place_media(media, None);
+        assert_eq!(spans(&s, TrackKind::Video, 0), vec![(0, 60), (200, 260)]);
     }
 }

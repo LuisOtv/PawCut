@@ -177,6 +177,86 @@ fn lock_button_locks_the_track() {
     assert!(h.state().st.project().video_tracks[0].locked);
 }
 
+fn two_solids(st: &mut AppState) {
+    st.drop_generator(Generator::SolidColor, 0, 0);
+    st.drop_generator(Generator::SolidColor, 0, 200);
+    st.selection.clear();
+}
+
+#[test]
+fn dragging_on_empty_lane_draws_a_selection_box() {
+    let mut h = harness(two_solids);
+    let from = h.state().tl_point(TrackKind::Video, 0, 500.0);
+    let to = h.state().tl_point(TrackKind::Video, 0, 100.0);
+    drag(&mut h, from, to);
+    assert_eq!(h.state().st.selection.len(), 2);
+    assert_eq!(
+        h.state().st.playhead,
+        0,
+        "arrastar no vazio não move o cursor"
+    );
+}
+
+#[test]
+fn clicking_a_gap_and_deleting_closes_it() {
+    let mut h = harness(two_solids);
+    let gap = h.state().tl_point(TrackKind::Video, 0, 175.0);
+    click(&mut h, gap);
+    assert!(h.state().selected_gap.is_some());
+    h.state_mut().run_action(crate::keymap::Action::Delete);
+    h.run_steps(2);
+    assert_eq!(v1_spans(&h), vec![(0, 150), (150, 300)]);
+}
+
+#[test]
+fn dragging_the_header_edge_resizes_the_track() {
+    let mut h = harness(with_solid);
+    let r = h.state().tl_row_rect(TrackKind::Video, 0);
+    let before = r.height();
+    let from = Pos2::new(r.left() + 60.0, r.bottom() - 1.0);
+    drag(&mut h, from, from + egui::vec2(0.0, 40.0));
+    let after = h.state().tl_row_rect(TrackKind::Video, 0).height();
+    assert!((after - before - 40.0).abs() < 2.0, "{before} → {after}");
+}
+
+#[test]
+fn typing_a_timecode_moves_the_playhead() {
+    let mut h = harness(with_solid);
+    let corner = h.state().tl_area.min + egui::vec2(60.0, 15.0);
+    click(&mut h, corner);
+    h.run_steps(2);
+    h.event(Event::Key {
+        key: egui::Key::A,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::COMMAND,
+    });
+    h.event(Event::Text("2:00".into()));
+    h.step();
+    h.event(Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    });
+    h.run_steps(3);
+    let fps = h.state().st.project().settings.fps.nominal();
+    assert_eq!(h.state().st.playhead, 2 * fps);
+}
+
+#[test]
+fn skimming_shows_the_frame_under_the_mouse() {
+    let mut h = harness(with_solid);
+    h.state_mut().skimming = true;
+    let at = h.state().tl_point(TrackKind::Video, 0, 80.0);
+    h.hover_at(at);
+    h.run_steps(2);
+    assert_eq!(h.state().skim_frame, Some(80));
+    assert_eq!(h.state().st.playhead, 0);
+}
+
 mod whole_app {
     use std::time::Duration;
 
@@ -412,8 +492,8 @@ fn hovering_a_media_previews_it_at_the_mouse_position() {
             ws,
         );
     h.run_steps(2);
-    // A primeira miniatura começa logo abaixo da barra (30 px) com 4 px de margem.
-    h.hover_at(egui::pos2(10.0 + 124.0 * 0.75, 30.0 + 6.0 + 4.0 + 35.0));
+    // Grade de 600 px: 4 colunas de 140 px, a partir de 8 px de margem abaixo da barra (28 px).
+    h.hover_at(egui::pos2(8.0 + 140.0 * 0.75, 28.0 + 8.0 + 30.0));
     h.run_steps(3);
     let (media, frac) = h
         .state()

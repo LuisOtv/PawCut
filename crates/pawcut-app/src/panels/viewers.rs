@@ -9,7 +9,7 @@ use crate::state::{Monitor, PlaceMode};
 use crate::theme;
 use crate::workspace::Workspace;
 
-const HEADER_H: f32 = 26.0;
+const HEADER_H: f32 = theme::TOOLBAR_H;
 const SCRUB_H: f32 = 16.0;
 const TRANSPORT_H: f32 = 34.0;
 
@@ -151,18 +151,37 @@ impl Workspace {
             .as_ref()
             .and_then(|p| p.file_stem())
             .map_or("Timeline 1".into(), |n| n.to_string_lossy().into_owned());
-        self.viewer_header(
-            ui,
-            r.header,
-            &name,
-            &format_timecode(self.st.playhead, s.fps),
-            active,
-        );
+        // Skimming: mostra o frame sob o mouse na timeline sem mover o cursor.
+        let shown = self.skim_frame.unwrap_or(self.st.playhead);
+        self.viewer_header(ui, r.header, &name, &format_timecode(shown, s.fps), active);
+
+        self.viewer_controls(ui, r.header);
 
         ui.painter().rect_filled(r.image, 0.0, Color32::BLACK);
-        let pic = fit_rect(r.image.shrink(6.0), aspect);
+        let ppp = ui.ctx().pixels_per_point();
+        let pic = if self.viewer_zoom > 0.0 {
+            let size = vec2(s.width as f32, s.height as f32) * self.viewer_zoom / ppp;
+            Rect::from_center_size(r.image.center() + self.viewer_pan, size)
+        } else {
+            fit_rect(r.image.shrink(6.0), aspect)
+        };
+        let image_painter = ui.painter_at(r.image);
         if let Some(tex) = &self.tex_timeline {
-            ui.painter().image(tex.id(), pic, uv(), Color32::WHITE);
+            image_painter.image(tex.id(), pic, uv(), Color32::WHITE);
+        }
+        if self.safe_guides {
+            let guide = Stroke::new(1.0, Color32::from_white_alpha(110));
+            for k in [0.05, 0.10] {
+                image_painter.rect_stroke(
+                    pic.shrink2(pic.size() * k),
+                    0.0,
+                    guide,
+                    egui::StrokeKind::Middle,
+                );
+            }
+            let c = pic.center();
+            image_painter.line_segment([c - vec2(10.0, 0.0), c + vec2(10.0, 0.0)], guide);
+            image_painter.line_segment([c - vec2(0.0, 10.0), c + vec2(0.0, 10.0)], guide);
         }
         if active {
             ui.painter().line_segment(
@@ -172,22 +191,26 @@ impl Workspace {
         }
         let resp = ui.interact(r.image, ui.id().with("tl-image"), Sense::click_and_drag());
 
+        // Botão do meio arrasta a imagem quando ampliada.
+        if self.viewer_zoom > 0.0 && resp.dragged_by(egui::PointerButton::Middle) {
+            self.viewer_pan += resp.drag_delta();
+        }
+
         // Pede o frame no tamanho em que ele aparece (menor enquanto toca).
-        let ppp = ui.ctx().pixels_per_point();
         let mut w = (pic.width() * ppp) as u32;
         if self.playback.is_playing() {
             w = w.min(s.width / 2);
         }
         let w = w.clamp(16, s.width);
         let h = ((w as f32 / aspect).round() as u32).max(2);
-        let key = (self.st.editor.revision(), self.st.playhead, (w, h));
+        let key = (self.st.editor.revision(), shown, (w, h));
         if self.requested_timeline != Some(key) {
             self.requested_timeline = Some(key);
             self.preview.request(
                 ViewSlot::Timeline,
                 ViewRequest::Timeline {
                     project: project.clone(),
-                    frame: self.st.playhead,
+                    frame: shown,
                 },
                 (w, h),
             );
@@ -219,8 +242,10 @@ impl Workspace {
                     );
                 }
             }
-            resp.on_hover_cursor(egui::CursorIcon::Move);
+            resp.clone().on_hover_cursor(egui::CursorIcon::Move);
         }
+
+        self.edit_overlay(ui, &resp, r.image);
 
         // Medidores L/R (dBFS) na lateral direita da imagem, como no Resolve.
         let levels = self.audio.levels();
@@ -264,6 +289,133 @@ impl Workspace {
             self.st.set_playhead(f);
         }
         self.transport(ui, r.transport, Monitor::Timeline, |_, _| {});
+    }
+
+    /// Zoom e guias, no meio da barra do viewer (entre o nome e o timecode).
+    fn viewer_controls(&mut self, ui: &mut egui::Ui, header: Rect) {
+        let ctrl = Rect::from_min_max(
+            pos2(header.left() + 160.0, header.top() + 2.0),
+            pos2(header.right() - 120.0, header.bottom() - 2.0),
+        );
+        if ctrl.width() < 150.0 {
+            return;
+        }
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(ctrl)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let zooms = [(0.0, "Ajustar"), (0.5, "50%"), (1.0, "100%"), (2.0, "200%")];
+                let current = zooms
+                    .iter()
+                    .find(|(z, _)| *z == self.viewer_zoom)
+                    .map_or("Ajustar", |(_, n)| n);
+                egui::ComboBox::from_id_salt("viewer-zoom")
+                    .selected_text(current)
+                    .width(78.0)
+                    .show_ui(ui, |ui| {
+                        for (z, name) in zooms {
+                            if ui.selectable_label(self.viewer_zoom == z, name).clicked() {
+                                self.viewer_zoom = z;
+                                self.viewer_pan = Vec2::ZERO;
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Zoom do viewer (botão do meio arrasta quando ampliado)");
+                if ui
+                    .selectable_label(self.safe_guides, "Área segura")
+                    .on_hover_text("Guias de ação (90%) e de títulos (80%)")
+                    .clicked()
+                {
+                    self.safe_guides = !self.safe_guides;
+                }
+            },
+        );
+    }
+
+    /// Arrastar uma mídia do Media Pool sobre o viewer mostra as edições do Resolve;
+    /// soltar numa delas faz a edição no cursor da timeline.
+    fn edit_overlay(&mut self, ui: &egui::Ui, resp: &egui::Response, image: Rect) {
+        use crate::panels::DragPayload;
+        let hovering = resp.dnd_hover_payload::<DragPayload>();
+        let released = resp.dnd_release_payload::<DragPayload>();
+        let Some(payload) = hovering.or(released.clone()) else {
+            return;
+        };
+        let DragPayload::Media(media) = *payload else {
+            return;
+        };
+        let zones: [(&str, Option<PlaceMode>, Color32); 4] = [
+            (
+                "Insert",
+                Some(PlaceMode::Insert),
+                Color32::from_rgb(220, 160, 60),
+            ),
+            (
+                "Overwrite",
+                Some(PlaceMode::Overwrite),
+                Color32::from_rgb(200, 70, 70),
+            ),
+            ("Place on Top", None, Color32::from_rgb(90, 150, 220)),
+            (
+                "Append",
+                Some(PlaceMode::Append),
+                Color32::from_rgb(90, 180, 110),
+            ),
+        ];
+        let box_size = vec2(
+            (image.width() * 0.22).clamp(90.0, 150.0),
+            (image.height() * 0.16).clamp(40.0, 64.0),
+        );
+        let gap = 8.0;
+        let grid = Rect::from_center_size(
+            image.center(),
+            vec2(box_size.x * 2.0 + gap, box_size.y * 2.0 + gap),
+        );
+        let painter = ui.painter_at(image);
+        painter.rect_filled(image, 0.0, Color32::from_black_alpha(120));
+        let pointer = ui.input(|i| i.pointer.latest_pos());
+        let mut chosen = None;
+        for (k, (name, mode, color)) in zones.iter().enumerate() {
+            let min = grid.min
+                + vec2(
+                    (k % 2) as f32 * (box_size.x + gap),
+                    (k / 2) as f32 * (box_size.y + gap),
+                );
+            let rect = Rect::from_min_size(min, box_size);
+            let hot = pointer.is_some_and(|p| rect.contains(p));
+            if hot {
+                chosen = Some(*mode);
+            }
+            painter.rect_filled(
+                rect,
+                4.0,
+                color.gamma_multiply(if hot { 0.95 } else { 0.55 }),
+            );
+            painter.rect_stroke(
+                rect,
+                4.0,
+                Stroke::new(
+                    if hot { 2.0 } else { 1.0 },
+                    Color32::WHITE.gamma_multiply(0.8),
+                ),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                *name,
+                theme::text(13.0),
+                Color32::WHITE,
+            );
+        }
+        if released.is_some()
+            && let Some(mode) = chosen
+        {
+            self.st.place_media(media, mode);
+        }
     }
 
     /// Pede ao preview o frame `frame` da mídia no tamanho da imagem `pic`.

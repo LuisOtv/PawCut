@@ -34,6 +34,7 @@ pub enum Icon {
     Insert,
     Overwrite,
     Append,
+    Skim,
 }
 
 fn p(r: Rect, x: f32, y: f32) -> Pos2 {
@@ -45,6 +46,20 @@ pub fn paint(painter: &Painter, r: Rect, icon: Icon, c: Color32) {
     let s = Stroke::new((r.width() / 11.0).max(1.2), c);
     let poly = |pts: Vec<Pos2>| Shape::convex_polygon(pts, c, Stroke::NONE);
     match icon {
+        Icon::Skim => {
+            painter.rect_stroke(
+                Rect::from_min_max(p(r, 0.12, 0.28), p(r, 0.88, 0.78)),
+                1.0,
+                s,
+                egui::StrokeKind::Middle,
+            );
+            painter.line_segment([p(r, 0.55, 0.08), p(r, 0.55, 0.95)], s);
+            painter.add(poly(vec![
+                p(r, 0.42, 0.08),
+                p(r, 0.68, 0.08),
+                p(r, 0.55, 0.22),
+            ]));
+        }
         Icon::Select => {
             painter.add(poly(vec![
                 p(r, 0.25, 0.1),

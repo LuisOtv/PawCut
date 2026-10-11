@@ -123,6 +123,16 @@ impl PanelLayout {
         };
     }
 
+    /// Garante que `panel` está aberto e com a aba na frente.
+    pub fn reveal(&mut self, panel: Panel) {
+        if !self.is_visible(panel) {
+            self.toggle(panel);
+        }
+        if let Some(loc) = self.dock.find_tab(&panel) {
+            let _ = self.dock.set_active_tab(loc);
+        }
+    }
+
     pub fn reset(&mut self) {
         self.saved.clear();
         self.dock = Self::default_layout();

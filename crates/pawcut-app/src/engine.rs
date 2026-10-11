@@ -156,6 +156,8 @@ pub struct AudioPlayer {
     playing: Arc<AtomicBool>,
     position: Arc<AtomicI64>,
     generation: Arc<AtomicU64>,
+    /// Amostra em que a reprodução para sozinha (scrub); `i64::MAX` = não para.
+    stop_at: Arc<AtomicI64>,
     pub has_device: Arc<AtomicBool>,
 }
 
@@ -176,6 +178,8 @@ impl AudioPlayer {
         let has_device = Arc::new(AtomicBool::new(false));
         let levels = Arc::new([AtomicU32::new(0), AtomicU32::new(0)]);
         let lv = levels.clone();
+        let stop_at = Arc::new(AtomicI64::new(i64::MAX));
+        let sa = stop_at.clone();
         let (st, pl, pos, dev) = (
             state.clone(),
             playing.clone(),
@@ -184,7 +188,7 @@ impl AudioPlayer {
         );
         thread::Builder::new()
             .name("pawcut-audio".into())
-            .spawn(move || audio_loop(sample_rate, st, pl, pos, dev, lv))
+            .spawn(move || audio_loop(sample_rate, st, pl, pos, dev, lv, sa))
             .expect("não foi possível criar a thread de áudio");
         Self {
             levels,
@@ -192,8 +196,15 @@ impl AudioPlayer {
             playing,
             position,
             generation,
+            stop_at,
             has_device,
         }
+    }
+
+    /// Toca só `len` amostras a partir de `start` (scrub com som).
+    pub fn scrub(&self, project: Arc<Project>, start: i64, len: i64) {
+        self.play(project, start);
+        self.stop_at.store(start + len, Ordering::SeqCst);
     }
 
     /// Começa a tocar `project` a partir da amostra `start`.
@@ -203,6 +214,7 @@ impl AudioPlayer {
         s.project = Some(project);
         s.start_sample = start;
         s.generation = g;
+        self.stop_at.store(i64::MAX, Ordering::SeqCst);
         self.position.store(start, Ordering::SeqCst);
         self.playing.store(true, Ordering::SeqCst);
     }
@@ -255,6 +267,7 @@ fn audio_loop(
     position: Arc<AtomicI64>,
     has_device: Arc<AtomicBool>,
     levels: Arc<[AtomicU32; 2]>,
+    stop_at: Arc<AtomicI64>,
 ) {
     use libpulse_binding::sample::{Format, Spec};
     use libpulse_binding::stream::Direction;
@@ -343,6 +356,9 @@ fn audio_loop(
             l.store(peak.max(old * 0.85).to_bits(), Ordering::Relaxed);
         }
         pos += AUDIO_CHUNK as i64;
+        if pos >= stop_at.load(Ordering::SeqCst) {
+            playing.store(false, Ordering::SeqCst);
+        }
         match &device {
             Some(d) => {
                 let bytes: Vec<u8> = samples.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -365,6 +381,68 @@ fn audio_loop(
 }
 
 // ---------------------------------------------------------------------------------------------
+
+/// Miniaturas de vídeo em tempos específicos (tira de frames nos clipes), em segundo plano.
+/// O tempo é arredondado para meio segundo para reaproveitar o cache.
+pub struct FrameThumbs {
+    tx: Sender<(PathBuf, i64)>,
+    rx: Receiver<((PathBuf, i64), Option<RgbaImage>)>,
+    pending: std::collections::HashSet<(PathBuf, i64)>,
+    done: Vec<((PathBuf, i64), Option<RgbaImage>)>,
+}
+
+impl FrameThumbs {
+    pub fn spawn(repaint: impl Fn() + Send + 'static) -> Self {
+        let (tx, jobs) = channel::<(PathBuf, i64)>();
+        let (out, rx) = channel();
+        thread::Builder::new()
+            .name("pawcut-thumbs".into())
+            .spawn(move || {
+                let mut lib = MediaLibrary::new((192, 108), 48_000, default_cache_dir());
+                lib.set_use_proxies(true);
+                while let Ok(key) = jobs.recv() {
+                    let img = lib
+                        .video_frame(&key.0, key.1 as f64 / 2.0)
+                        .ok()
+                        .map(|i| i.as_ref().clone());
+                    if out.send((key, img)).is_err() {
+                        break;
+                    }
+                    repaint();
+                }
+            })
+            .expect("não foi possível criar a thread de miniaturas");
+        Self {
+            tx,
+            rx,
+            pending: Default::default(),
+            done: Vec::new(),
+        }
+    }
+
+    pub fn key(path: &Path, seconds: f64) -> (PathBuf, i64) {
+        (path.to_path_buf(), (seconds * 2.0).round().max(0.0) as i64)
+    }
+
+    /// Pede a miniatura (uma vez só).
+    pub fn request(&mut self, key: (PathBuf, i64)) {
+        if self.pending.insert(key.clone()) {
+            let _ = self.tx.send(key);
+        }
+    }
+
+    /// Resultados que chegaram desde a última chamada.
+    pub fn take_done(&mut self) -> Vec<((PathBuf, i64), Option<RgbaImage>)> {
+        while let Ok(r) = self.rx.try_recv() {
+            self.done.push(r);
+        }
+        std::mem::take(&mut self.done)
+    }
+
+    pub fn forget(&mut self, path: &Path) {
+        self.pending.retain(|(p, _)| p != path);
+    }
+}
 
 /// Picos de áudio (100 por segundo) de cada arquivo, calculados em segundo plano.
 /// Picos (mín, máx) de um arquivo.

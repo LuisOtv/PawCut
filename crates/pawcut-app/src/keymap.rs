@@ -53,10 +53,20 @@ pub enum Action {
     PrevMarker,
     NextMarker,
     AddDissolve,
+    ExtractInOut,
+    LiftInOut,
+    NudgeLeft,
+    NudgeRight,
+    NudgeLeft10,
+    NudgeRight10,
+    SelectForward,
+    ToggleSkimming,
+    ShowInPool,
+    PasteAttributes,
 }
 
 impl Action {
-    pub const ALL: [Action; 45] = [
+    pub const ALL: [Action; 55] = [
         Action::PlayPause,
         Action::PlayForward,
         Action::Stop,
@@ -102,6 +112,16 @@ impl Action {
         Action::PrevMarker,
         Action::NextMarker,
         Action::AddDissolve,
+        Action::ExtractInOut,
+        Action::LiftInOut,
+        Action::NudgeLeft,
+        Action::NudgeRight,
+        Action::NudgeLeft10,
+        Action::NudgeRight10,
+        Action::SelectForward,
+        Action::ToggleSkimming,
+        Action::ShowInPool,
+        Action::PasteAttributes,
     ];
 
     pub fn label(self) -> &'static str {
@@ -151,6 +171,16 @@ impl Action {
             Action::PrevMarker => "Marcador anterior",
             Action::NextMarker => "Próximo marcador",
             Action::AddDissolve => "Cross dissolve no corte",
+            Action::ExtractInOut => "Extrair In/Out (apaga e fecha)",
+            Action::LiftInOut => "Levantar In/Out (apaga e deixa o buraco)",
+            Action::NudgeLeft => "Empurrar clipe 1 frame para trás",
+            Action::NudgeRight => "Empurrar clipe 1 frame para frente",
+            Action::NudgeLeft10 => "Empurrar clipe 10 frames para trás",
+            Action::NudgeRight10 => "Empurrar clipe 10 frames para frente",
+            Action::SelectForward => "Selecionar daqui para frente",
+            Action::ToggleSkimming => "Prévia passando o mouse (skimming)",
+            Action::ShowInPool => "Mostrar no Media Pool",
+            Action::PasteAttributes => "Colar atributos",
         }
     }
 }
@@ -301,6 +331,24 @@ impl Keymap {
             (A::PrevMarker, vec![K::shift(Key::ArrowUp)]),
             (A::NextMarker, vec![K::shift(Key::ArrowDown)]),
             (A::AddDissolve, vec![K::ctrl(Key::T)]),
+            (A::ExtractInOut, vec![K::shift(Key::X)]),
+            (A::LiftInOut, vec![K::new(Key::Z)]),
+            (A::NudgeLeft, vec![K::new(Key::Comma)]),
+            (A::NudgeRight, vec![K::new(Key::Period)]),
+            (A::NudgeLeft10, vec![K::shift(Key::Comma)]),
+            (A::NudgeRight10, vec![K::shift(Key::Period)]),
+            (A::SelectForward, vec![K::new(Key::Y)]),
+            (A::ToggleSkimming, vec![K::new(Key::S)]),
+            (A::ShowInPool, vec![K::shift(Key::F)]),
+            (
+                A::PasteAttributes,
+                vec![KeyChord {
+                    key: Key::V,
+                    ctrl: true,
+                    shift: false,
+                    alt: true,
+                }],
+            ),
         ];
         Self { bindings: b }
     }

@@ -25,6 +25,15 @@ pub const CLIP_GENERATOR: Color32 = Color32::from_rgb(0x66, 0x66, 0x78);
 pub const CLIP_IMAGE: Color32 = Color32::from_rgb(0x8a, 0x6c, 0x42);
 pub const OFFLINE: Color32 = Color32::from_rgb(0x9a, 0x22, 0x2c);
 
+/// Grade da interface: tudo alinhado em múltiplos de 4 px.
+pub const TOOLBAR_H: f32 = 28.0;
+pub const PAD: f32 = 8.0;
+pub const ICON: f32 = 16.0;
+pub const ROW_H: f32 = 24.0;
+/// Colunas do Inspector.
+pub const LABEL_W: f32 = 104.0;
+pub const VALUE_W: f32 = 84.0;
+
 pub fn mono(size: f32) -> FontId {
     FontId::monospace(size)
 }
@@ -67,9 +76,11 @@ pub fn apply(ctx: &egui::Context) {
             (TextStyle::Monospace, mono(12.0)),
         ]
         .into();
-        style.spacing.item_spacing = egui::vec2(6.0, 4.0);
-        style.spacing.button_padding = egui::vec2(6.0, 2.0);
-        style.spacing.interact_size.y = 20.0;
+        style.spacing.item_spacing = egui::vec2(8.0, 4.0);
+        style.spacing.button_padding = egui::vec2(8.0, 3.0);
+        style.spacing.interact_size = egui::vec2(40.0, 22.0);
+        style.spacing.window_margin = Margin::same(12);
+        style.spacing.menu_margin = Margin::same(6);
         let v = &mut style.visuals;
         *v = egui::Visuals::dark();
         v.panel_fill = BG;
@@ -150,9 +161,10 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
     s
 }
 
-/// Faixa de cabeçalho (barra de ferramentas) no topo de um painel; devolve o resto da área.
-pub fn header_strip(ui: &mut egui::Ui, height: f32, add: impl FnOnce(&mut egui::Ui)) {
-    let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), height));
+/// Barra de ferramentas no topo de um painel: altura, margem e alinhamento iguais em todos.
+pub fn toolbar(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let rect =
+        egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), TOOLBAR_H));
     ui.painter().rect_filled(rect, 0.0, BAR);
     ui.painter().line_segment(
         [rect.left_bottom(), rect.right_bottom()],
@@ -160,9 +172,100 @@ pub fn header_strip(ui: &mut egui::Ui, height: f32, add: impl FnOnce(&mut egui::
     );
     ui.scope_builder(
         egui::UiBuilder::new()
-            .max_rect(rect.shrink2(egui::vec2(6.0, 0.0)))
+            .max_rect(rect.shrink2(egui::vec2(PAD, 0.0)))
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        add,
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            add(ui)
+        },
     );
     ui.advance_cursor_after_rect(rect);
+}
+
+/// Seção recolhível no estilo do Resolve (cabeçalho com setinha); o estado fica na memória do egui.
+pub fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let id = ui.id().with(("section", title));
+    let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::click());
+    let fill = if resp.hovered() { BAR_LIGHT } else { BAR };
+    ui.painter().rect_filled(rect, 0.0, fill);
+    let c = rect.left_center() + egui::vec2(PAD + 4.0, 0.0);
+    let tri = if open {
+        vec![
+            c + egui::vec2(-4.0, -2.0),
+            c + egui::vec2(4.0, -2.0),
+            c + egui::vec2(0.0, 3.0),
+        ]
+    } else {
+        vec![
+            c + egui::vec2(-2.0, -4.0),
+            c + egui::vec2(3.0, 0.0),
+            c + egui::vec2(-2.0, 4.0),
+        ]
+    };
+    ui.painter()
+        .add(egui::Shape::convex_polygon(tri, TEXT, Stroke::NONE));
+    ui.painter().text(
+        rect.left_center() + egui::vec2(PAD + 14.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        title,
+        text(12.0),
+        Color32::WHITE,
+    );
+    if resp.clicked() {
+        open = !open;
+        ui.data_mut(|d| d.insert_persisted(id, open));
+    }
+    if open {
+        ui.add_space(4.0);
+        add(ui);
+        ui.add_space(6.0);
+    }
+}
+
+/// Linha do Inspector com colunas fixas: rótulo (à direita), valor, e até dois botões no fim
+/// (◆ e ↺) sempre na mesma coluna. `value` recebe a área do valor.
+pub fn row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: impl FnOnce(&mut egui::Ui),
+    extras: impl FnOnce(&mut egui::Ui),
+) {
+    let full = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), ROW_H));
+    let label_rect = egui::Rect::from_min_size(full.min, egui::vec2(LABEL_W, ROW_H));
+    ui.painter().text(
+        label_rect.right_center() - egui::vec2(4.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
+        label,
+        text(12.0),
+        TEXT_DIM,
+    );
+    let extras_w = 48.0;
+    let value_rect = egui::Rect::from_min_max(
+        egui::pos2(label_rect.right() + PAD, full.top()),
+        egui::pos2(full.right() - extras_w - 4.0, full.bottom()),
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(value_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.spacing_mut().interact_size.x = VALUE_W;
+            value(ui)
+        },
+    );
+    let extras_rect =
+        egui::Rect::from_min_max(egui::pos2(full.right() - extras_w, full.top()), full.max);
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(extras_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            extras(ui)
+        },
+    );
+    ui.advance_cursor_after_rect(full);
+    ui.add_space(2.0);
 }
