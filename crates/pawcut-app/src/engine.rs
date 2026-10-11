@@ -283,8 +283,12 @@ fn audio_loop(
 // ---------------------------------------------------------------------------------------------
 
 /// Picos de áudio (100 por segundo) de cada arquivo, calculados em segundo plano.
+/// Picos (mín, máx) de um arquivo.
+pub type Peaks = Arc<Vec<(f32, f32)>>;
+
 pub struct Waveforms {
-    ready: Arc<Mutex<HashMap<PathBuf, Option<Arc<Vec<(f32, f32)>>>>>>,
+    /// `None` enquanto calcula.
+    ready: Arc<Mutex<HashMap<PathBuf, Option<Peaks>>>>,
 }
 
 pub const PEAKS_PER_SECOND: f64 = 100.0;

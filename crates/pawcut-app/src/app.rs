@@ -265,6 +265,21 @@ impl PawCutApp {
             return;
         };
         self.frames += 1;
+        // PAWCUT_ACTIONS="SelectAll,BladeTool": ações executadas antes da captura (depuração).
+        if self.frames == 30
+            && let Ok(list) = std::env::var("PAWCUT_ACTIONS")
+        {
+            for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                if let Ok(action) = serde_json::from_str::<Action>(&format!("\"{name}\"")) {
+                    self.ws.run_action(action);
+                }
+            }
+            if let Ok(f) = std::env::var("PAWCUT_PLAYHEAD")
+                && let Ok(f) = f.parse()
+            {
+                self.ws.st.set_playhead(f);
+            }
+        }
         if self.frames == 90 {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
         }

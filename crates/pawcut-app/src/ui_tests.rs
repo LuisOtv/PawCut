@@ -195,34 +195,52 @@ mod whole_app {
         st.drop_generator(Generator::SolidColor, 0, 0);
         st.drop_generator(Generator::Text, 1, 0);
         let g = st.project().video_tracks[0].clips[0].id;
-        st.apply(Edit::Trim { clips: vec![g], edge: Edge::End, delta: -120 });
+        st.apply(Edit::Trim {
+            clips: vec![g],
+            edge: Edge::End,
+            delta: -120,
+        });
         let t = st.project().video_tracks[1].clips[0].id;
-        st.apply(Edit::Trim { clips: vec![t], edge: Edge::End, delta: -120 });
+        st.apply(Edit::Trim {
+            clips: vec![t],
+            edge: Edge::End,
+            delta: -120,
+        });
     }
 
     #[test]
     fn deliver_button_exports_an_mp4() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("saida.mp4");
-        let mut st = AppState::new(Project::new(ProjectSettings { width: 320, height: 180, ..ProjectSettings::default() }));
+        let mut st = AppState::new(Project::new(ProjectSettings {
+            width: 320,
+            height: 180,
+            ..ProjectSettings::default()
+        }));
         small_project(&mut st);
         let ctx = egui::Context::default();
         let mut ws = Workspace::new(&ctx, st);
         ws.open_deliver();
         ws.deliver.as_mut().unwrap().output = out.display().to_string();
-        let mut h = Harness::builder().with_size(egui::vec2(900.0, 600.0)).build_ui_state(
-            |ui, ws: &mut Workspace| {
-                let ctx = ui.ctx().clone();
-                ws.begin_frame(&ctx);
-                ws.dialogs_ui(&ctx);
-            },
-            ws,
-        );
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .build_ui_state(
+                |ui, ws: &mut Workspace| {
+                    let ctx = ui.ctx().clone();
+                    ws.begin_frame(&ctx);
+                    ws.dialogs_ui(&ctx);
+                },
+                ws,
+            );
         h.run_steps(2);
         h.get_by_label("⏺ Exportar").click();
         for _ in 0..400 {
             h.step();
-            if h.state().deliver.as_ref().is_some_and(|d| d.message.is_some()) {
+            if h.state()
+                .deliver
+                .as_ref()
+                .is_some_and(|d| d.message.is_some())
+            {
                 break;
             }
             std::thread::sleep(Duration::from_millis(25));
@@ -230,7 +248,11 @@ mod whole_app {
         let msg = h.state().deliver.as_ref().unwrap().message.clone();
         assert!(matches!(msg, Some(Ok(_))), "exportação: {msg:?}");
         let info = kit::ffprobe(&out);
-        let duration: f64 = info["format"]["duration"].as_str().unwrap().parse().unwrap();
+        let duration: f64 = info["format"]["duration"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
         assert!((duration - 1.0).abs() < 0.1, "duração {duration}");
     }
 
