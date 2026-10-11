@@ -9,7 +9,10 @@ fn gray(src: &mut VideoSource, index: i64) -> u8 {
 fn assert_frame(src: &mut VideoSource, index: i64, expected: i64) {
     let got = gray(src, index);
     let want = kit::expected_gray(expected);
-    assert!(got.abs_diff(want) <= 3, "frame {index}: cinza {got}, esperado {want} (frame {expected})");
+    assert!(
+        got.abs_diff(want) <= 3,
+        "frame {index}: cinza {got}, esperado {want} (frame {expected})"
+    );
 }
 
 #[test]

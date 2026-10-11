@@ -68,7 +68,9 @@ pub fn decode_audio(path: &Path, sample_rate: u32, speed: f64) -> Result<Pcm, Me
     let stream = input
         .streams()
         .best(ff::media::Type::Audio)
-        .ok_or_else(|| MediaError::Unsupported { path: path.to_path_buf() })?;
+        .ok_or_else(|| MediaError::Unsupported {
+            path: path.to_path_buf(),
+        })?;
     let index = stream.index();
     let tb = stream.time_base();
     let mut decoder = ff::codec::context::Context::from_parameters(stream.parameters())
@@ -83,7 +85,8 @@ pub fn decode_audio(path: &Path, sample_rate: u32, speed: f64) -> Result<Pcm, Me
         decoder.format().name(),
         layout_name(decoder.channel_layout().channels() as u16),
     );
-    let mut chain = format!("aresample={sample_rate},aformat=sample_fmts=flt:channel_layouts=stereo");
+    let mut chain =
+        format!("aresample={sample_rate},aformat=sample_fmts=flt:channel_layouts=stereo");
     let tempo = atempo_chain(speed);
     if !tempo.is_empty() {
         chain.push(',');
@@ -94,7 +97,11 @@ pub fn decode_audio(path: &Path, sample_rate: u32, speed: f64) -> Result<Pcm, Me
     let abuffersink = ff::filter::find("abuffersink").expect("ffmpeg sem o filtro abuffersink");
     graph.add(&abuffer, "in", &src).map_err(err)?;
     graph.add(&abuffersink, "out", "").map_err(err)?;
-    graph.output("in", 0).and_then(|p| p.input("out", 0)).and_then(|p| p.parse(&chain)).map_err(err)?;
+    graph
+        .output("in", 0)
+        .and_then(|p| p.input("out", 0))
+        .and_then(|p| p.parse(&chain))
+        .map_err(err)?;
     graph.validate().map_err(err)?;
 
     let mut samples = Vec::new();
@@ -117,39 +124,73 @@ pub fn decode_audio(path: &Path, sample_rate: u32, speed: f64) -> Result<Pcm, Me
     }
     let _ = graph.get("in").expect("filtro in").source().flush();
     drain(&mut graph, &mut samples);
-    Ok(Pcm { sample_rate, samples })
+    Ok(Pcm {
+        sample_rate,
+        samples,
+    })
 }
 
 fn drain(graph: &mut ff::filter::Graph, samples: &mut Vec<f32>) {
     let mut out = ff::frame::Audio::empty();
-    while graph.get("out").expect("filtro out").sink().frame(&mut out).is_ok() {
+    while graph
+        .get("out")
+        .expect("filtro out")
+        .sink()
+        .frame(&mut out)
+        .is_ok()
+    {
         let n = out.samples() * 2;
         samples.extend(
-            out.data(0)[..n * 4].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+            out.data(0)[..n * 4]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b)),
         );
     }
 }
 
 fn cache_file(dir: &Path, path: &Path, sample_rate: u32, speed: f64) -> Option<PathBuf> {
     let meta = fs::metadata(path).ok()?;
-    let mtime = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos();
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
     let mut h = DefaultHasher::new();
     (path, meta.len(), mtime, sample_rate, speed.to_bits()).hash(&mut h);
     Some(dir.join(format!("{:016x}.f32", h.finish())))
 }
 
 /// Igual a `decode_audio`, mas guarda o resultado em `cache_dir` para abrir rápido da próxima vez.
-pub fn load_audio(path: &Path, sample_rate: u32, speed: f64, cache_dir: Option<&Path>) -> Result<Pcm, MediaError> {
+pub fn load_audio(
+    path: &Path,
+    sample_rate: u32,
+    speed: f64,
+    cache_dir: Option<&Path>,
+) -> Result<Pcm, MediaError> {
     let file = cache_dir.and_then(|d| cache_file(d, path, sample_rate, speed));
     if let Some(file) = &file
         && let Ok(bytes) = fs::read(file)
     {
-        let samples = bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
-        return Ok(Pcm { sample_rate, samples });
+        let samples = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        return Ok(Pcm {
+            sample_rate,
+            samples,
+        });
     }
     let pcm = decode_audio(path, sample_rate, speed)?;
     if let Some(file) = file {
-        let io = |source| MediaError::Cache { path: file.clone(), source };
+        let io = |source| MediaError::Cache {
+            path: file.clone(),
+            source,
+        };
         if let Some(dir) = file.parent() {
             fs::create_dir_all(dir).map_err(io)?;
         }

@@ -39,7 +39,10 @@ pub struct VideoSource {
 pub(crate) fn fit_within(native: (u32, u32), fit: (u32, u32)) -> (u32, u32) {
     let (w, h) = (native.0.max(1) as f64, native.1.max(1) as f64);
     let scale = (fit.0 as f64 / w).min(fit.1 as f64 / h).min(1.0);
-    (((w * scale).round() as u32).max(1), ((h * scale).round() as u32).max(1))
+    (
+        ((w * scale).round() as u32).max(1),
+        ((h * scale).round() as u32).max(1),
+    )
 }
 
 impl VideoSource {
@@ -50,11 +53,17 @@ impl VideoSource {
         let stream = input
             .streams()
             .best(ff::media::Type::Video)
-            .ok_or_else(|| MediaError::Unsupported { path: path.to_path_buf() })?;
+            .ok_or_else(|| MediaError::Unsupported {
+                path: path.to_path_buf(),
+            })?;
         let stream_index = stream.index();
         let time_base = f64::from(stream.time_base());
         // AV_NOPTS_VALUE = i64::MIN quando o arquivo não informa o início.
-        let start = if stream.start_time() == i64::MIN { 0 } else { stream.start_time() };
+        let start = if stream.start_time() == i64::MIN {
+            0
+        } else {
+            stream.start_time()
+        };
         let valid = |r: ff::Rational| r.numerator() > 0 && r.denominator() > 0;
         let fps = [stream.avg_frame_rate(), stream.rate()]
             .into_iter()
@@ -111,11 +120,17 @@ impl VideoSource {
         if let Some((i, img)) = &self.last {
             let next = self.ahead.as_ref().map(|a| a.0);
             // O último frame entregue ainda vale até o próximo começar (ou até o fim do vídeo).
-            if index == *i || (index > *i && (next.is_some_and(|n| index < n) || (self.eof && next.is_none()))) {
+            if index == *i
+                || (index > *i && (next.is_some_and(|n| index < n) || (self.eof && next.is_none())))
+            {
                 return Ok(img.clone());
             }
         }
-        let pos = self.ahead.as_ref().map(|a| a.0).or(self.last.as_ref().map(|l| l.0));
+        let pos = self
+            .ahead
+            .as_ref()
+            .map(|a| a.0)
+            .or(self.last.as_ref().map(|l| l.0));
         let far = (self.fps * 2.0) as i64;
         let backward = self.last.as_ref().is_some_and(|l| index < l.0);
         let too_far = pos.map_or(index > far, |p| index > p + far);
@@ -151,7 +166,7 @@ impl VideoSource {
         };
         match chosen {
             Some((i, frame)) => {
-                let img = Arc::new(self.to_rgba(&frame)?);
+                let img = Arc::new(self.convert(&frame)?);
                 self.last = Some((i, img.clone()));
                 Ok(img)
             }
@@ -159,14 +174,18 @@ impl VideoSource {
                 .last
                 .as_ref()
                 .map(|(_, img)| img.clone())
-                .ok_or_else(|| MediaError::Unsupported { path: self.path.clone() }),
+                .ok_or_else(|| MediaError::Unsupported {
+                    path: self.path.clone(),
+                }),
         }
     }
 
     fn seek(&mut self, index: i64) -> Result<(), MediaError> {
         let seconds = index as f64 / self.fps + self.start as f64 * self.time_base;
         let ts = (seconds * 1_000_000.0) as i64;
-        self.input.seek(ts, ..ts).map_err(|e| MediaError::ffmpeg(&self.path, e))?;
+        self.input
+            .seek(ts, ..ts)
+            .map_err(|e| MediaError::ffmpeg(&self.path, e))?;
         self.decoder.flush();
         self.last = None;
         self.ahead = None;
@@ -199,15 +218,20 @@ impl VideoSource {
                 }
             }
             if !sent {
-                self.decoder.send_eof().map_err(|e| MediaError::ffmpeg(&self.path, e))?;
+                self.decoder
+                    .send_eof()
+                    .map_err(|e| MediaError::ffmpeg(&self.path, e))?;
                 self.draining = true;
             }
         }
     }
 
-    fn to_rgba(&mut self, frame: &ff::frame::Video) -> Result<RgbaImage, MediaError> {
+    fn convert(&mut self, frame: &ff::frame::Video) -> Result<RgbaImage, MediaError> {
         let mut out = ff::frame::Video::empty();
-        self.scaler.0.run(frame, &mut out).map_err(|e| MediaError::ffmpeg(&self.path, e))?;
+        self.scaler
+            .0
+            .run(frame, &mut out)
+            .map_err(|e| MediaError::ffmpeg(&self.path, e))?;
         let (w, h) = (self.size.0 as usize, self.size.1 as usize);
         let stride = out.stride(0);
         let data = out.data(0);

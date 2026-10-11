@@ -2,12 +2,14 @@
 
 mod audio;
 mod error;
+mod library;
 mod probe;
 mod video;
 
 pub use audio::{Pcm, decode_audio, load_audio, peaks};
 pub use error::MediaError;
 pub use image::RgbaImage;
+pub use library::{MediaLibrary, default_cache_dir, load_image, thumbnail};
 pub use probe::probe;
 pub use video::VideoSource;
 

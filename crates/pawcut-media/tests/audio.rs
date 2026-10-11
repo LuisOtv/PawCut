@@ -10,7 +10,11 @@ fn decodes_wav_to_stereo_48k() {
     let dir = tempfile::tempdir().unwrap();
     let pcm = decode_audio(&kit::dc_audio(dir.path(), "a.wav", 0.5, 1.0), 48_000, 1.0).unwrap();
     assert_eq!(pcm.sample_rate, 48_000);
-    assert!(pcm.frames().abs_diff(48_000) <= 10, "frames = {}", pcm.frames());
+    assert!(
+        pcm.frames().abs_diff(48_000) <= 10,
+        "frames = {}",
+        pcm.frames()
+    );
     assert_eq!(mid(&pcm), [0.5, 0.5]);
 }
 
@@ -18,7 +22,11 @@ fn decodes_wav_to_stereo_48k() {
 fn decodes_audio_track_of_a_video() {
     let dir = tempfile::tempdir().unwrap();
     let pcm = decode_audio(&kit::gray_ramp_video(dir.path(), 2, true), 48_000, 1.0).unwrap();
-    assert!(pcm.frames().abs_diff(96_000) <= 2048, "frames = {}", pcm.frames());
+    assert!(
+        pcm.frames().abs_diff(96_000) <= 2048,
+        "frames = {}",
+        pcm.frames()
+    );
     assert!((mid(&pcm)[0] - 0.5).abs() < 0.02);
 }
 
@@ -27,10 +35,18 @@ fn speed_changes_length_but_not_level() {
     let dir = tempfile::tempdir().unwrap();
     let wav = kit::dc_audio(dir.path(), "a.wav", 0.5, 1.0);
     let fast = decode_audio(&wav, 48_000, 2.0).unwrap();
-    assert!(fast.frames().abs_diff(24_000) <= 600, "2x frames = {}", fast.frames());
+    assert!(
+        fast.frames().abs_diff(24_000) <= 600,
+        "2x frames = {}",
+        fast.frames()
+    );
     assert!((mid(&fast)[0] - 0.5).abs() < 0.05);
     let slow = decode_audio(&wav, 48_000, 0.25).unwrap();
-    assert!(slow.frames().abs_diff(192_000) <= 4000, "0.25x frames = {}", slow.frames());
+    assert!(
+        slow.frames().abs_diff(192_000) <= 4000,
+        "0.25x frames = {}",
+        slow.frames()
+    );
 }
 
 #[test]
@@ -62,7 +78,10 @@ fn disk_cache_round_trips() {
 
 #[test]
 fn peaks_find_min_and_max_per_bucket() {
-    let pcm = Pcm { sample_rate: 48_000, samples: vec![1.0, 1.0, -1.0, -1.0, 0.5, 0.5, 0.0, 0.0] };
+    let pcm = Pcm {
+        sample_rate: 48_000,
+        samples: vec![1.0, 1.0, -1.0, -1.0, 0.5, 0.5, 0.0, 0.0],
+    };
     assert_eq!(peaks(&pcm, 2), vec![(-1.0, 1.0), (0.0, 0.5)]);
     assert!(peaks(&pcm, 0).is_empty());
 }
