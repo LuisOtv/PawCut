@@ -13,7 +13,11 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(project: Project) -> Self {
-        Self { project, undo: Vec::new(), redo: Vec::new() }
+        Self {
+            project,
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
     }
 
     pub fn project(&self) -> &Project {

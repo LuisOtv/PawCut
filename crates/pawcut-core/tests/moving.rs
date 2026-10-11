@@ -4,7 +4,12 @@ use common::*;
 use pawcut_core::*;
 
 fn mv(clips: Vec<ClipId>, delta: Frame, vtd: i32, atd: i32) -> Edit {
-    Edit::Move { clips, delta, video_track_delta: vtd, audio_track_delta: atd }
+    Edit::Move {
+        clips,
+        delta,
+        video_track_delta: vtd,
+        audio_track_delta: atd,
+    }
 }
 
 #[test]
@@ -32,7 +37,11 @@ fn move_never_goes_before_zero() {
 fn move_between_video_tracks_with_linked_audio_staying_on_its_track() {
     let mut ed = new_editor();
     let m = add_video(&mut ed, 300, true);
-    let v2 = ed.apply(Edit::AddTrack(TrackKind::Video)).unwrap().track.unwrap();
+    let v2 = ed
+        .apply(Edit::AddTrack(TrackKind::Video))
+        .unwrap()
+        .track
+        .unwrap();
     let (vc, ac) = place_av(&mut ed, m, 0, 0.0, 50);
     ed.apply(mv(vec![vc, ac], 10, 1, 0)).unwrap();
     assert!(spans(&ed, v(&ed, 0)).is_empty());
@@ -46,7 +55,10 @@ fn move_to_missing_track_fails() {
     let mut ed = new_editor();
     let v1 = v(&ed, 0);
     let c = place(&mut ed, v1, solid(), 0, 0.0, 10);
-    assert!(matches!(ed.apply(mv(vec![c], 0, 5, 0)), Err(EditError::InvalidValue(_))));
+    assert!(matches!(
+        ed.apply(mv(vec![c], 0, 5, 0)),
+        Err(EditError::InvalidValue(_))
+    ));
 }
 
 #[test]

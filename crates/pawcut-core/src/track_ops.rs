@@ -53,7 +53,11 @@ pub(crate) fn clear_range(track: &mut Track, start: Frame, end: Frame, ids: &mut
 }
 
 /// Mapeia o link de uma metade cortada para um link novo, compartilhado entre as faixas.
-pub(crate) fn relink(link: Option<LinkId>, map: &mut HashMap<LinkId, LinkId>, ids: &mut IdGen) -> Option<LinkId> {
+pub(crate) fn relink(
+    link: Option<LinkId>,
+    map: &mut HashMap<LinkId, LinkId>,
+    ids: &mut IdGen,
+) -> Option<LinkId> {
     link.map(|l| *map.entry(l).or_insert_with(|| LinkId(ids.fresh())))
 }
 
@@ -65,7 +69,11 @@ pub(crate) fn ripple_open(
     links: &mut HashMap<LinkId, LinkId>,
     ids: &mut IdGen,
 ) {
-    if let Some(i) = track.clips.iter().position(|c| c.start < at && c.end() > at) {
+    if let Some(i) = track
+        .clips
+        .iter()
+        .position(|c| c.start < at && c.end() > at)
+    {
         let clip = track.clips.remove(i);
         let (left, mut right) = split_clip(&clip, at, ClipId(ids.fresh()));
         right.link = relink(clip.link, links, ids);
@@ -118,15 +126,27 @@ mod tests {
         c.fade_in = 4;
         c.fade_out = 6;
         let (l, r) = split_clip(&c, 15, ClipId(2));
-        assert_eq!((l.id, l.start, l.duration, l.fade_in, l.fade_out), (ClipId(1), 10, 5, 4, 0));
-        assert_eq!((r.id, r.start, r.duration, r.fade_in, r.fade_out), (ClipId(2), 15, 15, 0, 6));
+        assert_eq!(
+            (l.id, l.start, l.duration, l.fade_in, l.fade_out),
+            (ClipId(1), 10, 5, 4, 0)
+        );
+        assert_eq!(
+            (r.id, r.start, r.duration, r.fade_in, r.fade_out),
+            (ClipId(2), 15, 15, 0, 6)
+        );
         assert_eq!(r.source_start, 15.0);
     }
 
     #[test]
     fn clear_range_handles_every_overlap_shape() {
         // antes, cruza o início, dentro, cruza o fim, depois
-        let mut t = track(vec![clip(1, 0, 10), clip(2, 10, 20), clip(3, 35, 10), clip(4, 50, 20), clip(5, 80, 10)]);
+        let mut t = track(vec![
+            clip(1, 0, 10),
+            clip(2, 10, 20),
+            clip(3, 35, 10),
+            clip(4, 50, 20),
+            clip(5, 80, 10),
+        ]);
         let mut ids = IdGen::default();
         clear_range(&mut t, 20, 60, &mut ids);
         assert_eq!(spans(&t), vec![(0, 10), (10, 20), (60, 70), (80, 90)]);

@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 use crate::ids::{ClipId, LinkId, MediaId, TrackId};
-use crate::model::{Clip, ClipSource, MediaInfo, MediaKind, MediaRef, Project, Track, TrackKind, Transform};
+use crate::model::{
+    Clip, ClipSource, MediaInfo, MediaKind, MediaRef, Project, Track, TrackKind, Transform,
+};
 use crate::time::Frame;
 use crate::track_ops::{clear_range, insert_sorted, relink, ripple_open, split_clip};
 
@@ -57,27 +59,64 @@ pub enum Edit {
     AddMedia(MediaInfo),
     AddTrack(TrackKind),
     RemoveTrack(TrackId),
-    SetTrackFlags { track: TrackId, flags: TrackFlags },
+    SetTrackFlags {
+        track: TrackId,
+        flags: TrackFlags,
+    },
     /// Coloca os itens em `at`, por cima do que houver (F10 no Resolve). Vários itens ficam ligados.
-    Overwrite { at: Frame, items: Vec<Placement> },
+    Overwrite {
+        at: Frame,
+        items: Vec<Placement>,
+    },
     /// Overwrite no fim da timeline (Shift+F12).
-    Append { items: Vec<Placement> },
+    Append {
+        items: Vec<Placement>,
+    },
     /// Corta em `at`. Clipes em que `at` cai na borda são ignorados.
-    Blade { at: Frame, target: BladeTarget },
+    Blade {
+        at: Frame,
+        target: BladeTarget,
+    },
     /// Apaga deixando buraco.
-    Delete { clips: Vec<ClipId> },
+    Delete {
+        clips: Vec<ClipId>,
+    },
     /// Apaga e puxa o resto da mesma faixa para fechar o buraco (Shift+Backspace).
-    RippleDelete { clips: Vec<ClipId> },
+    RippleDelete {
+        clips: Vec<ClipId>,
+    },
     /// Arrasta clipes no tempo e entre faixas do mesmo tipo, sobrescrevendo o destino.
-    Move { clips: Vec<ClipId>, delta: Frame, video_track_delta: i32, audio_track_delta: i32 },
+    Move {
+        clips: Vec<ClipId>,
+        delta: Frame,
+        video_track_delta: i32,
+        audio_track_delta: i32,
+    },
     /// Arrasta a borda dos clipes. Positivo = para a direita.
-    Trim { clips: Vec<ClipId>, edge: Edge, delta: Frame },
+    Trim {
+        clips: Vec<ClipId>,
+        edge: Edge,
+        delta: Frame,
+    },
     /// Abre espaço em `at` em todas as faixas destravadas e coloca os itens (F9).
-    Insert { at: Frame, items: Vec<Placement> },
-    SetClip { clip: ClipId, change: ClipChange },
-    SetSpeed { clips: Vec<ClipId>, speed: f64 },
-    Link { clips: Vec<ClipId> },
-    Unlink { clips: Vec<ClipId> },
+    Insert {
+        at: Frame,
+        items: Vec<Placement>,
+    },
+    SetClip {
+        clip: ClipId,
+        change: ClipChange,
+    },
+    SetSpeed {
+        clips: Vec<ClipId>,
+        speed: f64,
+    },
+    Link {
+        clips: Vec<ClipId>,
+    },
+    Unlink {
+        clips: Vec<ClipId>,
+    },
 }
 
 /// O que a edição criou, para a interface selecionar.
@@ -111,9 +150,15 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
         Edit::AddMedia(info) => {
             let id = MediaId(p.ids.fresh());
             p.media.push(MediaRef { id, info });
-            Ok(Outcome { media: Some(id), ..Outcome::default() })
+            Ok(Outcome {
+                media: Some(id),
+                ..Outcome::default()
+            })
         }
-        Edit::AddTrack(kind) => Ok(Outcome { track: Some(p.add_track(kind)), ..Outcome::default() }),
+        Edit::AddTrack(kind) => Ok(Outcome {
+            track: Some(p.add_track(kind)),
+            ..Outcome::default()
+        }),
         Edit::RemoveTrack(id) => remove_track(p, id),
         Edit::SetTrackFlags { track, flags } => set_track_flags(p, track, flags),
         Edit::Overwrite { at, items } => {
@@ -128,16 +173,28 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
         Edit::Blade { at, target } => blade(p, at, target),
         Edit::Delete { clips } => delete(p, clips, false),
         Edit::RippleDelete { clips } => delete(p, clips, true),
-        Edit::Move { clips, delta, video_track_delta, audio_track_delta } => {
-            move_clips(p, clips, delta, video_track_delta, audio_track_delta)
-        }
+        Edit::Move {
+            clips,
+            delta,
+            video_track_delta,
+            audio_track_delta,
+        } => move_clips(p, clips, delta, video_track_delta, audio_track_delta),
         Edit::Trim { clips, edge, delta } => trim(p, clips, edge, delta),
         Edit::Insert { at, items } => {
             validate_items(p, at, &items)?;
             let len = items.iter().map(|pl| pl.draft.duration).max().unwrap_or(0);
             let mut links = HashMap::new();
-            let Project { video_tracks, audio_tracks, ids, .. } = &mut *p;
-            for track in video_tracks.iter_mut().chain(audio_tracks.iter_mut()).filter(|t| !t.locked) {
+            let Project {
+                video_tracks,
+                audio_tracks,
+                ids,
+                ..
+            } = &mut *p;
+            for track in video_tracks
+                .iter_mut()
+                .chain(audio_tracks.iter_mut())
+                .filter(|t| !t.locked)
+            {
                 ripple_open(track, at, len, &mut links, ids);
             }
             place(p, at, items)
@@ -177,7 +234,9 @@ fn unlocked_track(p: &Project, id: TrackId) -> Result<&Track, EditError> {
 fn remove_track(p: &mut Project, id: TrackId) -> Result<Outcome, EditError> {
     let kind = p.track(id).ok_or(EditError::TrackNotFound(id))?.kind;
     if p.tracks(kind).len() <= 1 {
-        return Err(EditError::InvalidValue("a timeline precisa de pelo menos uma faixa de cada tipo"));
+        return Err(EditError::InvalidValue(
+            "a timeline precisa de pelo menos uma faixa de cada tipo",
+        ));
     }
     p.tracks_mut(kind).retain(|t| t.id != id);
     Ok(Outcome::default())
@@ -197,7 +256,9 @@ fn validate_items(p: &Project, at: Frame, items: &[Placement]) -> Result<(), Edi
         return Err(EditError::InvalidValue("nada para colocar"));
     }
     if at < 0 {
-        return Err(EditError::InvalidValue("posição antes do início da timeline"));
+        return Err(EditError::InvalidValue(
+            "posição antes do início da timeline",
+        ));
     }
     let mut seen = HashSet::new();
     for pl in items {
@@ -213,7 +274,9 @@ fn validate_draft(p: &Project, pl: &Placement) -> Result<(), EditError> {
     let track = unlocked_track(p, pl.track)?;
     let d = &pl.draft;
     if d.duration < 1 {
-        return Err(EditError::InvalidValue("a duração precisa ser de pelo menos 1 frame"));
+        return Err(EditError::InvalidValue(
+            "a duração precisa ser de pelo menos 1 frame",
+        ));
     }
     if d.source_start < 0.0 {
         return Err(EditError::InvalidValue("início da fonte negativo"));
@@ -224,7 +287,10 @@ fn validate_draft(p: &Project, pl: &Placement) -> Result<(), EditError> {
             matches!(
                 (m.info.kind, track.kind),
                 (MediaKind::Video { .. } | MediaKind::Image, TrackKind::Video)
-                    | (MediaKind::Video { has_audio: true } | MediaKind::Audio, TrackKind::Audio)
+                    | (
+                        MediaKind::Video { has_audio: true } | MediaKind::Audio,
+                        TrackKind::Audio
+                    )
             )
         }
         ClipSource::SolidColor(_) | ClipSource::Text(_) => track.kind == TrackKind::Video,
@@ -259,7 +325,9 @@ fn place(p: &mut Project, at: Frame, items: Vec<Placement>) -> Result<Outcome, E
             transform: Transform::default(),
             link,
         };
-        let (track, ids) = p.track_and_ids(pl.track).ok_or(EditError::TrackNotFound(pl.track))?;
+        let (track, ids) = p
+            .track_and_ids(pl.track)
+            .ok_or(EditError::TrackNotFound(pl.track))?;
         clear_range(track, at, clip.end(), ids);
         insert_sorted(track, clip);
         out.clips.push(id);
@@ -289,9 +357,12 @@ fn blade(p: &mut Project, at: Frame, target: BladeTarget) -> Result<Outcome, Edi
             }
             clips
         }
-        BladeTarget::AllTracks => {
-            p.all_tracks().filter(|t| !t.locked).filter_map(|t| t.clip_at(at)).map(|c| c.id).collect()
-        }
+        BladeTarget::AllTracks => p
+            .all_tracks()
+            .filter(|t| !t.locked)
+            .filter_map(|t| t.clip_at(at))
+            .map(|c| c.id)
+            .collect(),
     };
     let targets: Vec<ClipId> = targets
         .into_iter()
@@ -342,7 +413,13 @@ fn delete(p: &mut Project, clips: Vec<ClipId>, ripple: bool) -> Result<Outcome, 
     Ok(Outcome::default())
 }
 
-fn move_clips(p: &mut Project, clips: Vec<ClipId>, delta: Frame, vtd: i32, atd: i32) -> Result<Outcome, EditError> {
+fn move_clips(
+    p: &mut Project,
+    clips: Vec<ClipId>,
+    delta: Frame,
+    vtd: i32,
+    atd: i32,
+) -> Result<Outcome, EditError> {
     let clips = dedup(clips);
     if clips.is_empty() {
         return Err(EditError::InvalidValue("nenhum clipe selecionado"));
@@ -353,7 +430,11 @@ fn move_clips(p: &mut Project, clips: Vec<ClipId>, delta: Frame, vtd: i32, atd: 
         let (tid, i) = locate_unlocked(p, id)?;
         let track = p.track(tid).expect("faixa do clipe existe");
         let kind = track.kind;
-        let idx = p.tracks(kind).iter().position(|t| t.id == tid).expect("faixa está na lista") as i64;
+        let idx = p
+            .tracks(kind)
+            .iter()
+            .position(|t| t.id == tid)
+            .expect("faixa está na lista") as i64;
         let td = i64::from(match kind {
             TrackKind::Video => vtd,
             TrackKind::Audio => atd,
@@ -369,13 +450,21 @@ fn move_clips(p: &mut Project, clips: Vec<ClipId>, delta: Frame, vtd: i32, atd: 
         plan.push((id, dest.id));
     }
     let delta = delta.max(-min_start);
-    if delta == 0 && plan.iter().all(|(id, dest)| p.locate(*id).map(|(t, _)| t) == Some(*dest)) {
+    if delta == 0
+        && plan
+            .iter()
+            .all(|(id, dest)| p.locate(*id).map(|(t, _)| t) == Some(*dest))
+    {
         return Err(EditError::NoChange);
     }
     let mut moving: Vec<(Clip, TrackId)> = Vec::new();
     for (id, dest) in plan {
         let (tid, i) = p.locate(id).expect("clipe validado acima");
-        let mut clip = p.track_mut(tid).expect("faixa do clipe existe").clips.remove(i);
+        let mut clip = p
+            .track_mut(tid)
+            .expect("faixa do clipe existe")
+            .clips
+            .remove(i);
         clip.start += delta;
         moving.push((clip, dest));
     }
@@ -389,7 +478,12 @@ fn move_clips(p: &mut Project, clips: Vec<ClipId>, delta: Frame, vtd: i32, atd: 
     Ok(out)
 }
 
-fn trim(p: &mut Project, clips: Vec<ClipId>, edge: Edge, delta: Frame) -> Result<Outcome, EditError> {
+fn trim(
+    p: &mut Project,
+    clips: Vec<ClipId>,
+    edge: Edge,
+    delta: Frame,
+) -> Result<Outcome, EditError> {
     let clips = dedup(clips);
     if clips.is_empty() {
         return Err(EditError::InvalidValue("nenhum clipe selecionado"));
@@ -401,7 +495,10 @@ fn trim(p: &mut Project, clips: Vec<ClipId>, edge: Edge, delta: Frame) -> Result
         let c = &track.clips[i];
         let (l, h) = match edge {
             Edge::End => {
-                let mut h = track.clips.get(i + 1).map_or(Frame::MAX, |n| n.start - c.end());
+                let mut h = track
+                    .clips
+                    .get(i + 1)
+                    .map_or(Frame::MAX, |n| n.start - c.end());
                 if let Some(len) = p.source_length(&c.source) {
                     let max_dur = ((len as f64 - c.source_start) / c.speed + 1e-9).floor() as Frame;
                     h = h.min(max_dur - c.duration);
@@ -437,7 +534,10 @@ fn trim(p: &mut Project, clips: Vec<ClipId>, edge: Edge, delta: Frame) -> Result
         }
         clamp_fades(c);
     }
-    Ok(Outcome { clips, ..Outcome::default() })
+    Ok(Outcome {
+        clips,
+        ..Outcome::default()
+    })
 }
 
 /// Fades nunca passam da duração do clipe somados.
@@ -452,7 +552,9 @@ fn set_clip(p: &mut Project, id: ClipId, change: ClipChange) -> Result<Outcome, 
     match change {
         ClipChange::Transform(t) => {
             if !(t.scale.is_finite() && t.scale > 0.0) {
-                return Err(EditError::InvalidValue("a escala precisa ser maior que zero"));
+                return Err(EditError::InvalidValue(
+                    "a escala precisa ser maior que zero",
+                ));
             }
             if !(0.0..=1.0).contains(&t.opacity) {
                 return Err(EditError::InvalidValue("a opacidade vai de 0 a 1"));
@@ -482,12 +584,17 @@ fn set_clip(p: &mut Project, id: ClipId, change: ClipChange) -> Result<Outcome, 
         }
         ClipChange::Source(s) => {
             if !(c.source.is_generator() && s.is_generator()) {
-                return Err(EditError::InvalidValue("só geradores podem trocar de conteúdo"));
+                return Err(EditError::InvalidValue(
+                    "só geradores podem trocar de conteúdo",
+                ));
             }
             c.source = s;
         }
     }
-    Ok(Outcome { clips: vec![id], ..Outcome::default() })
+    Ok(Outcome {
+        clips: vec![id],
+        ..Outcome::default()
+    })
 }
 
 fn set_speed(p: &mut Project, clips: Vec<ClipId>, speed: f64) -> Result<Outcome, EditError> {
@@ -515,13 +622,18 @@ fn set_speed(p: &mut Project, clips: Vec<ClipId>, speed: f64) -> Result<Outcome,
         c.duration = duration;
         clamp_fades(c);
     }
-    Ok(Outcome { clips, ..Outcome::default() })
+    Ok(Outcome {
+        clips,
+        ..Outcome::default()
+    })
 }
 
 fn set_link(p: &mut Project, clips: Vec<ClipId>, linked: bool) -> Result<Outcome, EditError> {
     let clips = dedup(clips);
     if linked && clips.len() < 2 {
-        return Err(EditError::InvalidValue("selecione pelo menos dois clipes para ligar"));
+        return Err(EditError::InvalidValue(
+            "selecione pelo menos dois clipes para ligar",
+        ));
     }
     for &id in &clips {
         locate_unlocked(p, id)?;
@@ -530,5 +642,8 @@ fn set_link(p: &mut Project, clips: Vec<ClipId>, linked: bool) -> Result<Outcome
     for &id in &clips {
         p.clip_mut(id).expect("clipe validado acima").link = link;
     }
-    Ok(Outcome { clips, ..Outcome::default() })
+    Ok(Outcome {
+        clips,
+        ..Outcome::default()
+    })
 }

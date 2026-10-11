@@ -32,7 +32,12 @@ pub struct ProjectSettings {
 
 impl Default for ProjectSettings {
     fn default() -> Self {
-        Self { width: 1920, height: 1080, fps: FrameRate::new(30, 1), sample_rate: 48_000 }
+        Self {
+            width: 1920,
+            height: 1080,
+            fps: FrameRate::new(30, 1),
+            sample_rate: 48_000,
+        }
     }
 }
 
@@ -91,7 +96,12 @@ pub struct Transform {
 
 impl Default for Transform {
     fn default() -> Self {
-        Self { x: 0.0, y: 0.0, scale: 1.0, opacity: 1.0 }
+        Self {
+            x: 0.0,
+            y: 0.0,
+            scale: 1.0,
+            opacity: 1.0,
+        }
     }
 }
 
@@ -150,7 +160,15 @@ pub struct Track {
 
 impl Track {
     pub(crate) fn new(id: TrackId, kind: TrackKind) -> Self {
-        Self { id, kind, locked: false, enabled: true, muted: false, solo: false, clips: Vec::new() }
+        Self {
+            id,
+            kind,
+            locked: false,
+            enabled: true,
+            muted: false,
+            solo: false,
+            clips: Vec::new(),
+        }
     }
 
     pub fn clip_at(&self, frame: Frame) -> Option<&Clip> {
@@ -231,12 +249,19 @@ impl Project {
     }
 
     pub(crate) fn track_mut(&mut self, id: TrackId) -> Option<&mut Track> {
-        self.video_tracks.iter_mut().chain(self.audio_tracks.iter_mut()).find(|t| t.id == id)
+        self.video_tracks
+            .iter_mut()
+            .chain(self.audio_tracks.iter_mut())
+            .find(|t| t.id == id)
     }
 
     /// Faixa mutável e o gerador de IDs ao mesmo tempo (para cortes que criam clipes).
     pub(crate) fn track_and_ids(&mut self, id: TrackId) -> Option<(&mut Track, &mut IdGen)> {
-        let track = self.video_tracks.iter_mut().chain(self.audio_tracks.iter_mut()).find(|t| t.id == id)?;
+        let track = self
+            .video_tracks
+            .iter_mut()
+            .chain(self.audio_tracks.iter_mut())
+            .find(|t| t.id == id)?;
         Some((track, &mut self.ids))
     }
 
@@ -256,11 +281,14 @@ impl Project {
 
     /// Faixa e índice do clipe dentro dela.
     pub fn locate(&self, clip: ClipId) -> Option<(TrackId, usize)> {
-        self.all_tracks().find_map(|t| t.clips.iter().position(|c| c.id == clip).map(|i| (t.id, i)))
+        self.all_tracks()
+            .find_map(|t| t.clips.iter().position(|c| c.id == clip).map(|i| (t.id, i)))
     }
 
     pub fn clip(&self, id: ClipId) -> Option<&Clip> {
-        self.all_tracks().flat_map(|t| t.clips.iter()).find(|c| c.id == id)
+        self.all_tracks()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| c.id == id)
     }
 
     pub(crate) fn clip_mut(&mut self, id: ClipId) -> Option<&mut Clip> {
@@ -301,8 +329,11 @@ impl Project {
 
     /// Todos os inícios e fins de clipe (e o 0), ordenados: usados no snapping e em ↑/↓.
     pub fn edit_points(&self) -> Vec<Frame> {
-        let mut pts: Vec<Frame> =
-            self.all_tracks().flat_map(|t| t.clips.iter()).flat_map(|c| [c.start, c.end()]).collect();
+        let mut pts: Vec<Frame> = self
+            .all_tracks()
+            .flat_map(|t| t.clips.iter())
+            .flat_map(|c| [c.start, c.end()])
+            .collect();
         pts.push(0);
         pts.sort_unstable();
         pts.dedup();
@@ -372,7 +403,10 @@ mod tests {
         assert_eq!(p.expand_linked(&[ClipId(10)]), vec![ClipId(10), ClipId(12)]);
         assert_eq!(p.expand_linked(&[ClipId(11)]), vec![ClipId(11)]);
         assert_eq!(p.edit_points(), vec![0, 30, 40, 60]);
-        assert_eq!(p.video_tracks[0].clip_at(45).map(|c| c.id), Some(ClipId(11)));
+        assert_eq!(
+            p.video_tracks[0].clip_at(45).map(|c| c.id),
+            Some(ClipId(11))
+        );
         assert!(p.video_tracks[0].clip_at(35).is_none());
     }
 
@@ -401,6 +435,9 @@ mod tests {
         });
         assert_eq!(p.source_length(&ClipSource::Media(MediaId(50))), Some(300));
         assert_eq!(p.source_length(&ClipSource::Media(MediaId(51))), None);
-        assert_eq!(p.source_length(&ClipSource::SolidColor(Rgba::new(255, 0, 0, 255))), None);
+        assert_eq!(
+            p.source_length(&ClipSource::SolidColor(Rgba::new(255, 0, 0, 255))),
+            None
+        );
     }
 }

@@ -8,7 +8,12 @@ fn blade_cuts_linked_pair_and_keeps_halves_linked() {
     let mut ed = new_editor();
     let m = add_video(&mut ed, 300, true);
     let (vc, ac) = place_av(&mut ed, m, 0, 0.0, 100);
-    let out = ed.apply(Edit::Blade { at: 40, target: BladeTarget::Clips(vec![vc, ac]) }).unwrap();
+    let out = ed
+        .apply(Edit::Blade {
+            at: 40,
+            target: BladeTarget::Clips(vec![vc, ac]),
+        })
+        .unwrap();
     assert_eq!(spans(&ed, v(&ed, 0)), vec![(0, 40), (40, 100)]);
     assert_eq!(spans(&ed, a(&ed, 0)), vec![(0, 40), (40, 100)]);
     let (rv, ra) = (out.clips[0], out.clips[1]);
@@ -26,7 +31,12 @@ fn blade_all_tracks_skips_locked_tracks() {
     let (vc, ac) = place_av(&mut ed, m, 0, 0.0, 100);
     let a1 = a(&ed, 0);
     lock(&mut ed, a1);
-    let out = ed.apply(Edit::Blade { at: 50, target: BladeTarget::AllTracks }).unwrap();
+    let out = ed
+        .apply(Edit::Blade {
+            at: 50,
+            target: BladeTarget::AllTracks,
+        })
+        .unwrap();
     assert_eq!(spans(&ed, v(&ed, 0)), vec![(0, 50), (50, 100)]);
     assert_eq!(spans(&ed, a1), vec![(0, 100)]);
     assert_eq!(clip(&ed, out.clips[0]).link, None);
@@ -38,8 +48,20 @@ fn blade_on_edge_does_nothing() {
     let mut ed = new_editor();
     let v1 = v(&ed, 0);
     let c = place(&mut ed, v1, solid(), 0, 0.0, 100);
-    assert_eq!(ed.apply(Edit::Blade { at: 0, target: BladeTarget::Clips(vec![c]) }), Err(EditError::NoChange));
-    assert_eq!(ed.apply(Edit::Blade { at: 100, target: BladeTarget::Clips(vec![c]) }), Err(EditError::NoChange));
+    assert_eq!(
+        ed.apply(Edit::Blade {
+            at: 0,
+            target: BladeTarget::Clips(vec![c])
+        }),
+        Err(EditError::NoChange)
+    );
+    assert_eq!(
+        ed.apply(Edit::Blade {
+            at: 100,
+            target: BladeTarget::Clips(vec![c])
+        }),
+        Err(EditError::NoChange)
+    );
     assert_eq!(spans(&ed, v1), vec![(0, 100)]);
 }
 
@@ -58,7 +80,11 @@ fn delete_leaves_gap() {
 fn ripple_delete_closes_gap_on_same_tracks_only() {
     let mut ed = new_editor();
     let m = add_video(&mut ed, 300, true);
-    let v2 = ed.apply(Edit::AddTrack(TrackKind::Video)).unwrap().track.unwrap();
+    let v2 = ed
+        .apply(Edit::AddTrack(TrackKind::Video))
+        .unwrap()
+        .track
+        .unwrap();
     place_av(&mut ed, m, 0, 0.0, 10);
     let (mid_v, _) = place_av(&mut ed, m, 10, 10.0, 20);
     place_av(&mut ed, m, 30, 30.0, 10);
@@ -85,7 +111,10 @@ fn cannot_delete_on_locked_track() {
     let v1 = v(&ed, 0);
     let c = place(&mut ed, v1, solid(), 0, 0.0, 10);
     lock(&mut ed, v1);
-    assert_eq!(ed.apply(Edit::Delete { clips: vec![c] }), Err(EditError::TrackLocked));
+    assert_eq!(
+        ed.apply(Edit::Delete { clips: vec![c] }),
+        Err(EditError::TrackLocked)
+    );
 }
 
 #[test]
@@ -96,6 +125,10 @@ fn duplicate_ids_in_selection_are_harmless() {
     let d = place(&mut ed, v1, solid(), 10, 0.0, 10);
     ed.apply(Edit::RippleDelete { clips: vec![c, c] }).unwrap();
     assert_eq!(spans(&ed, v1), vec![(0, 10)]);
-    ed.apply(Edit::Blade { at: 5, target: BladeTarget::Clips(vec![d, d]) }).unwrap();
+    ed.apply(Edit::Blade {
+        at: 5,
+        target: BladeTarget::Clips(vec![d, d]),
+    })
+    .unwrap();
     assert_eq!(spans(&ed, v1), vec![(0, 5), (5, 10)]);
 }

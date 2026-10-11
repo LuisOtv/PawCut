@@ -66,7 +66,10 @@ fn trim_never_leaves_less_than_one_frame() {
     let c = place(&mut ed, v1, solid(), 0, 0.0, 10);
     ed.apply(trim(vec![c], Edge::End, -50)).unwrap();
     assert_eq!(clip(&ed, c).duration, 1);
-    assert_eq!(ed.apply(trim(vec![c], Edge::End, -50)), Err(EditError::NoChange));
+    assert_eq!(
+        ed.apply(trim(vec![c], Edge::End, -50)),
+        Err(EditError::NoChange)
+    );
 }
 
 #[test]

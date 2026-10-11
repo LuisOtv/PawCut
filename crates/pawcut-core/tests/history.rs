@@ -35,12 +35,20 @@ fn failed_or_empty_edit_does_not_touch_history() {
     let v1 = v(&ed, 0);
     let bad = ed.apply(Edit::Overwrite {
         at: 0,
-        items: vec![Placement { track: v1, draft: draft(ClipSource::Media(m), 90.0, 50) }],
+        items: vec![Placement {
+            track: v1,
+            draft: draft(ClipSource::Media(m), 90.0, 50),
+        }],
     });
     assert!(bad.is_err());
     let same_flags = ed.apply(Edit::SetTrackFlags {
         track: v1,
-        flags: TrackFlags { locked: false, enabled: true, muted: false, solo: false },
+        flags: TrackFlags {
+            locked: false,
+            enabled: true,
+            muted: false,
+            solo: false,
+        },
     });
     assert_eq!(same_flags, Err(EditError::NoChange));
     assert!(ed.undo()); // desfaz o AddMedia

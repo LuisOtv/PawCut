@@ -34,7 +34,8 @@ impl FrameRate {
 
     /// Primeira amostra de áudio que pertence ao frame `frame`.
     pub fn frame_to_sample(self, frame: Frame, sample_rate: u32) -> i64 {
-        (i128::from(frame) * i128::from(sample_rate) * i128::from(self.den) / i128::from(self.num)) as i64
+        (i128::from(frame) * i128::from(sample_rate) * i128::from(self.den) / i128::from(self.num))
+            as i64
     }
 }
 

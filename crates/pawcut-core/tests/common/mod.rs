@@ -45,25 +45,54 @@ pub fn solid() -> ClipSource {
 }
 
 pub fn draft(source: ClipSource, source_start: f64, duration: Frame) -> ClipDraft {
-    ClipDraft { source, source_start, duration }
+    ClipDraft {
+        source,
+        source_start,
+        duration,
+    }
 }
 
 /// Overwrite de um único clipe. Devolve o id criado.
-pub fn place(ed: &mut Editor, track: TrackId, source: ClipSource, at: Frame, source_start: f64, duration: Frame) -> ClipId {
-    ed.apply(Edit::Overwrite { at, items: vec![Placement { track, draft: draft(source, source_start, duration) }] })
-        .unwrap()
-        .clips[0]
+pub fn place(
+    ed: &mut Editor,
+    track: TrackId,
+    source: ClipSource,
+    at: Frame,
+    source_start: f64,
+    duration: Frame,
+) -> ClipId {
+    ed.apply(Edit::Overwrite {
+        at,
+        items: vec![Placement {
+            track,
+            draft: draft(source, source_start, duration),
+        }],
+    })
+    .unwrap()
+    .clips[0]
 }
 
 /// Coloca o vídeo em V1 e o áudio em A1, ligados. Devolve (vídeo, áudio).
-pub fn place_av(ed: &mut Editor, media: MediaId, at: Frame, source_start: f64, duration: Frame) -> (ClipId, ClipId) {
+pub fn place_av(
+    ed: &mut Editor,
+    media: MediaId,
+    at: Frame,
+    source_start: f64,
+    duration: Frame,
+) -> (ClipId, ClipId) {
     let (vt, at_) = (v(ed, 0), a(ed, 0));
     let out = ed
         .apply(Edit::Overwrite {
             at,
             items: vec![
-                Placement { track: vt, draft: draft(ClipSource::Media(media), source_start, duration) },
-                Placement { track: at_, draft: draft(ClipSource::Media(media), source_start, duration) },
+                Placement {
+                    track: vt,
+                    draft: draft(ClipSource::Media(media), source_start, duration),
+                },
+                Placement {
+                    track: at_,
+                    draft: draft(ClipSource::Media(media), source_start, duration),
+                },
             ],
         })
         .unwrap();
@@ -71,7 +100,13 @@ pub fn place_av(ed: &mut Editor, media: MediaId, at: Frame, source_start: f64, d
 }
 
 pub fn spans(ed: &Editor, track: TrackId) -> Vec<(Frame, Frame)> {
-    ed.project().track(track).unwrap().clips.iter().map(|c| (c.start, c.end())).collect()
+    ed.project()
+        .track(track)
+        .unwrap()
+        .clips
+        .iter()
+        .map(|c| (c.start, c.end()))
+        .collect()
 }
 
 pub fn clip(ed: &Editor, id: ClipId) -> Clip {
@@ -81,7 +116,12 @@ pub fn clip(ed: &Editor, id: ClipId) -> Clip {
 pub fn lock(ed: &mut Editor, track: TrackId) {
     ed.apply(Edit::SetTrackFlags {
         track,
-        flags: TrackFlags { locked: true, enabled: true, muted: false, solo: false },
+        flags: TrackFlags {
+            locked: true,
+            enabled: true,
+            muted: false,
+            solo: false,
+        },
     })
     .unwrap();
 }

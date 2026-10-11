@@ -1,0 +1,68 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use thiserror::Error;
+
+use crate::model::{PROJECT_VERSION, Project};
+
+#[derive(Debug, Error)]
+pub enum ProjectFileError {
+    #[error("não foi possível acessar {}: {source}", .path.display())]
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("arquivo de projeto inválido: {0}")]
+    Parse(#[from] serde_json::Error),
+    #[error(
+        "este projeto é de uma versão mais nova do PawCut (formato {found}; esta versão lê até {supported})"
+    )]
+    UnsupportedVersion { found: u64, supported: u32 },
+}
+
+pub fn to_json(project: &Project) -> Result<String, ProjectFileError> {
+    Ok(serde_json::to_string_pretty(project)?)
+}
+
+pub fn from_json(text: &str) -> Result<Project, ProjectFileError> {
+    let value: serde_json::Value = serde_json::from_str(text)?;
+    if let Some(found) = value.get("version").and_then(serde_json::Value::as_u64)
+        && found > u64::from(PROJECT_VERSION)
+    {
+        return Err(ProjectFileError::UnsupportedVersion {
+            found,
+            supported: PROJECT_VERSION,
+        });
+    }
+    let mut project: Project = serde_json::from_value(value)?;
+    // Garante a invariante de ordem mesmo se o arquivo foi editado à mão.
+    for t in project
+        .video_tracks
+        .iter_mut()
+        .chain(project.audio_tracks.iter_mut())
+    {
+        t.clips.sort_by_key(|c| c.start);
+    }
+    Ok(project)
+}
+
+/// Grava num arquivo temporário e renomeia, para nunca deixar um `.pawcut` pela metade.
+pub fn save_project(project: &Project, path: &Path) -> Result<(), ProjectFileError> {
+    let text = to_json(project)?;
+    let tmp = path.with_extension("pawcut.tmp");
+    let io = |source: std::io::Error| ProjectFileError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    fs::write(&tmp, text).map_err(io)?;
+    fs::rename(&tmp, path).map_err(io)?;
+    Ok(())
+}
+
+pub fn load_project(path: &Path) -> Result<Project, ProjectFileError> {
+    let text = fs::read_to_string(path).map_err(|source| ProjectFileError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    from_json(&text)
+}
