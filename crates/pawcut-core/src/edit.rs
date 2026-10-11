@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::ids::{ClipId, LinkId, MediaId, TrackId};
 use crate::model::{Clip, ClipSource, MediaInfo, MediaKind, MediaRef, Project, Track, TrackKind, Transform};
 use crate::time::Frame;
-use crate::track_ops::{clear_range, insert_sorted};
+use crate::track_ops::{clear_range, insert_sorted, relink, split_clip};
 
 /// Clipe a ser criado: o que mostrar, de onde a fonte começa e quanto dura.
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +29,13 @@ pub struct TrackFlags {
     pub solo: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum BladeTarget {
+    /// Cortar só estes clipes (seleção, já expandida pelo Linked Selection).
+    Clips(Vec<ClipId>),
+    /// Cortar tudo sob o cursor nas faixas destravadas (Ctrl+B sem seleção).
+    AllTracks,
+}
 /// Uma alteração no projeto. Aplicada pelo `Editor`, que guarda o histórico.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Edit {
@@ -40,6 +47,12 @@ pub enum Edit {
     Overwrite { at: Frame, items: Vec<Placement> },
     /// Overwrite no fim da timeline (Shift+F12).
     Append { items: Vec<Placement> },
+    /// Corta em `at`. Clipes em que `at` cai na borda são ignorados.
+    Blade { at: Frame, target: BladeTarget },
+    /// Apaga deixando buraco.
+    Delete { clips: Vec<ClipId> },
+    /// Apaga e puxa o resto da mesma faixa para fechar o buraco (Shift+Backspace).
+    RippleDelete { clips: Vec<ClipId> },
 }
 
 /// O que a edição criou, para a interface selecionar.
@@ -87,6 +100,9 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
             validate_items(p, at, &items)?;
             place(p, at, items)
         }
+        Edit::Blade { at, target } => blade(p, at, target),
+        Edit::Delete { clips } => delete(p, clips, false),
+        Edit::RippleDelete { clips } => delete(p, clips, true),
     }
 }
 
@@ -206,4 +222,79 @@ fn place(p: &mut Project, at: Frame, items: Vec<Placement>) -> Result<Outcome, E
         out.clips.push(id);
     }
     Ok(out)
+}
+
+/// Tira IDs repetidos, mantendo a ordem.
+fn dedup(ids: Vec<ClipId>) -> Vec<ClipId> {
+    let mut seen = HashSet::new();
+    ids.into_iter().filter(|id| seen.insert(*id)).collect()
+}
+
+/// Faixa e índice de um clipe, exigindo faixa destravada.
+fn locate_unlocked(p: &Project, clip: ClipId) -> Result<(TrackId, usize), EditError> {
+    let (tid, i) = p.locate(clip).ok_or(EditError::ClipNotFound(clip))?;
+    unlocked_track(p, tid)?;
+    Ok((tid, i))
+}
+
+fn blade(p: &mut Project, at: Frame, target: BladeTarget) -> Result<Outcome, EditError> {
+    let targets: Vec<ClipId> = match target {
+        BladeTarget::Clips(clips) => {
+            let clips = dedup(clips);
+            for &id in &clips {
+                locate_unlocked(p, id)?;
+            }
+            clips
+        }
+        BladeTarget::AllTracks => {
+            p.all_tracks().filter(|t| !t.locked).filter_map(|t| t.clip_at(at)).map(|c| c.id).collect()
+        }
+    };
+    let targets: Vec<ClipId> = targets
+        .into_iter()
+        .filter(|id| p.clip(*id).is_some_and(|c| c.start < at && at < c.end()))
+        .collect();
+    if targets.is_empty() {
+        return Err(EditError::NoChange);
+    }
+    let mut links = HashMap::new();
+    let mut out = Outcome::default();
+    for id in targets {
+        let (tid, i) = p.locate(id).expect("clipe validado acima");
+        let (track, ids) = p.track_and_ids(tid).expect("faixa do clipe existe");
+        let clip = track.clips.remove(i);
+        let (left, mut right) = split_clip(&clip, at, ClipId(ids.fresh()));
+        right.link = relink(clip.link, &mut links, ids);
+        out.clips.push(right.id);
+        track.clips.insert(i, left);
+        track.clips.insert(i + 1, right);
+    }
+    Ok(out)
+}
+
+fn delete(p: &mut Project, clips: Vec<ClipId>, ripple: bool) -> Result<Outcome, EditError> {
+    let clips = dedup(clips);
+    if clips.is_empty() {
+        return Err(EditError::InvalidValue("nenhum clipe selecionado"));
+    }
+    for &id in &clips {
+        locate_unlocked(p, id)?;
+    }
+    let mut removed: Vec<(TrackId, Clip)> = Vec::new();
+    for id in clips {
+        let (tid, i) = p.locate(id).expect("clipe validado acima");
+        let track = p.track_mut(tid).expect("faixa do clipe existe");
+        removed.push((tid, track.clips.remove(i)));
+    }
+    if ripple {
+        // Do fim para o começo, para que cada deslocamento não atrapalhe o próximo.
+        removed.sort_by_key(|(_, c)| std::cmp::Reverse(c.start));
+        for (tid, gone) in &removed {
+            let track = p.track_mut(*tid).expect("faixa do clipe existe");
+            for c in track.clips.iter_mut().filter(|c| c.start >= gone.end()) {
+                c.start -= gone.duration;
+            }
+        }
+    }
+    Ok(Outcome::default())
 }
