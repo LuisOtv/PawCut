@@ -36,6 +36,11 @@ pub enum BladeTarget {
     /// Cortar tudo sob o cursor nas faixas destravadas (Ctrl+B sem seleção).
     AllTracks,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Start,
+    End,
+}
 /// Uma alteração no projeto. Aplicada pelo `Editor`, que guarda o histórico.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Edit {
@@ -55,6 +60,8 @@ pub enum Edit {
     RippleDelete { clips: Vec<ClipId> },
     /// Arrasta clipes no tempo e entre faixas do mesmo tipo, sobrescrevendo o destino.
     Move { clips: Vec<ClipId>, delta: Frame, video_track_delta: i32, audio_track_delta: i32 },
+    /// Arrasta a borda dos clipes. Positivo = para a direita.
+    Trim { clips: Vec<ClipId>, edge: Edge, delta: Frame },
 }
 
 /// O que a edição criou, para a interface selecionar.
@@ -108,6 +115,7 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
         Edit::Move { clips, delta, video_track_delta, audio_track_delta } => {
             move_clips(p, clips, delta, video_track_delta, audio_track_delta)
         }
+        Edit::Trim { clips, edge, delta } => trim(p, clips, edge, delta),
     }
 }
 
@@ -349,4 +357,61 @@ fn move_clips(p: &mut Project, clips: Vec<ClipId>, delta: Frame, vtd: i32, atd: 
         insert_sorted(track, clip);
     }
     Ok(out)
+}
+
+fn trim(p: &mut Project, clips: Vec<ClipId>, edge: Edge, delta: Frame) -> Result<Outcome, EditError> {
+    let clips = dedup(clips);
+    if clips.is_empty() {
+        return Err(EditError::InvalidValue("nenhum clipe selecionado"));
+    }
+    let (mut lo, mut hi) = (Frame::MIN, Frame::MAX);
+    for &id in &clips {
+        let (tid, i) = locate_unlocked(p, id)?;
+        let track = p.track(tid).expect("faixa do clipe existe");
+        let c = &track.clips[i];
+        let (l, h) = match edge {
+            Edge::End => {
+                let mut h = track.clips.get(i + 1).map_or(Frame::MAX, |n| n.start - c.end());
+                if let Some(len) = p.source_length(&c.source) {
+                    let max_dur = ((len as f64 - c.source_start) / c.speed + 1e-9).floor() as Frame;
+                    h = h.min(max_dur - c.duration);
+                }
+                (1 - c.duration, h)
+            }
+            Edge::Start => {
+                let prev_end = if i > 0 { track.clips[i - 1].end() } else { 0 };
+                let mut l = prev_end - c.start;
+                if p.source_length(&c.source).is_some() {
+                    // a fonte não pode começar antes do 0
+                    l = l.max(-(((c.source_start / c.speed) + 1e-9).floor() as Frame));
+                }
+                (l, c.duration - 1)
+            }
+        };
+        lo = lo.max(l);
+        hi = hi.min(h);
+    }
+    let d = if lo > hi { 0 } else { delta.clamp(lo, hi) };
+    if d == 0 {
+        return Err(EditError::NoChange);
+    }
+    for &id in &clips {
+        let c = p.clip_mut(id).expect("clipe validado acima");
+        match edge {
+            Edge::End => c.duration += d,
+            Edge::Start => {
+                c.source_start = c.source_time_at(c.start + d);
+                c.start += d;
+                c.duration -= d;
+            }
+        }
+        clamp_fades(c);
+    }
+    Ok(Outcome { clips, ..Outcome::default() })
+}
+
+/// Fades nunca passam da duração do clipe somados.
+fn clamp_fades(c: &mut Clip) {
+    c.fade_in = c.fade_in.clamp(0, c.duration);
+    c.fade_out = c.fade_out.clamp(0, c.duration - c.fade_in);
 }

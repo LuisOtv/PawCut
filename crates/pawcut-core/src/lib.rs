@@ -9,7 +9,7 @@ mod time;
 mod track_ops;
 
 pub use time::{Frame, FrameRate, format_timecode};
-pub use edit::{BladeTarget, ClipDraft, Edit, EditError, Outcome, Placement, TrackFlags};
+pub use edit::{BladeTarget, ClipDraft, Edge, Edit, EditError, Outcome, Placement, TrackFlags};
 pub use editor::Editor;
 pub use ids::{ClipId, LinkId, MediaId, TrackId};
 pub use model::{
