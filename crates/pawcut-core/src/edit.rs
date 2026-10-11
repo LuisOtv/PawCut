@@ -53,6 +53,8 @@ pub enum Edit {
     Delete { clips: Vec<ClipId> },
     /// Apaga e puxa o resto da mesma faixa para fechar o buraco (Shift+Backspace).
     RippleDelete { clips: Vec<ClipId> },
+    /// Arrasta clipes no tempo e entre faixas do mesmo tipo, sobrescrevendo o destino.
+    Move { clips: Vec<ClipId>, delta: Frame, video_track_delta: i32, audio_track_delta: i32 },
 }
 
 /// O que a edição criou, para a interface selecionar.
@@ -103,6 +105,9 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
         Edit::Blade { at, target } => blade(p, at, target),
         Edit::Delete { clips } => delete(p, clips, false),
         Edit::RippleDelete { clips } => delete(p, clips, true),
+        Edit::Move { clips, delta, video_track_delta, audio_track_delta } => {
+            move_clips(p, clips, delta, video_track_delta, audio_track_delta)
+        }
     }
 }
 
@@ -297,4 +302,51 @@ fn delete(p: &mut Project, clips: Vec<ClipId>, ripple: bool) -> Result<Outcome, 
         }
     }
     Ok(Outcome::default())
+}
+
+fn move_clips(p: &mut Project, clips: Vec<ClipId>, delta: Frame, vtd: i32, atd: i32) -> Result<Outcome, EditError> {
+    let clips = dedup(clips);
+    if clips.is_empty() {
+        return Err(EditError::InvalidValue("nenhum clipe selecionado"));
+    }
+    let mut plan: Vec<(ClipId, TrackId)> = Vec::new();
+    let mut min_start = Frame::MAX;
+    for &id in &clips {
+        let (tid, i) = locate_unlocked(p, id)?;
+        let track = p.track(tid).expect("faixa do clipe existe");
+        let kind = track.kind;
+        let idx = p.tracks(kind).iter().position(|t| t.id == tid).expect("faixa está na lista") as i64;
+        let td = i64::from(match kind {
+            TrackKind::Video => vtd,
+            TrackKind::Audio => atd,
+        });
+        let dest = usize::try_from(idx + td)
+            .ok()
+            .and_then(|d| p.tracks(kind).get(d))
+            .ok_or(EditError::InvalidValue("não existe faixa nessa direção"))?;
+        if dest.locked {
+            return Err(EditError::TrackLocked);
+        }
+        min_start = min_start.min(track.clips[i].start);
+        plan.push((id, dest.id));
+    }
+    let delta = delta.max(-min_start);
+    if delta == 0 && plan.iter().all(|(id, dest)| p.locate(*id).map(|(t, _)| t) == Some(*dest)) {
+        return Err(EditError::NoChange);
+    }
+    let mut moving: Vec<(Clip, TrackId)> = Vec::new();
+    for (id, dest) in plan {
+        let (tid, i) = p.locate(id).expect("clipe validado acima");
+        let mut clip = p.track_mut(tid).expect("faixa do clipe existe").clips.remove(i);
+        clip.start += delta;
+        moving.push((clip, dest));
+    }
+    let mut out = Outcome::default();
+    for (clip, dest) in moving {
+        let (track, ids) = p.track_and_ids(dest).expect("faixa de destino validada");
+        clear_range(track, clip.start, clip.end(), ids);
+        out.clips.push(clip.id);
+        insert_sorted(track, clip);
+    }
+    Ok(out)
 }
