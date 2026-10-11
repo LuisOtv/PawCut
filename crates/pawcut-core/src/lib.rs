@@ -4,6 +4,7 @@
 mod ids;
 mod model;
 mod time;
+mod track_ops;
 
 pub use time::{Frame, FrameRate, format_timecode};
 pub use ids::{ClipId, LinkId, MediaId, TrackId};
