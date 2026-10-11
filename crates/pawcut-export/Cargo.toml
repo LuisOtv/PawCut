@@ -1,0 +1,14 @@
+[package]
+name = "pawcut-export"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pawcut-core.workspace = true
+pawcut-media.workspace = true
+pawcut-render.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+pawcut-testkit.workspace = true
