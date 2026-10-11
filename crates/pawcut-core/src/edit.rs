@@ -57,6 +57,13 @@ pub enum ClipChange {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Edit {
     AddMedia(MediaInfo),
+    /// Aponta a mídia para outro arquivo (Relink), mantendo os clipes.
+    RelinkMedia {
+        media: MediaId,
+        info: MediaInfo,
+    },
+    /// Tira a mídia do Media Pool; recusa se algum clipe usa.
+    RemoveMedia(MediaId),
     AddTrack(TrackKind),
     RemoveTrack(TrackId),
     SetTrackFlags {
@@ -154,6 +161,32 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
                 media: Some(id),
                 ..Outcome::default()
             })
+        }
+        Edit::RelinkMedia { media, info } => {
+            let m = p
+                .media
+                .iter_mut()
+                .find(|m| m.id == media)
+                .ok_or(EditError::MediaNotFound(media))?;
+            m.info = info;
+            Ok(Outcome {
+                media: Some(media),
+                ..Outcome::default()
+            })
+        }
+        Edit::RemoveMedia(media) => {
+            p.media(media).ok_or(EditError::MediaNotFound(media))?;
+            let used = p
+                .all_tracks()
+                .flat_map(|t| &t.clips)
+                .any(|c| c.source == ClipSource::Media(media));
+            if used {
+                return Err(EditError::InvalidValue(
+                    "a mídia está sendo usada na timeline",
+                ));
+            }
+            p.media.retain(|m| m.id != media);
+            Ok(Outcome::default())
         }
         Edit::AddTrack(kind) => Ok(Outcome {
             track: Some(p.add_track(kind)),
