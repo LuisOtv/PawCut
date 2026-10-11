@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::ids::{ClipId, LinkId, MediaId, TrackId};
 use crate::model::{Clip, ClipSource, MediaInfo, MediaKind, MediaRef, Project, Track, TrackKind, Transform};
 use crate::time::Frame;
-use crate::track_ops::{clear_range, insert_sorted, relink, split_clip};
+use crate::track_ops::{clear_range, insert_sorted, relink, ripple_open, split_clip};
 
 /// Clipe a ser criado: o que mostrar, de onde a fonte começa e quanto dura.
 #[derive(Debug, Clone, PartialEq)]
@@ -62,6 +62,8 @@ pub enum Edit {
     Move { clips: Vec<ClipId>, delta: Frame, video_track_delta: i32, audio_track_delta: i32 },
     /// Arrasta a borda dos clipes. Positivo = para a direita.
     Trim { clips: Vec<ClipId>, edge: Edge, delta: Frame },
+    /// Abre espaço em `at` em todas as faixas destravadas e coloca os itens (F9).
+    Insert { at: Frame, items: Vec<Placement> },
 }
 
 /// O que a edição criou, para a interface selecionar.
@@ -116,6 +118,16 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
             move_clips(p, clips, delta, video_track_delta, audio_track_delta)
         }
         Edit::Trim { clips, edge, delta } => trim(p, clips, edge, delta),
+        Edit::Insert { at, items } => {
+            validate_items(p, at, &items)?;
+            let len = items.iter().map(|pl| pl.draft.duration).max().unwrap_or(0);
+            let mut links = HashMap::new();
+            let Project { video_tracks, audio_tracks, ids, .. } = &mut *p;
+            for track in video_tracks.iter_mut().chain(audio_tracks.iter_mut()).filter(|t| !t.locked) {
+                ripple_open(track, at, len, &mut links, ids);
+            }
+            place(p, at, items)
+        }
     }
 }
 
