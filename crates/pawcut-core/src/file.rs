@@ -1,9 +1,11 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
 use crate::model::{PROJECT_VERSION, Project};
+use crate::time::Frame;
 
 #[derive(Debug, Error)]
 pub enum ProjectFileError {
@@ -18,6 +20,8 @@ pub enum ProjectFileError {
         "este projeto é de uma versão mais nova do PawCut (formato {found}; esta versão lê até {supported})"
     )]
     UnsupportedVersion { found: u64, supported: u32 },
+    #[error("arquivo de projeto inválido: {0}")]
+    Invalid(String),
 }
 
 pub fn to_json(project: &Project) -> Result<String, ProjectFileError> {
@@ -43,6 +47,7 @@ pub fn from_json(text: &str) -> Result<Project, ProjectFileError> {
     {
         t.clips.sort_by_key(|c| c.start);
     }
+    validate(&mut project).map_err(ProjectFileError::Invalid)?;
     Ok(project)
 }
 
@@ -65,4 +70,51 @@ pub fn load_project(path: &Path) -> Result<Project, ProjectFileError> {
         source,
     })?;
     from_json(&text)
+}
+
+/// Recusa valores que o editor nunca produziria e acerta o contador de IDs.
+fn validate(p: &mut Project) -> Result<(), String> {
+    let s = &p.settings;
+    if s.fps.num == 0 || s.fps.den == 0 {
+        return Err("taxa de quadros inválida".into());
+    }
+    if s.sample_rate == 0 || s.width == 0 || s.height == 0 {
+        return Err("resolução ou taxa de amostragem inválida".into());
+    }
+    let mut seen = HashSet::new();
+    let ids = p
+        .media
+        .iter()
+        .map(|m| m.id.0)
+        .chain(p.all_tracks().map(|t| t.id.0))
+        .chain(p.all_tracks().flat_map(|t| t.clips.iter().map(|c| c.id.0)));
+    for id in ids {
+        if !seen.insert(id) {
+            return Err(format!("o id {id} aparece duas vezes"));
+        }
+    }
+    for t in p.all_tracks() {
+        let mut prev_end: Frame = 0;
+        for c in &t.clips {
+            if c.duration < 1 {
+                return Err("clipe com duração menor que 1 frame".into());
+            }
+            if !(0.1..=10.0).contains(&c.speed) {
+                return Err("clipe com velocidade fora de 0.1x a 10x".into());
+            }
+            if !c.source_start.is_finite() {
+                return Err("clipe com início de fonte inválido".into());
+            }
+            if c.start < prev_end {
+                return Err("clipes sobrepostos na mesma faixa".into());
+            }
+            prev_end = c.end();
+        }
+    }
+    let links = p
+        .all_tracks()
+        .flat_map(|t| t.clips.iter().filter_map(|c| c.link.map(|l| l.0)));
+    let max_id = seen.iter().copied().chain(links).max().unwrap_or(0);
+    p.ids.ensure_above(max_id);
+    Ok(())
 }

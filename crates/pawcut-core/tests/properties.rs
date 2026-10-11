@@ -170,3 +170,85 @@ fn link_and_unlink() {
     assert_eq!(clip(&ed, s).link, None);
     assert_eq!(clip(&ed, au).link, None);
 }
+
+#[test]
+fn speed_change_never_reads_past_media_end() {
+    let mut ed = new_editor();
+    let m = add_video(&mut ed, 100, false);
+    let v1 = v(&ed, 0);
+    let c = place(&mut ed, v1, ClipSource::Media(m), 0, 0.0, 100);
+    for speed in [1.5, 1.0, 0.7, 3.0, 1.0] {
+        ed.apply(Edit::SetSpeed {
+            clips: vec![c],
+            speed,
+        })
+        .unwrap();
+        let k = clip(&ed, c);
+        assert!(
+            k.source_start + k.duration as f64 * k.speed <= 100.0 + 1e-6,
+            "{speed}x lê além da mídia"
+        );
+    }
+    let before = clip(&ed, c).duration;
+    let _ = ed.apply(Edit::Trim {
+        clips: vec![c],
+        edge: Edge::End,
+        delta: 5,
+    });
+    assert!(
+        clip(&ed, c).duration >= before,
+        "arrastar a borda para a direita não pode encolher o clipe"
+    );
+}
+
+#[test]
+fn speed_keeps_linked_pair_together() {
+    let mut ed = new_editor();
+    let m = add_video(&mut ed, 300, true);
+    let (vc, ac) = place_av(&mut ed, m, 0, 0.0, 100);
+    let v1 = v(&ed, 0);
+    place(&mut ed, v1, solid(), 120, 0.0, 10);
+    ed.apply(Edit::SetSpeed {
+        clips: vec![vc, ac],
+        speed: 0.5,
+    })
+    .unwrap();
+    assert_eq!(clip(&ed, vc).duration, 120);
+    assert_eq!(clip(&ed, ac).duration, 120);
+}
+
+#[test]
+fn non_finite_values_are_rejected() {
+    let mut ed = new_editor();
+    let v1 = v(&ed, 0);
+    let nan_start = ed.apply(Edit::Overwrite {
+        at: 0,
+        items: vec![Placement {
+            track: v1,
+            draft: draft(solid(), f64::NAN, 10),
+        }],
+    });
+    assert!(matches!(nan_start, Err(EditError::InvalidValue(_))));
+    let bad_text = |size: f32| {
+        ClipSource::Text(TextStyle {
+            text: "x".into(),
+            font: "Sans".into(),
+            size,
+            color: Rgba::new(255, 255, 255, 255),
+        })
+    };
+    let placed = ed.apply(Edit::Overwrite {
+        at: 0,
+        items: vec![Placement {
+            track: v1,
+            draft: draft(bad_text(f32::NAN), 0.0, 10),
+        }],
+    });
+    assert!(matches!(placed, Err(EditError::InvalidValue(_))));
+    let g = place(&mut ed, v1, solid(), 0, 0.0, 10);
+    let changed = ed.apply(Edit::SetClip {
+        clip: g,
+        change: ClipChange::Source(bad_text(0.0)),
+    });
+    assert!(matches!(changed, Err(EditError::InvalidValue(_))));
+}

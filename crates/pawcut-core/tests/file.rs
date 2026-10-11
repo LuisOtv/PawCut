@@ -87,3 +87,81 @@ fn editing_after_load_does_not_reuse_ids() {
     let unique: HashSet<ClipId> = ids.iter().copied().collect();
     assert_eq!(ids.len(), unique.len());
 }
+
+fn tampered(edit: impl Fn(&mut serde_json::Value)) -> Result<Project, ProjectFileError> {
+    let ed = sample_editor();
+    let mut value: serde_json::Value =
+        serde_json::from_str(&to_json(ed.project()).unwrap()).unwrap();
+    edit(&mut value);
+    from_json(&value.to_string())
+}
+
+#[test]
+fn files_with_impossible_values_are_refused() {
+    let cases: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
+        (
+            "fps zero",
+            Box::new(|v| v["settings"]["fps"]["num"] = 0.into()),
+        ),
+        (
+            "sample rate zero",
+            Box::new(|v| v["settings"]["sample_rate"] = 0.into()),
+        ),
+        (
+            "duração zero",
+            Box::new(|v| v["video_tracks"][0]["clips"][0]["duration"] = 0.into()),
+        ),
+        (
+            "velocidade negativa",
+            Box::new(|v| v["video_tracks"][0]["clips"][0]["speed"] = (-3.0).into()),
+        ),
+        (
+            "source_start null",
+            Box::new(|v| {
+                v["video_tracks"][0]["clips"][0]["source_start"] = serde_json::Value::Null
+            }),
+        ),
+        (
+            "sobreposição",
+            Box::new(|v| {
+                let c = v["video_tracks"][0]["clips"][0].clone();
+                let mut d = c.clone();
+                d["id"] = 9999.into();
+                d["start"] = (c["start"].as_i64().unwrap() + 1).into();
+                v["video_tracks"][0]["clips"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(d);
+            }),
+        ),
+        (
+            "id repetido",
+            Box::new(|v| {
+                let id = v["video_tracks"][0]["clips"][0]["id"].clone();
+                v["audio_tracks"][0]["clips"][0]["id"] = id;
+            }),
+        ),
+    ];
+    for (name, edit) in cases {
+        assert!(tampered(edit).is_err(), "deveria recusar: {name}");
+    }
+}
+
+#[test]
+fn stale_id_counter_is_repaired_on_load() {
+    let project = tampered(|v| v["ids"]["last"] = 0.into()).unwrap();
+    let mut ed = Editor::new(project);
+    let t = ed
+        .apply(Edit::AddTrack(TrackKind::Video))
+        .unwrap()
+        .track
+        .unwrap();
+    let same: Vec<_> = ed.project().all_tracks().filter(|tr| tr.id == t).collect();
+    assert_eq!(same.len(), 1);
+    let clip_ids: HashSet<u64> = ed
+        .project()
+        .all_tracks()
+        .flat_map(|tr| tr.clips.iter().map(|c| c.id.0))
+        .collect();
+    assert!(!clip_ids.contains(&t.0));
+}

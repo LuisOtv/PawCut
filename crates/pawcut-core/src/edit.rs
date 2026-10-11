@@ -278,9 +278,10 @@ fn validate_draft(p: &Project, pl: &Placement) -> Result<(), EditError> {
             "a duração precisa ser de pelo menos 1 frame",
         ));
     }
-    if d.source_start < 0.0 {
-        return Err(EditError::InvalidValue("início da fonte negativo"));
+    if !(d.source_start.is_finite() && d.source_start >= 0.0) {
+        return Err(EditError::InvalidValue("início da fonte inválido"));
     }
+    validate_source(&d.source)?;
     let fits = match &d.source {
         ClipSource::Media(id) => {
             let m = p.media(*id).ok_or(EditError::MediaNotFound(*id))?;
@@ -503,7 +504,7 @@ fn trim(
                     let max_dur = ((len as f64 - c.source_start) / c.speed + 1e-9).floor() as Frame;
                     h = h.min(max_dur - c.duration);
                 }
-                (1 - c.duration, h)
+                (1 - c.duration, h.max(0))
             }
             Edge::Start => {
                 let prev_end = if i > 0 { track.clips[i - 1].end() } else { 0 };
@@ -588,6 +589,7 @@ fn set_clip(p: &mut Project, id: ClipId, change: ClipChange) -> Result<Outcome, 
                     "só geradores podem trocar de conteúdo",
                 ));
             }
+            validate_source(&s)?;
             c.source = s;
         }
     }
@@ -608,18 +610,37 @@ fn set_speed(p: &mut Project, clips: Vec<ClipId>, speed: f64) -> Result<Outcome,
     for &id in &clips {
         locate_unlocked(p, id)?;
     }
+    // Duração nova de cada clipe, limitada pelo próximo clipe e pelo fim da mídia.
+    let mut planned: Vec<(ClipId, Option<LinkId>, Frame)> = Vec::new();
     for &id in &clips {
         let (tid, i) = p.locate(id).expect("clipe validado acima");
-        let track = p.track_mut(tid).expect("faixa do clipe existe");
-        let next_start = track.clips.get(i + 1).map(|n| n.start);
-        let c = &mut track.clips[i];
+        let track = p.track(tid).expect("faixa do clipe existe");
+        let c = &track.clips[i];
         let span = c.duration as f64 * c.speed;
         let mut duration = ((span / speed).round() as Frame).max(1);
-        if let Some(n) = next_start {
-            duration = duration.min(n - c.start);
+        if let Some(next) = track.clips.get(i + 1) {
+            duration = duration.min(next.start - c.start);
         }
+        if let Some(len) = p.source_length(&c.source) {
+            let fit = ((len as f64 - c.source_start) / speed + 1e-9).floor() as Frame;
+            duration = duration.min(fit.max(1));
+        }
+        planned.push((id, c.link, duration));
+    }
+    // Clipes ligados ficam com a mesma duração (a menor do grupo), como no Trim.
+    let mut group_min: HashMap<LinkId, Frame> = HashMap::new();
+    for &(_, link, d) in &planned {
+        if let Some(l) = link {
+            group_min
+                .entry(l)
+                .and_modify(|m| *m = (*m).min(d))
+                .or_insert(d);
+        }
+    }
+    for (id, link, d) in planned {
+        let c = p.clip_mut(id).expect("clipe validado acima");
         c.speed = speed;
-        c.duration = duration;
+        c.duration = link.map_or(d, |l| group_min[&l]);
         clamp_fades(c);
     }
     Ok(Outcome {
@@ -646,4 +667,16 @@ fn set_link(p: &mut Project, clips: Vec<ClipId>, linked: bool) -> Result<Outcome
         clips,
         ..Outcome::default()
     })
+}
+
+/// Geradores precisam de valores que dê para desenhar.
+fn validate_source(source: &ClipSource) -> Result<(), EditError> {
+    if let ClipSource::Text(t) = source
+        && !(t.size.is_finite() && t.size > 0.0)
+    {
+        return Err(EditError::InvalidValue(
+            "o tamanho do texto precisa ser maior que zero",
+        ));
+    }
+    Ok(())
 }

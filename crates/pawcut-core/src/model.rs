@@ -191,6 +191,11 @@ impl IdGen {
         self.last += 1;
         self.last
     }
+
+    /// Garante que os próximos IDs fiquem acima de `id` (arquivo com contador atrasado).
+    pub(crate) fn ensure_above(&mut self, id: u64) {
+        self.last = self.last.max(id);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
