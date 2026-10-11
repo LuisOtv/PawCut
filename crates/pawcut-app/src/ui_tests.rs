@@ -14,6 +14,7 @@ fn harness(setup: impl FnOnce(&mut AppState)) -> Harness<'static, Workspace> {
     st.snapping = false;
     let ctx = egui::Context::default();
     let mut ws = Workspace::new(&ctx, st);
+    ws.recovery.clear();
     ws.tl.ppf = 2.0;
     ws.tl.scroll = 0.0;
     let mut h = Harness::builder()
@@ -217,6 +218,7 @@ mod whole_app {
         small_project(&mut st);
         let ctx = egui::Context::default();
         let mut ws = Workspace::new(&ctx, st);
+        ws.recovery.clear();
         ws.open_deliver();
         ws.deliver.as_mut().unwrap().output = out.display().to_string();
         let mut h = Harness::builder()
@@ -381,4 +383,48 @@ fn wheel_over_track_headers_scrolls_tracks_vertically() {
     assert!(h.state().tl.v_scroll > 0.0, "a rolagem vertical não andou");
     let scroll_before = h.state().tl.scroll;
     assert_eq!(scroll_before, 0.0, "rolar nos cabeçalhos não mexe no tempo");
+}
+
+#[test]
+fn hovering_a_media_previews_it_at_the_mouse_position() {
+    let st = {
+        let mut st = AppState::new(Project::new(ProjectSettings::default()));
+        st.apply(Edit::AddMedia(MediaInfo {
+            path: "/videos/x.mp4".into(),
+            kind: MediaKind::Video { has_audio: false },
+            duration: Some(300),
+            width: 1920,
+            height: 1080,
+        }));
+        st
+    };
+    let ctx = egui::Context::default();
+    let mut ws = Workspace::new(&ctx, st);
+    ws.recovery.clear();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(600.0, 400.0))
+        .build_ui_state(
+            |ui, ws: &mut Workspace| {
+                let ctx = ui.ctx().clone();
+                ws.begin_frame(&ctx);
+                ws.media_pool_ui(ui);
+            },
+            ws,
+        );
+    h.run_steps(2);
+    // A primeira miniatura começa logo abaixo da barra (30 px) com 4 px de margem.
+    h.hover_at(egui::pos2(10.0 + 124.0 * 0.75, 30.0 + 6.0 + 4.0 + 35.0));
+    h.run_steps(3);
+    let (media, frac) = h
+        .state()
+        .hover_preview
+        .expect("o viewer devia estar mostrando a mídia");
+    assert_eq!(media, h.state().st.project().media[0].id);
+    assert!((frac - 0.75).abs() < 0.1, "posição {frac}");
+    h.hover_at(egui::pos2(590.0, 390.0));
+    h.run_steps(3);
+    assert!(
+        h.state().hover_preview.is_none(),
+        "tirando o mouse volta para a timeline"
+    );
 }

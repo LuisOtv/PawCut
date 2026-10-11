@@ -432,6 +432,7 @@ impl eframe::App for PawCutApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.ws.begin_frame(&ctx);
+        self.ws.source_panel_visible = self.layout.is_visible(Panel::SourceViewer);
         let bar = |fill| {
             egui::Frame::new()
                 .fill(fill)

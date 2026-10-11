@@ -165,6 +165,21 @@ impl Workspace {
                             theme::TEXT,
                         );
 
+                        if let Some(pos) = resp
+                            .hover_pos()
+                            .filter(|_| !egui::DragAndDrop::has_any_payload(ui.ctx()))
+                        {
+                            let frac = ((pos.x - thumb.left()) / thumb.width()).clamp(0.0, 1.0);
+                            self.hover_preview_next = Some((m.id, frac));
+                            if m.info.kind != MediaKind::Image {
+                                let x = thumb.left() + thumb.width() * frac;
+                                ui.painter().line_segment(
+                                    [pos2(x, thumb.top()), pos2(x, thumb.bottom())],
+                                    Stroke::new(2.0, theme::PLAYHEAD),
+                                );
+                            }
+                            ui.ctx().request_repaint();
+                        }
                         resp.dnd_set_drag_payload(DragPayload::Media(m.id));
                         if resp.clicked() || resp.double_clicked() {
                             open_source = Some(m.id);

@@ -127,6 +127,19 @@ impl Workspace {
     }
 
     pub fn timeline_viewer_ui(&mut self, ui: &mut egui::Ui) {
+        // Mouse sobre uma mídia do Media Pool: mostra ela (hover scrub, como no Resolve).
+        if let Some((media, frac)) = self.hover_preview {
+            self.hover_preview_ui(ui, media, frac);
+            return;
+        }
+        // Sem o painel Source, o viewer vira Source quando uma mídia é escolhida.
+        if !self.source_panel_visible
+            && self.st.active_monitor == Monitor::Source
+            && self.st.source.media.is_some()
+        {
+            self.source_viewer_ui(ui);
+            return;
+        }
         let project = self.project_arc.clone();
         let s = &project.settings;
         let aspect = s.width as f32 / s.height as f32;
@@ -223,6 +236,96 @@ impl Workspace {
             self.st.set_playhead(f);
         }
         self.transport(ui, r.transport, Monitor::Timeline, |_, _| {});
+    }
+
+    /// Pede ao preview o frame `frame` da mídia no tamanho da imagem `pic`.
+    fn request_media_frame(
+        &mut self,
+        ui: &egui::Ui,
+        media: &pawcut_core::MediaRef,
+        frame: Frame,
+        pic: Rect,
+    ) {
+        let fps = self.project_arc.settings.fps;
+        let ppp = ui.ctx().pixels_per_point();
+        let aspect = pic.width() / pic.height().max(1.0);
+        let w = ((pic.width() * ppp) as u32).clamp(16, self.project_arc.settings.width.max(640));
+        let h = ((w as f32 / aspect) as u32).max(2);
+        let key = (media.id, frame, (w, h));
+        if self.requested_source != Some(key) {
+            self.requested_source = Some(key);
+            let seconds = frame as f64 / fps.as_f64();
+            self.preview.request(
+                ViewSlot::Source,
+                ViewRequest::Source {
+                    path: media.info.path.clone(),
+                    kind: media.info.kind,
+                    seconds,
+                },
+                (w, h),
+            );
+        }
+    }
+
+    fn hover_preview_ui(&mut self, ui: &mut egui::Ui, id: pawcut_core::MediaId, frac: f32) {
+        let project = self.project_arc.clone();
+        let Some(media) = project.media(id).cloned() else {
+            return;
+        };
+        let fps = project.settings.fps;
+        let len = media.info.duration.unwrap_or(1).max(1);
+        let frame = ((frac * len as f32) as Frame).clamp(0, len - 1);
+        let r = split(ui.available_rect_before_wrap());
+        let name = media
+            .info
+            .path
+            .file_name()
+            .map_or("?".into(), |n| n.to_string_lossy().into_owned());
+        self.viewer_header(ui, r.header, &name, &format_timecode(frame, fps), true);
+        let body = Rect::from_min_max(r.image.min, r.transport.max);
+        ui.painter().rect_filled(body, 0.0, Color32::BLACK);
+        ui.painter().line_segment(
+            [r.image.left_top(), r.image.right_top()],
+            Stroke::new(2.0, Color32::from_rgb(90, 160, 230)),
+        );
+        if media.info.kind == MediaKind::Audio {
+            icons::paint(
+                ui.painter(),
+                Rect::from_center_size(r.image.center(), vec2(40.0, 40.0)),
+                Icon::Speaker,
+                theme::TEXT_DIM,
+            );
+        } else {
+            let aspect = if media.info.height > 0 {
+                media.info.width as f32 / media.info.height as f32
+            } else {
+                16.0 / 9.0
+            };
+            let pic = fit_rect(r.image.shrink(6.0), aspect);
+            if let Some(tex) = &self.tex_source {
+                ui.painter().image(tex.id(), pic, uv(), Color32::WHITE);
+            }
+            self.request_media_frame(ui, &media, frame, pic);
+        }
+        // Barra mostrando a posição do hover no clipe.
+        let track = r.scrub.shrink2(vec2(10.0, 6.0));
+        ui.painter().rect_filled(track, 2.0, theme::BAR_LIGHT);
+        let x = track.left() + track.width() * frac.clamp(0.0, 1.0);
+        ui.painter().line_segment(
+            [
+                pos2(x, r.scrub.top() + 2.0),
+                pos2(x, r.scrub.bottom() - 2.0),
+            ],
+            Stroke::new(2.0, Color32::from_rgb(90, 160, 230)),
+        );
+        ui.painter().text(
+            r.transport.center(),
+            egui::Align2::CENTER_CENTER,
+            "Prévia do Media Pool — clique para abrir como Source",
+            theme::text(11.5),
+            theme::TEXT_DIM,
+        );
+        ui.advance_cursor_after_rect(Rect::from_min_max(ui.max_rect().min, r.transport.max));
     }
 
     /// Clipe de vídeo selecionado visível no frame (o de cima), se houver.

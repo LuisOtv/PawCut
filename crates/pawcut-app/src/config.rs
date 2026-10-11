@@ -29,7 +29,7 @@ pub fn keymap_path() -> PathBuf {
 }
 
 pub fn layout_path() -> PathBuf {
-    config_dir().join("layout-v2.json")
+    config_dir().join("layout-v3.json")
 }
 
 pub fn autosave_dir() -> PathBuf {

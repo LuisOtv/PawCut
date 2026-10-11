@@ -92,6 +92,11 @@ pub struct Workspace {
     /// Fechar o app assim que a exportação em andamento terminar (ou for cancelada).
     pub quit_after_export: bool,
     pub export_quit_prompt: bool,
+    /// Mídia sob o mouse no Media Pool e a posição (0..1) na miniatura: o viewer mostra ela.
+    pub hover_preview: Option<(MediaId, f32)>,
+    pub hover_preview_next: Option<(MediaId, f32)>,
+    /// Se o painel Source está aberto (senão o Timeline Viewer faz as vezes de Source).
+    pub source_panel_visible: bool,
     /// Diálogo de arquivo aberto (roda em outra thread).
     pub file_dialog: Option<crate::file_dialog::OpenDialog>,
     pub allow_close: bool,
@@ -135,6 +140,9 @@ impl Workspace {
             quit_after_export: false,
             export_quit_prompt: false,
             file_dialog: None,
+            hover_preview: None,
+            hover_preview_next: None,
+            source_panel_visible: false,
             allow_close: false,
             last_autosave: Instant::now(),
             last_offline_check: Instant::now(),
@@ -157,6 +165,7 @@ impl Workspace {
     /// Tudo que roda antes de desenhar: resultados do preview, reprodução, atalhos, arquivos soltos.
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
         self.refresh_project_arc();
+        self.hover_preview = self.hover_preview_next.take();
         while let Ok(r) = self.preview.results.try_recv() {
             let size = [r.image.width() as usize, r.image.height() as usize];
             let img = egui::ColorImage::from_rgba_unmultiplied(size, r.image.as_raw());

@@ -83,8 +83,15 @@ impl PanelLayout {
         }
     }
 
+    /// Como o Resolve em "single viewer": sem o painel Source (o Timeline Viewer mostra a
+    /// mídia sob o mouse no Media Pool e vira Source ao clicar numa mídia).
     pub fn default_layout() -> DockState<Panel> {
-        resolve_layout(&Panel::ALL.into_iter().collect())
+        resolve_layout(
+            &Panel::ALL
+                .into_iter()
+                .filter(|p| *p != Panel::SourceViewer)
+                .collect(),
+        )
     }
 
     pub fn visible(&self) -> BTreeSet<Panel> {
@@ -152,7 +159,7 @@ mod tests {
 
     #[test]
     fn hiding_and_showing_restores_the_exact_layout() {
-        let mut l = PanelLayout::new(PanelLayout::default_layout());
+        let mut l = PanelLayout::new(resolve_layout(&Panel::ALL.into_iter().collect()));
         let before = serde_json::to_string(&l.dock).unwrap();
         l.toggle(Panel::MediaPool);
         assert!(!l.is_visible(Panel::MediaPool));
