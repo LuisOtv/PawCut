@@ -50,18 +50,23 @@ impl Workspace {
             ClipSource::SolidColor(_) => "Cor sólida".into(),
             ClipSource::Text(_) => "Texto".into(),
         };
-        ui.label(RichText::new(name).strong().size(15.0));
-        ui.label(
-            RichText::new(format!(
-                "{} · início {} · duração {}",
-                project.track_label(track_id).unwrap_or_default(),
-                pawcut_core::format_timecode(clip.start, fps),
-                pawcut_core::format_timecode(clip.duration, fps)
-            ))
-            .weak()
-            .small(),
-        );
-        ui.separator();
+        crate::theme::header_strip(ui, 30.0, |ui| {
+            ui.label(RichText::new(&name).strong());
+        });
+        ui.add_space(4.0);
+        ui.indent("insp-head", |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{} · início {} · duração {}",
+                    project.track_label(track_id).unwrap_or_default(),
+                    pawcut_core::format_timecode(clip.start, fps),
+                    pawcut_core::format_timecode(clip.duration, fps)
+                ))
+                .weak()
+                .small(),
+            )
+        });
+        ui.add_space(4.0);
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {

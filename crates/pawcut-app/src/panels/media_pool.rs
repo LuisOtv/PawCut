@@ -1,32 +1,59 @@
-//! Media Pool e a Toolbox de geradores (aba Effects).
+//! Media Pool (grade de miniaturas) e a Toolbox de geradores (aba Effects).
 
-use egui::{Color32, RichText, Sense, Vec2};
+use egui::{Color32, Rect, Sense, Stroke, Vec2, pos2, vec2};
 use pawcut_core::{MediaKind, format_timecode};
 
 use super::DragPayload;
+use crate::icons::{self, Icon};
 use crate::state::Generator;
+use crate::theme;
 use crate::workspace::Workspace;
 
-const THUMB: Vec2 = Vec2::new(80.0, 45.0);
+const THUMB: Vec2 = Vec2::new(124.0, 70.0);
+const TILE: Vec2 = Vec2::new(132.0, 100.0);
 
 impl Workspace {
     pub fn media_pool_ui(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui.button("📥 Importar mídia…").clicked() {
+        let project = self.project_arc.clone();
+        theme::header_strip(ui, 30.0, |ui| {
+            if ui
+                .add(egui::Button::new("Importar mídia…"))
+                .on_hover_text("Ctrl+I — ou arraste arquivos para a janela")
+                .clicked()
+            {
                 self.import_dialog();
             }
             ui.label(
-                RichText::new("ou arraste arquivos para a janela")
-                    .weak()
+                egui::RichText::new(format!("{} itens", project.media.len()))
+                    .color(theme::TEXT_DIM)
                     .small(),
             );
         });
-        ui.separator();
-        let project = self.project_arc.clone();
+        let area = ui.available_rect_before_wrap();
+        ui.painter().rect_filled(area, 0.0, theme::BG);
         if project.media.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new("Nenhuma mídia importada").weak())
-            });
+            let c = area.center();
+            icons::paint(
+                ui.painter(),
+                Rect::from_center_size(c - vec2(0.0, 22.0), vec2(34.0, 34.0)),
+                Icon::Import,
+                theme::TEXT_DIM,
+            );
+            ui.painter().text(
+                c + vec2(0.0, 12.0),
+                egui::Align2::CENTER_CENTER,
+                "Arraste vídeos, músicas e imagens para cá",
+                theme::text(13.0),
+                theme::TEXT_DIM,
+            );
+            ui.painter().text(
+                c + vec2(0.0, 30.0),
+                egui::Align2::CENTER_CENTER,
+                "ou use Ctrl+I",
+                theme::text(11.0),
+                theme::TEXT_DIM,
+            );
+            ui.advance_cursor_after_rect(area);
             return;
         }
         let mut open_source = None;
@@ -35,131 +62,145 @@ impl Workspace {
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
-                for m in &project.media {
-                    let offline = self.st.offline.contains(&m.id);
-                    let selected = self.st.source.media == Some(m.id);
-                    let (rect, resp) = ui.allocate_exact_size(
-                        Vec2::new(ui.available_width(), THUMB.y + 8.0),
-                        Sense::click_and_drag(),
-                    );
-                    if selected || resp.hovered() {
-                        ui.painter().rect_filled(
-                            rect,
-                            3.0,
-                            ui.visuals().widgets.hovered.weak_bg_fill,
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                    ui.add_space(4.0);
+                    for m in &project.media {
+                        let offline = self.st.offline.contains(&m.id);
+                        let selected = self.st.source.media == Some(m.id);
+                        let (rect, resp) = ui.allocate_exact_size(TILE, Sense::click_and_drag());
+                        let painter = ui.painter();
+                        if selected {
+                            painter.rect_filled(rect, 4.0, theme::ACCENT.gamma_multiply(0.18));
+                        } else if resp.hovered() {
+                            painter.rect_filled(rect, 4.0, theme::BAR_LIGHT);
+                        }
+                        let thumb = Rect::from_min_size(
+                            rect.min + vec2((TILE.x - THUMB.x) / 2.0, 4.0),
+                            THUMB,
                         );
-                    }
-                    let thumb_rect =
-                        egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 4.0), THUMB);
-                    match self.thumbnail(m.id, &m.info.path, m.info.kind) {
-                        Some(tex) => {
-                            let size = tex.size_vec2();
-                            let scale = (THUMB.x / size.x).min(THUMB.y / size.y);
-                            let r = egui::Rect::from_center_size(thumb_rect.center(), size * scale);
-                            ui.painter().rect_filled(thumb_rect, 2.0, Color32::BLACK);
-                            ui.painter().image(
-                                tex.id(),
-                                r,
-                                egui::Rect::from_min_max(
-                                    egui::pos2(0.0, 0.0),
-                                    egui::pos2(1.0, 1.0),
-                                ),
-                                Color32::WHITE,
-                            );
+                        painter.rect_filled(thumb, 2.0, Color32::BLACK);
+                        let tex = self.thumbnail(m.id, &m.info.path, m.info.kind);
+                        let painter = ui.painter();
+                        match tex {
+                            Some(tex) => {
+                                let size = tex.size_vec2();
+                                let scale = (THUMB.x / size.x).min(THUMB.y / size.y);
+                                let r = Rect::from_center_size(thumb.center(), size * scale);
+                                painter.image(
+                                    tex.id(),
+                                    r,
+                                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                                    Color32::WHITE,
+                                );
+                            }
+                            None => {
+                                let (icon, fill) = match m.info.kind {
+                                    MediaKind::Audio => (Icon::Speaker, theme::CLIP_AUDIO_LABEL),
+                                    _ => (Icon::MediaPool, theme::CLIP_VIDEO_LABEL),
+                                };
+                                painter.rect_filled(
+                                    thumb,
+                                    2.0,
+                                    if offline { theme::OFFLINE } else { fill },
+                                );
+                                icons::paint(
+                                    painter,
+                                    Rect::from_center_size(thumb.center(), vec2(26.0, 26.0)),
+                                    icon,
+                                    Color32::from_white_alpha(200),
+                                );
+                            }
                         }
-                        None => {
-                            let (icon, color) = match m.info.kind {
-                                MediaKind::Audio => ("🎵", Color32::from_rgb(60, 120, 80)),
-                                _ => ("🎞", Color32::from_rgb(60, 70, 100)),
-                            };
-                            ui.painter().rect_filled(
-                                thumb_rect,
-                                2.0,
-                                if offline {
-                                    Color32::from_rgb(120, 20, 30)
-                                } else {
-                                    color
-                                },
-                            );
-                            ui.painter().text(
-                                thumb_rect.center(),
+                        if offline {
+                            painter.rect_filled(thumb, 2.0, theme::OFFLINE.gamma_multiply(0.75));
+                            painter.text(
+                                thumb.center(),
                                 egui::Align2::CENTER_CENTER,
-                                icon,
-                                egui::FontId::proportional(20.0),
+                                "MEDIA OFFLINE",
+                                theme::text(11.0),
                                 Color32::WHITE,
                             );
                         }
+                        if selected {
+                            painter.rect_stroke(
+                                thumb,
+                                2.0,
+                                Stroke::new(2.0, theme::ACCENT),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                        let fps = project.settings.fps;
+                        if let (Some(d), false) = (m.info.duration, m.info.kind == MediaKind::Image)
+                        {
+                            let tc = format_timecode(d, fps);
+                            let galley =
+                                painter.layout_no_wrap(tc, theme::mono(10.0), Color32::WHITE);
+                            let at = thumb.right_bottom() - galley.size() - vec2(4.0, 3.0);
+                            painter.rect_filled(
+                                Rect::from_min_size(
+                                    at - vec2(2.0, 1.0),
+                                    galley.size() + vec2(4.0, 2.0),
+                                ),
+                                2.0,
+                                Color32::from_black_alpha(170),
+                            );
+                            painter.galley(at, galley, Color32::WHITE);
+                        }
+                        let name = m
+                            .info
+                            .path
+                            .file_name()
+                            .map_or("?".into(), |n| n.to_string_lossy().into_owned());
+                        let text_rect = Rect::from_min_max(
+                            pos2(rect.left() + 4.0, thumb.bottom() + 4.0),
+                            pos2(rect.right() - 4.0, rect.bottom()),
+                        );
+                        let galley =
+                            painter.layout(name, theme::text(11.5), theme::TEXT, text_rect.width());
+                        painter.with_clip_rect(text_rect).galley(
+                            text_rect.min,
+                            galley,
+                            theme::TEXT,
+                        );
+
+                        resp.dnd_set_drag_payload(DragPayload::Media(m.id));
+                        if resp.clicked() || resp.double_clicked() {
+                            open_source = Some(m.id);
+                        }
+                        let id = m.id;
+                        resp.context_menu(|ui| {
+                            if ui.button("Abrir no Source Viewer").clicked() {
+                                open_source = Some(id);
+                                ui.close();
+                            }
+                            if ui.button("Reconectar arquivo (Relink)…").clicked() {
+                                relink = Some(id);
+                                ui.close();
+                            }
+                            if ui.button("Remover do Media Pool").clicked() {
+                                remove = Some(id);
+                                ui.close();
+                            }
+                        });
+                        let detail = match m.info.kind {
+                            MediaKind::Image => {
+                                format!("Imagem {}×{}", m.info.width, m.info.height)
+                            }
+                            MediaKind::Audio => "Áudio".to_string(),
+                            MediaKind::Video { has_audio } => {
+                                format!(
+                                    "{}×{}{}",
+                                    m.info.width,
+                                    m.info.height,
+                                    if has_audio { " · com áudio" } else { "" }
+                                )
+                            }
+                        };
+                        resp.on_hover_text(format!("{}\n{detail}", m.info.path.display()));
                     }
-                    let name = m
-                        .info
-                        .path
-                        .file_name()
-                        .map_or("?".into(), |n| n.to_string_lossy().into_owned());
-                    let fps = project.settings.fps;
-                    let detail = match (m.info.kind, m.info.duration) {
-                        (MediaKind::Image, _) => {
-                            format!("Imagem {}×{}", m.info.width, m.info.height)
-                        }
-                        (MediaKind::Audio, Some(d)) => {
-                            format!("Áudio · {}", format_timecode(d, fps))
-                        }
-                        (MediaKind::Video { .. }, Some(d)) => {
-                            format!(
-                                "{}×{} · {}",
-                                m.info.width,
-                                m.info.height,
-                                format_timecode(d, fps)
-                            )
-                        }
-                        _ => String::new(),
-                    };
-                    let text_pos = egui::pos2(thumb_rect.right() + 8.0, rect.top() + 8.0);
-                    let color = if offline {
-                        Color32::from_rgb(230, 80, 80)
-                    } else {
-                        ui.visuals().text_color()
-                    };
-                    ui.painter().text(
-                        text_pos,
-                        egui::Align2::LEFT_TOP,
-                        &name,
-                        egui::FontId::proportional(13.0),
-                        color,
-                    );
-                    let detail = if offline {
-                        "MEDIA OFFLINE".to_string()
-                    } else {
-                        detail
-                    };
-                    ui.painter().text(
-                        text_pos + egui::vec2(0.0, 18.0),
-                        egui::Align2::LEFT_TOP,
-                        detail,
-                        egui::FontId::proportional(11.0),
-                        ui.visuals().weak_text_color(),
-                    );
-                    resp.dnd_set_drag_payload(DragPayload::Media(m.id));
-                    if resp.double_clicked() || (resp.clicked() && m.info.kind != MediaKind::Audio)
-                    {
-                        open_source = Some(m.id);
-                    }
-                    let id = m.id;
-                    resp.context_menu(|ui| {
-                        if ui.button("Abrir no Source Viewer").clicked() {
-                            open_source = Some(id);
-                            ui.close();
-                        }
-                        if ui.button("Reconectar arquivo (Relink)…").clicked() {
-                            relink = Some(id);
-                            ui.close();
-                        }
-                        if ui.button("Remover do Media Pool").clicked() {
-                            remove = Some(id);
-                            ui.close();
-                        }
-                    });
-                    resp.on_hover_text(m.info.path.display().to_string());
-                }
+                });
             });
         if let Some(id) = open_source {
             self.st.open_in_source(id);
@@ -182,34 +223,66 @@ impl Workspace {
     }
 
     pub fn effects_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Toolbox").strong());
-        ui.add_space(4.0);
-        ui.label(RichText::new("Títulos").weak());
-        self.toolbox_item(ui, "T   Texto", Generator::Text);
+        theme::header_strip(ui, 30.0, |ui| {
+            ui.label(egui::RichText::new("Toolbox").strong());
+        });
         ui.add_space(6.0);
-        ui.label(RichText::new("Geradores").weak());
-        self.toolbox_item(ui, "■   Cor sólida", Generator::SolidColor);
-        ui.add_space(10.0);
-        ui.label(RichText::new("Arraste para a timeline.").weak().small());
+        ui.indent("toolbox", |ui| {
+            ui.label(
+                egui::RichText::new("Títulos")
+                    .color(theme::TEXT_DIM)
+                    .small(),
+            );
+            self.toolbox_item(ui, "Texto", theme::CLIP_TITLE, Generator::Text);
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Geradores")
+                    .color(theme::TEXT_DIM)
+                    .small(),
+            );
+            self.toolbox_item(
+                ui,
+                "Cor sólida",
+                theme::CLIP_GENERATOR,
+                Generator::SolidColor,
+            );
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Arraste para uma faixa de vídeo, ou dê dois cliques.")
+                    .color(theme::TEXT_DIM)
+                    .small(),
+            );
+        });
     }
 
-    fn toolbox_item(&mut self, ui: &mut egui::Ui, label: &str, generator: Generator) {
+    fn toolbox_item(
+        &mut self,
+        ui: &mut egui::Ui,
+        label: &str,
+        color: Color32,
+        generator: Generator,
+    ) {
         let (rect, resp) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width(), 26.0),
+            vec2(ui.available_width() - 8.0, 26.0),
             Sense::click_and_drag(),
         );
         let fill = if resp.hovered() {
-            ui.visuals().widgets.hovered.bg_fill
+            theme::BAR_LIGHT
         } else {
-            ui.visuals().widgets.inactive.bg_fill
+            theme::BAR
         };
         ui.painter().rect_filled(rect, 3.0, fill);
+        ui.painter().rect_filled(
+            Rect::from_min_size(rect.min + vec2(6.0, 7.0), vec2(18.0, 12.0)),
+            2.0,
+            color,
+        );
         ui.painter().text(
-            rect.left_center() + egui::vec2(8.0, 0.0),
+            rect.left_center() + vec2(32.0, 0.0),
             egui::Align2::LEFT_CENTER,
             label,
-            egui::FontId::proportional(13.0),
-            ui.visuals().text_color(),
+            theme::text(12.5),
+            theme::TEXT,
         );
         resp.dnd_set_drag_payload(DragPayload::Generator(generator));
         if resp.double_clicked() {

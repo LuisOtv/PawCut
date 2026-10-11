@@ -1,21 +1,22 @@
-//! A timeline: régua, cabeçalhos das faixas, clipes e as interações de edição.
+//! A timeline: régua, cabeçalhos das faixas, clipes e as interações de edição (visual do Resolve).
 
-use egui::{
-    Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2,
-};
+use egui::{Align2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 use pawcut_core::{
     Clip, ClipId, ClipSource, Edge, Edit, Frame, MediaKind, Project, TrackFlags, TrackKind,
     format_timecode,
 };
 
 use super::DragPayload;
-use crate::state::Tool;
+use crate::icons::{self, Icon};
+use crate::state::{Monitor, PlaceMode, Tool};
+use crate::theme;
 use crate::workspace::Workspace;
 
-const HEADER_W: f32 = 112.0;
-const RULER_H: f32 = 26.0;
-const TRACK_H: f32 = 46.0;
-const ZONE_H: f32 = 20.0;
+const HEADER_W: f32 = 196.0;
+const RULER_H: f32 = 30.0;
+const TRACK_H: f32 = 50.0;
+const ZONE_H: f32 = 22.0;
+const LABEL_H: f32 = 15.0;
 const EDGE_GRAB: f32 = 6.0;
 const SNAP_PX: f32 = 8.0;
 
@@ -48,6 +49,8 @@ pub struct TimelineView {
     pub ppf: f32,
     /// Primeiro frame visível.
     pub scroll: f32,
+    /// Rolagem vertical das faixas, em pixels.
+    pub v_scroll: f32,
     drag: Option<TlDrag>,
     menu_clip: Option<ClipId>,
 }
@@ -57,6 +60,7 @@ impl Default for TimelineView {
         Self {
             ppf: 3.0,
             scroll: 0.0,
+            v_scroll: 0.0,
             drag: None,
             menu_clip: None,
         }
@@ -67,12 +71,15 @@ struct Layout {
     rows: Vec<(Row, Rect)>,
     lanes: Rect,
     left: f32,
+    /// Altura total das linhas (para limitar a rolagem vertical).
+    content_h: f32,
 }
 
 impl Layout {
-    fn new(p: &Project, area: Rect) -> Self {
+    fn new(p: &Project, area: Rect, v_scroll: f32) -> Self {
         let mut rows = Vec::new();
-        let mut y = area.top() + RULER_H;
+        let top = area.top() + RULER_H - v_scroll;
+        let mut y = top;
         let lane =
             |y: f32, h: f32| Rect::from_min_max(pos2(area.left(), y), pos2(area.right(), y + h));
         let vlen = p.video_tracks.len();
@@ -94,7 +101,7 @@ impl Layout {
             ));
             y += TRACK_H;
         }
-        y += 4.0;
+        y += 6.0;
         let alen = p.audio_tracks.len();
         for i in 0..alen {
             rows.push((
@@ -113,12 +120,14 @@ impl Layout {
             },
             lane(y, ZONE_H),
         ));
+        y += ZONE_H;
         let lanes =
             Rect::from_min_max(pos2(area.left() + HEADER_W, area.top() + RULER_H), area.max);
         Self {
             rows,
             lanes,
             left: area.left() + HEADER_W,
+            content_h: y - top,
         }
     }
 
@@ -159,22 +168,24 @@ fn clip_name(p: &Project, c: &Clip) -> String {
             })
             .unwrap_or_else(|| "?".into()),
         ClipSource::SolidColor(_) => "Cor sólida".into(),
-        ClipSource::Text(t) => format!("T  {}", t.text.lines().next().unwrap_or("")),
+        ClipSource::Text(t) => format!("Texto — {}", t.text.lines().next().unwrap_or("")),
     }
 }
 
-fn clip_color(p: &Project, c: &Clip, kind: TrackKind) -> Color32 {
-    match (&c.source, kind) {
-        (_, TrackKind::Audio) => Color32::from_rgb(52, 110, 74),
+/// Cor do corpo e da faixa de título do clipe.
+fn clip_colors(p: &Project, c: &Clip, kind: TrackKind) -> (Color32, Color32) {
+    let body = match (&c.source, kind) {
+        (_, TrackKind::Audio) => return (theme::CLIP_AUDIO, theme::CLIP_AUDIO_LABEL),
         (ClipSource::Media(m), _)
             if p.media(*m).is_some_and(|m| m.info.kind == MediaKind::Image) =>
         {
-            Color32::from_rgb(120, 90, 50)
+            theme::CLIP_IMAGE
         }
-        (ClipSource::Media(_), _) => Color32::from_rgb(52, 86, 140),
-        (ClipSource::Text(_), _) => Color32::from_rgb(110, 70, 140),
-        (ClipSource::SolidColor(_), _) => Color32::from_rgb(90, 90, 100),
-    }
+        (ClipSource::Media(_), _) => return (theme::CLIP_VIDEO, theme::CLIP_VIDEO_LABEL),
+        (ClipSource::Text(_), _) => theme::CLIP_TITLE,
+        (ClipSource::SolidColor(_), _) => theme::CLIP_GENERATOR,
+    };
+    (body, body.gamma_multiply(0.72))
 }
 
 /// Passo da régua (em frames) para que as marcas fiquem a pelo menos `min_px` de distância.
@@ -232,9 +243,15 @@ impl Workspace {
         let area = ui.available_rect_before_wrap();
         self.tl_width = area.width();
         self.tl_area = area;
-        let layout = Layout::new(&p, area);
+        let visible_h = area.height() - RULER_H;
+        let content_h = Layout::new(&p, area, 0.0).content_h;
+        self.tl.v_scroll = self
+            .tl
+            .v_scroll
+            .clamp(0.0, (content_h - visible_h).max(0.0));
+        let layout = Layout::new(&p, area, self.tl.v_scroll);
         let painter = ui.painter_at(area);
-        painter.rect_filled(area, 0.0, Color32::from_gray(22));
+        painter.rect_filled(area, 0.0, theme::BG_DARK);
 
         // Mantém o cursor visível enquanto toca.
         if self.playback.is_playing() {
@@ -245,33 +262,51 @@ impl Workspace {
         }
 
         // ---------- rolagem e zoom ----------
-        let hover = ui.rect_contains_pointer(area);
-        if hover {
-            let (zoom, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
+        // Ctrl+roda: zoom. Roda sobre os clipes: anda no tempo. Roda sobre os cabeçalhos ou
+        // Shift+roda: sobe/desce as faixas.
+        if ui.rect_contains_pointer(area) {
+            let (zoom, scroll, shift, pointer) = ui.input(|i| {
+                (
+                    i.zoom_delta(),
+                    i.smooth_scroll_delta,
+                    i.modifiers.shift,
+                    i.pointer.hover_pos(),
+                )
+            });
+            let over_headers = pointer.is_some_and(|p| p.x < layout.left);
             if (zoom - 1.0).abs() > 1e-3 {
-                let pointer = ui
-                    .input(|i| i.pointer.hover_pos())
-                    .map_or(layout.left, |p| p.x);
-                let anchor = self.frame_at(pointer, layout.left);
+                let px = pointer.map_or(layout.left, |p| p.x);
+                let anchor = self.frame_at(px, layout.left);
                 self.tl.ppf = (self.tl.ppf * zoom).clamp(0.02, 40.0);
-                self.tl.scroll = (anchor - (pointer - layout.left) / self.tl.ppf).max(0.0);
+                self.tl.scroll = (anchor - (px - layout.left) / self.tl.ppf).max(0.0);
             } else if scroll != Vec2::ZERO {
-                self.tl.scroll = (self.tl.scroll - (scroll.x + scroll.y) / self.tl.ppf).max(0.0);
+                if over_headers || shift {
+                    let dy = if scroll.y != 0.0 { scroll.y } else { scroll.x };
+                    self.tl.v_scroll =
+                        (self.tl.v_scroll - dy).clamp(0.0, (content_h - visible_h).max(0.0));
+                } else {
+                    self.tl.scroll =
+                        (self.tl.scroll - (scroll.x + scroll.y) / self.tl.ppf).max(0.0);
+                }
             }
         }
 
         // ---------- fundo das faixas ----------
+        let rows_painter = painter.with_clip_rect(Rect::from_min_max(
+            pos2(area.left(), layout.lanes.top()),
+            area.max,
+        ));
         for (row, rect) in &layout.rows {
             let exists = row.index < p.tracks(row.kind).len();
             let fill = match (exists, row.kind) {
-                (false, _) => Color32::from_gray(18),
-                (true, TrackKind::Video) => Color32::from_gray(30),
-                (true, TrackKind::Audio) => Color32::from_rgb(28, 32, 30),
+                (false, _) => theme::BG_DARK,
+                (true, TrackKind::Video) => Color32::from_rgb(0x1d, 0x1d, 0x21),
+                (true, TrackKind::Audio) => Color32::from_rgb(0x1b, 0x1e, 0x1d),
             };
-            painter.rect_filled(*rect, 0.0, fill);
-            painter.line_segment(
+            rows_painter.rect_filled(*rect, 0.0, fill);
+            rows_painter.line_segment(
                 [rect.left_bottom(), rect.right_bottom()],
-                Stroke::new(1.0, Color32::from_gray(16)),
+                Stroke::new(1.0, theme::BORDER),
             );
         }
 
@@ -279,16 +314,15 @@ impl Workspace {
         let lanes_resp = ui.interact(layout.lanes, ui.id().with("lanes"), Sense::click_and_drag());
         let tolerance = (SNAP_PX / self.tl.ppf).ceil() as Frame;
         let pointer = lanes_resp.interact_pointer_pos().or(lanes_resp.hover_pos());
-        let hit = pointer.and_then(|pos| self.hit_clip(&p, &layout, pos));
+        let hovered_clip = pointer.and_then(|pos| self.hit_clip(&p, &layout, pos));
 
-        if let Some((clip, edge)) = hit.filter(|_| self.tl.drag.is_none()) {
+        if let Some((_, edge)) = hovered_clip.filter(|_| self.tl.drag.is_none()) {
             let icon = match (self.st.tool, edge) {
                 (Tool::Blade, _) => CursorIcon::Crosshair,
                 (_, Some(_)) => CursorIcon::ResizeHorizontal,
                 _ => CursorIcon::Grab,
             };
             ui.ctx().set_cursor_icon(icon);
-            let _ = clip;
         }
 
         // O drag só começa depois que o ponteiro anda alguns pixels: a pegada é onde o botão desceu.
@@ -326,18 +360,22 @@ impl Workspace {
                         }
                     }
                 }
-                (_, None) => self.tl.drag = Some(TlDrag::Scrub),
+                (_, None) => {
+                    self.stop();
+                    self.tl.drag = Some(TlDrag::Scrub);
+                }
                 _ => {}
             }
         }
 
         let mut snap_line: Option<Frame> = None;
+        let mut ghosts: Vec<(Rect, bool)> = Vec::new();
         if let Some(pos) = lanes_resp
             .interact_pointer_pos()
             .filter(|_| lanes_resp.dragged())
         {
             let now = self.frame_at(pos.x, layout.left).round() as Frame;
-            match &self.tl.drag {
+            match self.tl.drag.clone() {
                 Some(TlDrag::Scrub) => self.st.set_playhead(now),
                 Some(TlDrag::Move {
                     anchor,
@@ -346,13 +384,13 @@ impl Workspace {
                     origin,
                 }) => {
                     let (delta, snapped) =
-                        self.move_delta(&p, *anchor, clips, now - grab, tolerance);
+                        self.move_delta(&p, anchor, &clips, now - grab, tolerance);
                     snap_line = snapped;
                     let rows = layout
                         .row_at(pos.y)
                         .filter(|r| r.kind == origin.kind)
                         .map_or(0, |r| r.index as i64 - origin.index as i64);
-                    self.paint_move_ghosts(&painter, &p, &layout, clips, origin.kind, delta, rows);
+                    ghosts = self.move_ghosts(&p, &layout, &clips, origin.kind, delta, rows);
                 }
                 Some(TlDrag::Trim {
                     anchor,
@@ -360,17 +398,20 @@ impl Workspace {
                     edge,
                     grab,
                 }) => {
-                    if let Some(c) = p.clip(*anchor) {
-                        let edge_frame = if *edge == Edge::Start {
+                    if let Some(c) = p.clip(anchor) {
+                        let edge_frame = if edge == Edge::Start {
                             c.start
                         } else {
                             c.end()
                         };
-                        let target = self.st.snap(edge_frame + (now - grab), clips, tolerance);
+                        let target = self.st.snap(edge_frame + (now - grab), &clips, tolerance);
                         if target != edge_frame + (now - grab) {
                             snap_line = Some(target);
                         }
-                        self.paint_trim_ghost(&painter, &p, &layout, *anchor, *edge, target);
+                        ghosts.extend(
+                            self.trim_ghost(&p, &layout, anchor, edge, target)
+                                .map(|r| (r, false)),
+                        );
                     }
                 }
                 None => {}
@@ -444,7 +485,12 @@ impl Workspace {
             self.tl.drag = None;
         }
 
-        if lanes_resp.clicked()
+        if lanes_resp.double_clicked()
+            && let Some(pos) = lanes_resp.interact_pointer_pos()
+            && let Some((clip, _)) = self.hit_clip(&p, &layout, pos)
+        {
+            self.match_frame(&p, clip, self.frame_at(pos.x, layout.left).round() as Frame);
+        } else if lanes_resp.clicked()
             && let Some(pos) = lanes_resp.interact_pointer_pos()
         {
             let additive = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
@@ -462,7 +508,7 @@ impl Workspace {
                     self.st.set_playhead(f);
                 }
             }
-            self.st.active_monitor = crate::state::Monitor::Timeline;
+            self.st.active_monitor = Monitor::Timeline;
         }
 
         if lanes_resp.secondary_clicked() {
@@ -490,16 +536,13 @@ impl Workspace {
             );
             let len = self.payload_len(&p, *payload);
             let x0 = self.x_of(at as f32, layout.left);
-            let ghost = Rect::from_min_max(
-                pos2(x0, rect.top() + 2.0),
-                pos2(x0 + len as f32 * self.tl.ppf, rect.bottom() - 2.0),
-            );
-            painter.rect_stroke(
-                ghost,
-                3.0,
-                Stroke::new(2.0, Color32::from_rgb(230, 170, 60)),
-                StrokeKind::Inside,
-            );
+            ghosts.push((
+                Rect::from_min_max(
+                    pos2(x0, rect.top() + 2.0),
+                    pos2(x0 + len as f32 * self.tl.ppf, rect.bottom() - 2.0),
+                ),
+                true,
+            ));
         }
         if let Some(payload) = lanes_resp.dnd_release_payload::<DragPayload>()
             && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
@@ -524,6 +567,9 @@ impl Workspace {
         // ---------- clipes ----------
         let p = self.project_arc_after_edits(&p);
         let lanes_painter = painter.with_clip_rect(layout.lanes);
+        let hovered_id = hovered_clip
+            .map(|(c, _)| c)
+            .filter(|_| self.tl.drag.is_none());
         for (row, rect) in &layout.rows {
             let Some(track) = p.tracks(row.kind).get(row.index) else {
                 continue;
@@ -535,55 +581,27 @@ impl Workspace {
                     continue;
                 }
                 let r = Rect::from_min_max(
-                    pos2(x0, rect.top() + 2.0),
-                    pos2(x1.max(x0 + 1.0), rect.bottom() - 2.0),
+                    pos2(x0, rect.top() + 1.0),
+                    pos2(x1.max(x0 + 1.0), rect.bottom() - 1.0),
                 );
-                let offline =
-                    matches!(clip.source, ClipSource::Media(m) if self.st.offline.contains(&m));
-                let mut fill = if offline {
-                    Color32::from_rgb(140, 25, 35)
-                } else {
-                    clip_color(&p, clip, row.kind)
-                };
-                if !track.enabled || track.muted {
-                    fill = fill.gamma_multiply(0.45);
-                }
-                lanes_painter.rect_filled(r, 3.0, fill);
-                if row.kind == TrackKind::Audio {
-                    self.paint_waveform(&lanes_painter, &p, clip, r);
-                }
-                self.paint_fades(&lanes_painter, clip, r);
-                let selected = self.st.selection.contains(&clip.id);
-                let stroke = if selected {
-                    Stroke::new(2.0, Color32::from_rgb(240, 160, 40))
-                } else {
-                    Stroke::new(1.0, Color32::from_black_alpha(120))
-                };
-                lanes_painter.rect_stroke(r, 3.0, stroke, StrokeKind::Inside);
-                let label = if offline {
-                    format!("MEDIA OFFLINE · {}", clip_name(&p, clip))
-                } else {
-                    clip_name(&p, clip)
-                };
-                let text_painter =
-                    lanes_painter.with_clip_rect(r.shrink(2.0).intersect(layout.lanes));
-                text_painter.text(
-                    r.left_top() + vec2(5.0, 3.0),
-                    Align2::LEFT_TOP,
-                    label,
-                    FontId::proportional(11.5),
-                    Color32::from_gray(235),
+                self.paint_clip(
+                    &lanes_painter,
+                    &p,
+                    clip,
+                    row.kind,
+                    track.enabled && !track.muted,
+                    r,
+                    Some(clip.id) == hovered_id,
                 );
-                if clip.speed != 1.0 {
-                    text_painter.text(
-                        r.right_top() + vec2(-5.0, 3.0),
-                        Align2::RIGHT_TOP,
-                        format!("{:.0}%", clip.speed * 100.0),
-                        FontId::proportional(10.5),
-                        Color32::from_rgb(255, 210, 120),
-                    );
-                }
             }
+        }
+        for (g, is_drop) in ghosts {
+            lanes_painter.rect_filled(
+                g,
+                2.0,
+                theme::ACCENT.gamma_multiply(if is_drop { 0.25 } else { 0.18 }),
+            );
+            lanes_painter.rect_stroke(g, 2.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
         }
 
         // ---------- régua ----------
@@ -591,23 +609,27 @@ impl Workspace {
             pos2(layout.left, area.top()),
             pos2(area.right(), area.top() + RULER_H),
         );
-        painter.rect_filled(ruler, 0.0, Color32::from_gray(36));
-        let step = ruler_step(self.tl.ppf, fps.nominal(), 70.0);
+        painter.rect_filled(ruler, 0.0, theme::BAR);
+        painter.line_segment(
+            [ruler.left_bottom(), ruler.right_bottom()],
+            Stroke::new(1.0, theme::BORDER),
+        );
+        let step = ruler_step(self.tl.ppf, fps.nominal(), 90.0);
         let first = (self.tl.scroll as Frame / step) * step;
         let ruler_painter = painter.with_clip_rect(ruler);
         let mut f = first;
         while self.x_of(f as f32, layout.left) < area.right() {
             let x = self.x_of(f as f32, layout.left);
             ruler_painter.line_segment(
-                [pos2(x, ruler.bottom() - 8.0), pos2(x, ruler.bottom())],
-                Stroke::new(1.0, Color32::from_gray(140)),
+                [pos2(x, ruler.bottom() - 10.0), pos2(x, ruler.bottom())],
+                Stroke::new(1.0, theme::TEXT_DIM),
             );
             ruler_painter.text(
-                pos2(x + 3.0, ruler.top() + 3.0),
+                pos2(x + 4.0, ruler.top() + 4.0),
                 Align2::LEFT_TOP,
                 format_timecode(f, fps),
-                FontId::monospace(10.0),
-                Color32::from_gray(170),
+                theme::mono(10.0),
+                theme::TEXT_DIM,
             );
             let minor = step / 5;
             if minor > 0 {
@@ -615,7 +637,7 @@ impl Workspace {
                     let xm = self.x_of((f + minor * k) as f32, layout.left);
                     ruler_painter.line_segment(
                         [pos2(xm, ruler.bottom() - 4.0), pos2(xm, ruler.bottom())],
-                        Stroke::new(1.0, Color32::from_gray(90)),
+                        Stroke::new(1.0, Color32::from_gray(70)),
                     );
                 }
             }
@@ -623,22 +645,46 @@ impl Workspace {
         }
         if let (Some(i), Some(o)) = (self.st.mark_in, self.st.mark_out) {
             let r = Rect::from_min_max(
-                pos2(self.x_of(i as f32, layout.left), ruler.top()),
+                pos2(self.x_of(i as f32, layout.left), ruler.bottom() - 6.0),
                 pos2(self.x_of(o as f32, layout.left), ruler.bottom()),
             );
-            ruler_painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(220, 140, 40, 50));
+            ruler_painter.rect_filled(r, 0.0, theme::ACCENT.gamma_multiply(0.6));
         }
         let ruler_resp = ui.interact(ruler, ui.id().with("ruler"), Sense::click_and_drag());
         if (ruler_resp.clicked() || ruler_resp.dragged())
             && let Some(pos) = ruler_resp.interact_pointer_pos()
         {
             self.stop();
-            self.st.active_monitor = crate::state::Monitor::Timeline;
+            self.st.active_monitor = Monitor::Timeline;
             self.st
                 .set_playhead(self.frame_at(pos.x, layout.left).round() as Frame);
         }
 
-        // ---------- snapping e cursor ----------
+        // ---------- linha do mouse, snapping e cursor ----------
+        let hover_x = ui.input(|i| i.pointer.hover_pos()).filter(|pos| {
+            pos.x >= layout.left
+                && pos.x <= area.right()
+                && pos.y >= area.top()
+                && pos.y <= area.bottom()
+        });
+        if let Some(pos) = hover_x
+            && self.tl.drag.is_none()
+        {
+            let frame = self.frame_at(pos.x, layout.left).round().max(0.0);
+            let x = self.x_of(frame, layout.left);
+            painter.line_segment(
+                [pos2(x, ruler.top()), pos2(x, area.bottom())],
+                Stroke::new(1.0, Color32::from_white_alpha(70)),
+            );
+            let label = format_timecode(frame as Frame, fps);
+            let galley = painter.layout_no_wrap(label, theme::mono(10.5), Color32::WHITE);
+            let bubble = Rect::from_min_size(
+                pos2(x + 4.0, ruler.bottom() - galley.size().y - 4.0),
+                galley.size() + vec2(6.0, 2.0),
+            );
+            painter.rect_filled(bubble, 2.0, Color32::from_rgb(0x45, 0x45, 0x4c));
+            painter.galley(bubble.min + vec2(3.0, 1.0), galley, Color32::WHITE);
+        }
         if let Some(sf) = snap_line {
             let x = self.x_of(sf as f32, layout.left);
             lanes_painter.line_segment(
@@ -649,59 +695,223 @@ impl Workspace {
         let px = self.x_of(self.st.playhead as f32, layout.left);
         if px >= layout.left && px <= area.right() {
             painter.line_segment(
-                [pos2(px, area.top()), pos2(px, area.bottom())],
-                Stroke::new(1.5, Color32::from_rgb(235, 60, 60)),
+                [pos2(px, ruler.top()), pos2(px, area.bottom())],
+                Stroke::new(1.5, theme::PLAYHEAD),
             );
             painter.add(egui::Shape::convex_polygon(
                 vec![
-                    pos2(px - 6.0, area.top()),
-                    pos2(px + 6.0, area.top()),
-                    pos2(px, area.top() + 9.0),
+                    pos2(px - 7.0, ruler.top()),
+                    pos2(px + 7.0, ruler.top()),
+                    pos2(px + 7.0, ruler.top() + 8.0),
+                    pos2(px, ruler.top() + 15.0),
+                    pos2(px - 7.0, ruler.top() + 8.0),
                 ],
-                Color32::from_rgb(235, 60, 60),
+                theme::PLAYHEAD,
                 Stroke::NONE,
             ));
         }
 
         // ---------- cabeçalhos ----------
-        let header = Rect::from_min_max(area.min, pos2(layout.left, area.bottom()));
-        painter.rect_filled(header, 0.0, Color32::from_gray(32));
+        self.track_headers(ui, &painter, &p, &layout, area);
+        // Timecode grande no canto, como no Resolve.
+        let tc = Rect::from_min_size(area.min, vec2(HEADER_W, RULER_H));
+        painter.rect_filled(tc, 0.0, theme::BG_DARK);
         painter.text(
-            pos2(area.left() + 6.0, area.top() + RULER_H / 2.0),
+            tc.left_center() + vec2(10.0, 0.0),
             Align2::LEFT_CENTER,
             format_timecode(self.st.playhead, fps),
-            FontId::monospace(11.0),
-            Color32::from_rgb(235, 120, 100),
+            theme::mono(17.0),
+            theme::TIMECODE,
         );
+        ui.advance_cursor_after_rect(area);
+    }
+
+    /// Match frame (F no Resolve): abre a mídia do clipe no Source Viewer no frame equivalente.
+    fn match_frame(&mut self, p: &Project, clip: ClipId, at: Frame) {
+        let Some(c) = p.clip(clip) else { return };
+        let ClipSource::Media(m) = &c.source else {
+            return;
+        };
+        let source_frame = c.source_time_at(at.clamp(c.start, c.end() - 1)).floor() as Frame;
+        self.st.open_in_source(*m);
+        self.st.source.playhead = source_frame.max(0);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_clip(
+        &mut self,
+        painter: &egui::Painter,
+        p: &Project,
+        clip: &Clip,
+        kind: TrackKind,
+        active: bool,
+        r: Rect,
+        hovered: bool,
+    ) {
+        let offline = matches!(clip.source, ClipSource::Media(m) if self.st.offline.contains(&m));
+        let (mut body, mut label_bg) = if offline {
+            (theme::OFFLINE, theme::OFFLINE.gamma_multiply(0.7))
+        } else {
+            clip_colors(p, clip, kind)
+        };
+        if !active {
+            body = body.gamma_multiply(0.4);
+            label_bg = label_bg.gamma_multiply(0.4);
+        }
+        if hovered {
+            body = body.gamma_multiply(1.15);
+        }
+        painter.rect_filled(r, 2.0, body);
+        let label = Rect::from_min_max(r.min, pos2(r.right(), r.top() + LABEL_H));
+        painter.rect_filled(
+            label,
+            egui::CornerRadius {
+                nw: 2,
+                ne: 2,
+                sw: 0,
+                se: 0,
+            },
+            label_bg,
+        );
+        let content = Rect::from_min_max(pos2(r.left(), label.bottom()), r.max);
+
+        // Miniatura no começo dos clipes de vídeo/imagem (como a tira de frames do Resolve).
+        if kind == TrackKind::Video
+            && let ClipSource::Media(m) = &clip.source
+            && let Some(media) = p.media(*m)
+            && content.width() > 30.0
+            && let Some(tex) = self.thumbnail(*m, &media.info.path, media.info.kind)
+        {
+            let size = tex.size_vec2();
+            let h = content.height() - 2.0;
+            let w = (h * size.x / size.y).min(content.width() - 2.0);
+            let thumb = Rect::from_min_size(content.min + vec2(1.0, 1.0), vec2(w, h));
+            painter
+                .with_clip_rect(content.intersect(painter.clip_rect()))
+                .image(
+                    tex.id(),
+                    thumb,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(w / (h * size.x / size.y), 1.0)),
+                    if active {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_gray(110)
+                    },
+                );
+        }
+        if kind == TrackKind::Audio {
+            self.paint_waveform(painter, p, clip, content);
+        }
+        self.paint_fades(painter, clip, r);
+
+        let selected = self.st.selection.contains(&clip.id);
+        let stroke = if selected {
+            Stroke::new(2.0, theme::ACCENT)
+        } else {
+            Stroke::new(1.0, Color32::from_black_alpha(160))
+        };
+        painter.rect_stroke(r, 2.0, stroke, StrokeKind::Inside);
+        let name = if offline {
+            format!("MEDIA OFFLINE — {}", clip_name(p, clip))
+        } else {
+            clip_name(p, clip)
+        };
+        let text_painter =
+            painter.with_clip_rect(label.shrink2(vec2(3.0, 0.0)).intersect(painter.clip_rect()));
+        text_painter.text(
+            label.left_center() + vec2(5.0, 0.0),
+            Align2::LEFT_CENTER,
+            name,
+            theme::text(11.0),
+            Color32::from_gray(240),
+        );
+        if clip.speed != 1.0 {
+            text_painter.text(
+                label.right_center() - vec2(5.0, 0.0),
+                Align2::RIGHT_CENTER,
+                format!("{:.0}%", clip.speed * 100.0),
+                theme::text(10.5),
+                Color32::from_rgb(255, 210, 120),
+            );
+        }
+    }
+
+    fn track_headers(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        p: &Project,
+        layout: &Layout,
+        area: Rect,
+    ) {
+        let header = Rect::from_min_max(area.min, pos2(layout.left, area.bottom()));
+        painter.rect_filled(header, 0.0, theme::BAR);
+        painter.line_segment(
+            [header.right_top(), header.right_bottom()],
+            Stroke::new(1.0, theme::BORDER),
+        );
+        let below = Rect::from_min_max(
+            pos2(area.left(), layout.lanes.top()),
+            pos2(layout.left, area.bottom()),
+        );
+        let painter = &painter.with_clip_rect(below);
+
         for (row, rect) in &layout.rows {
+            if rect.bottom() <= below.top() + 4.0 || rect.top() >= below.bottom() - 4.0 {
+                continue;
+            }
             let h = Rect::from_min_max(rect.min, pos2(layout.left - 1.0, rect.max.y));
             let Some(track) = p.tracks(row.kind).get(row.index).cloned() else {
                 let label = if row.kind == TrackKind::Video {
-                    "+ vídeo"
+                    "+ faixa de vídeo"
                 } else {
-                    "+ áudio"
+                    "+ faixa de áudio"
                 };
                 let resp = ui.put(
-                    h.shrink2(vec2(6.0, 1.0)),
-                    egui::Button::new(egui::RichText::new(label).small().weak()).frame(false),
+                    h.shrink2(vec2(8.0, 1.0)),
+                    egui::Button::new(egui::RichText::new(label).small().color(theme::TEXT_DIM))
+                        .frame(false),
                 );
                 if resp.clicked() {
                     self.st.apply(Edit::AddTrack(row.kind));
                 }
                 continue;
             };
+            painter.rect_filled(h, 0.0, Color32::from_rgb(0x25, 0x25, 0x29));
             painter.line_segment(
                 [h.left_bottom(), h.right_bottom()],
-                Stroke::new(1.0, Color32::from_gray(18)),
+                Stroke::new(1.0, theme::BORDER),
             );
             let label = p.track_label(track.id).unwrap_or_default();
+            let (badge_color, name) = match row.kind {
+                TrackKind::Video => (theme::CLIP_VIDEO_LABEL, format!("Vídeo {}", row.index + 1)),
+                TrackKind::Audio => (theme::CLIP_AUDIO_LABEL, format!("Áudio {}", row.index + 1)),
+            };
+            let badge = Rect::from_min_size(h.min + vec2(8.0, 7.0), vec2(30.0, 18.0));
+            painter.rect_filled(badge, 3.0, badge_color);
             painter.text(
-                h.left_top() + vec2(8.0, 6.0),
-                Align2::LEFT_TOP,
+                badge.center(),
+                Align2::CENTER_CENTER,
                 &label,
-                FontId::proportional(13.0),
-                Color32::from_gray(220),
+                theme::text(12.0),
+                Color32::WHITE,
             );
+            painter.text(
+                pos2(badge.right() + 8.0, badge.center().y),
+                Align2::LEFT_CENTER,
+                &name,
+                theme::text(12.0),
+                theme::TEXT,
+            );
+            let count = track.clips.len();
+            painter.text(
+                pos2(h.right() - 8.0, badge.center().y),
+                Align2::RIGHT_CENTER,
+                format!("{count} clipe{}", if count == 1 { "" } else { "s" }),
+                theme::text(10.5),
+                theme::TEXT_DIM,
+            );
+
             let mut flags = TrackFlags {
                 locked: track.locked,
                 enabled: track.enabled,
@@ -709,48 +919,76 @@ impl Workspace {
                 solo: track.solo,
             };
             let mut changed = false;
-            let mut x = h.left() + 6.0;
-            let toggle =
-                |ui: &mut egui::Ui, text: &str, on: bool, tip: &str, x: &mut f32| -> bool {
-                    let r = Rect::from_min_size(pos2(*x, h.bottom() - 21.0), vec2(22.0, 18.0));
-                    *x += 24.0;
-                    ui.put(
-                        r,
-                        egui::Button::new(egui::RichText::new(text).small())
-                            .selected(on)
-                            .small(),
-                    )
-                    .on_hover_text(tip)
-                    .clicked()
-                };
-            if toggle(ui, "L", track.locked, "Travar faixa (lock)", &mut x) {
-                flags.locked = !flags.locked;
-                changed = true;
-            }
-            match row.kind {
-                TrackKind::Video => {
-                    if toggle(
-                        ui,
-                        "V",
-                        track.enabled,
-                        "Faixa visível (liga/desliga)",
-                        &mut x,
-                    ) {
-                        flags.enabled = !flags.enabled;
+            let buttons = Rect::from_min_max(
+                pos2(h.left() + 6.0, h.bottom() - 25.0),
+                pos2(h.right() - 6.0, h.bottom() - 2.0),
+            );
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(buttons)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                |ui| {
+                    ui.set_clip_rect(below);
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let lock_icon = if track.locked {
+                        Icon::Lock
+                    } else {
+                        Icon::Unlock
+                    };
+                    if icons::button(ui, lock_icon, 13.0, track.locked, "Travar faixa").clicked() {
+                        flags.locked = !flags.locked;
                         changed = true;
                     }
-                }
-                TrackKind::Audio => {
-                    if toggle(ui, "M", track.muted, "Mudo", &mut x) {
-                        flags.muted = !flags.muted;
-                        changed = true;
+                    match row.kind {
+                        TrackKind::Video => {
+                            if icons::button(
+                                ui,
+                                Icon::Monitor,
+                                13.0,
+                                !track.enabled,
+                                if track.enabled {
+                                    "Desligar faixa"
+                                } else {
+                                    "Ligar faixa"
+                                },
+                            )
+                            .clicked()
+                            {
+                                flags.enabled = !flags.enabled;
+                                changed = true;
+                            }
+                        }
+                        TrackKind::Audio => {
+                            let toggle = |ui: &mut egui::Ui,
+                                          text: &str,
+                                          on: bool,
+                                          color: Color32,
+                                          tip: &str| {
+                                let b = egui::Button::new(
+                                    egui::RichText::new(text).size(11.0).color(if on {
+                                        Color32::BLACK
+                                    } else {
+                                        theme::TEXT
+                                    }),
+                                )
+                                .fill(if on { color } else { theme::BAR_LIGHT })
+                                .min_size(vec2(20.0, 18.0));
+                                ui.add(b).on_hover_text(tip).clicked()
+                            };
+                            if toggle(ui, "M", track.muted, Color32::from_rgb(230, 80, 70), "Mudo")
+                            {
+                                flags.muted = !flags.muted;
+                                changed = true;
+                            }
+                            if toggle(ui, "S", track.solo, Color32::from_rgb(235, 200, 70), "Solo")
+                            {
+                                flags.solo = !flags.solo;
+                                changed = true;
+                            }
+                        }
                     }
-                    if toggle(ui, "S", track.solo, "Solo", &mut x) {
-                        flags.solo = !flags.solo;
-                        changed = true;
-                    }
-                }
-            }
+                },
+            );
             if changed {
                 self.st.apply(Edit::SetTrackFlags {
                     track: track.id,
@@ -758,7 +996,7 @@ impl Workspace {
                 });
             }
             let hresp = ui.interact(
-                Rect::from_min_size(h.min, vec2(h.width(), 22.0)),
+                Rect::from_min_size(h.min, vec2(h.width(), 30.0)).intersect(below),
                 ui.id().with(("hdr", track.id)),
                 Sense::click(),
             );
@@ -769,7 +1007,6 @@ impl Workspace {
                 }
             });
         }
-        ui.advance_cursor_after_rect(area);
     }
 
     /// O projeto mais novo (se uma edição aconteceu neste frame) para desenhar sem atraso.
@@ -785,35 +1022,91 @@ impl Workspace {
     }
 
     fn timeline_toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.st.tool, Tool::Selection, "↖ Seleção")
-                .on_hover_text("A");
-            ui.selectable_value(&mut self.st.tool, Tool::Blade, "✂ Lâmina")
-                .on_hover_text("B");
-            ui.separator();
-            ui.toggle_value(&mut self.st.snapping, "Snapping")
-                .on_hover_text("N");
-            ui.toggle_value(&mut self.st.linked_selection, "Seleção ligada")
-                .on_hover_text("Ctrl+Shift+L");
-            ui.separator();
-            if ui
-                .small_button("−")
-                .on_hover_text("Zoom − (Ctrl+-)")
-                .clicked()
+        theme::header_strip(ui, 32.0, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if icons::button(
+                ui,
+                Icon::Select,
+                15.0,
+                self.st.tool == Tool::Selection,
+                "Ferramenta de seleção (A)",
+            )
+            .clicked()
             {
-                self.zoom(1.0 / 1.4);
+                self.st.tool = Tool::Selection;
             }
-            if ui
-                .small_button("+")
-                .on_hover_text("Zoom + (Ctrl+=)")
-                .clicked()
+            if icons::button(
+                ui,
+                Icon::Blade,
+                15.0,
+                self.st.tool == Tool::Blade,
+                "Lâmina (B)",
+            )
+            .clicked()
             {
-                self.zoom(1.4);
+                self.st.tool = Tool::Blade;
             }
-            if ui.small_button("Caber").on_hover_text("Shift+Z").clicked() {
-                let w = self.tl_width;
-                self.zoom_to_fit(w);
+            ui.add_space(10.0);
+            if icons::button(ui, Icon::Insert, 15.0, false, "Insert do Source (F9)").clicked() {
+                self.st.place_from_source(PlaceMode::Insert);
             }
+            if icons::button(
+                ui,
+                Icon::Overwrite,
+                15.0,
+                false,
+                "Overwrite do Source (F10)",
+            )
+            .clicked()
+            {
+                self.st.place_from_source(PlaceMode::Overwrite);
+            }
+            if icons::button(
+                ui,
+                Icon::Append,
+                15.0,
+                false,
+                "Append do Source (Shift+F12)",
+            )
+            .clicked()
+            {
+                self.st.place_from_source(PlaceMode::Append);
+            }
+            ui.add_space(10.0);
+            if icons::button(ui, Icon::Magnet, 15.0, self.st.snapping, "Snapping (N)").clicked() {
+                self.st.snapping = !self.st.snapping;
+            }
+            if icons::button(
+                ui,
+                Icon::Link,
+                15.0,
+                self.st.linked_selection,
+                "Seleção ligada (Ctrl+Shift+L)",
+            )
+            .clicked()
+            {
+                self.st.linked_selection = !self.st.linked_selection;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if icons::button(ui, Icon::Fit, 15.0, false, "Zoom para caber (Shift+Z)").clicked()
+                {
+                    let w = self.tl_width;
+                    self.zoom_to_fit(w);
+                }
+                if icons::button(ui, Icon::Plus, 13.0, false, "Zoom + (Ctrl+=)").clicked() {
+                    self.zoom(1.4);
+                }
+                let mut z = self.tl.ppf.ln();
+                let slider = egui::Slider::new(&mut z, 0.02f32.ln()..=40f32.ln()).show_value(false);
+                if ui.add_sized([110.0, 16.0], slider).changed() {
+                    let factor = z.exp() / self.tl.ppf;
+                    self.zoom(factor);
+                }
+                if icons::button(ui, Icon::Minus, 13.0, false, "Zoom − (Ctrl+-)").clicked() {
+                    self.zoom(1.0 / 1.4);
+                }
+            });
         });
     }
 
@@ -822,7 +1115,7 @@ impl Workspace {
             ui.label("Nenhum clipe");
             return;
         }
-        if ui.button("✂ Cortar no cursor").clicked() {
+        if ui.button("Cortar no cursor").clicked() {
             self.st.blade_at_playhead();
             ui.close();
         }
@@ -836,6 +1129,14 @@ impl Workspace {
         }
         if ui.button("Ligar / separar áudio e vídeo").clicked() {
             self.st.toggle_link();
+            ui.close();
+        }
+        if let Some(c) = self.tl.menu_clip
+            && ui.button("Abrir no Source Viewer (match frame)").clicked()
+        {
+            let p = self.project_arc.clone();
+            let at = self.st.playhead;
+            self.match_frame(&p, c, at);
             ui.close();
         }
     }
@@ -897,17 +1198,16 @@ impl Workspace {
         (delta.max(-min_start), snapped)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn paint_move_ghosts(
+    fn move_ghosts(
         &self,
-        painter: &egui::Painter,
         p: &Project,
         layout: &Layout,
         clips: &[ClipId],
         kind: TrackKind,
         delta: Frame,
         rows: i64,
-    ) {
+    ) -> Vec<(Rect, bool)> {
+        let mut out = Vec::new();
         for id in clips {
             let (Some(c), Some(row)) = (p.clip(*id), row_of(p, *id)) else {
                 continue;
@@ -931,74 +1231,55 @@ impl Workspace {
             let Some(rect) = target else { continue };
             let x0 = self.x_of((c.start + delta) as f32, layout.left);
             let x1 = self.x_of((c.end() + delta) as f32, layout.left);
-            let r = Rect::from_min_max(pos2(x0, rect.top() + 2.0), pos2(x1, rect.bottom() - 2.0));
-            painter.rect_filled(r, 3.0, Color32::from_rgba_unmultiplied(240, 160, 40, 40));
-            painter.rect_stroke(
-                r,
-                3.0,
-                Stroke::new(1.5, Color32::from_rgb(240, 160, 40)),
-                StrokeKind::Inside,
-            );
+            out.push((
+                Rect::from_min_max(pos2(x0, rect.top() + 2.0), pos2(x1, rect.bottom() - 2.0)),
+                false,
+            ));
         }
+        out
     }
 
-    fn paint_trim_ghost(
+    fn trim_ghost(
         &self,
-        painter: &egui::Painter,
         p: &Project,
         layout: &Layout,
         anchor: ClipId,
         edge: Edge,
         target: Frame,
-    ) {
-        let (Some(c), Some(row)) = (p.clip(anchor), row_of(p, anchor)) else {
-            return;
-        };
-        let Some(rect) = layout.rect_of(row) else {
-            return;
-        };
+    ) -> Option<Rect> {
+        let (c, row) = (p.clip(anchor)?, row_of(p, anchor)?);
+        let rect = layout.rect_of(row)?;
         let (s, e) = if edge == Edge::Start {
             (target, c.end())
         } else {
             (c.start, target)
         };
-        let r = Rect::from_min_max(
+        Some(Rect::from_min_max(
             pos2(self.x_of(s as f32, layout.left), rect.top() + 2.0),
             pos2(self.x_of(e as f32, layout.left), rect.bottom() - 2.0),
-        );
-        painter.rect_stroke(
-            r,
-            3.0,
-            Stroke::new(2.0, Color32::from_rgb(240, 160, 40)),
-            StrokeKind::Inside,
-        );
+        ))
     }
 
     fn paint_fades(&self, painter: &egui::Painter, clip: &Clip, r: Rect) {
-        let shade = Color32::from_black_alpha(90);
+        let shade = Color32::from_black_alpha(110);
+        let line = Stroke::new(1.0, Color32::from_white_alpha(120));
         if clip.fade_in > 0 {
-            let x = r.left() + clip.fade_in as f32 * self.tl.ppf;
+            let x = (r.left() + clip.fade_in as f32 * self.tl.ppf).min(r.right());
             painter.add(egui::Shape::convex_polygon(
-                vec![
-                    r.left_top(),
-                    r.left_bottom(),
-                    pos2(x.min(r.right()), r.top()),
-                ],
+                vec![r.left_top(), r.left_bottom(), pos2(x, r.top())],
                 shade,
                 Stroke::NONE,
             ));
+            painter.line_segment([r.left_bottom(), pos2(x, r.top())], line);
         }
         if clip.fade_out > 0 {
-            let x = r.right() - clip.fade_out as f32 * self.tl.ppf;
+            let x = (r.right() - clip.fade_out as f32 * self.tl.ppf).max(r.left());
             painter.add(egui::Shape::convex_polygon(
-                vec![
-                    r.right_top(),
-                    pos2(x.max(r.left()), r.top()),
-                    r.right_bottom(),
-                ],
+                vec![r.right_top(), pos2(x, r.top()), r.right_bottom()],
                 shade,
                 Stroke::NONE,
             ));
+            painter.line_segment([pos2(x, r.top()), r.right_bottom()], line);
         }
     }
 
@@ -1016,11 +1297,10 @@ impl Workspace {
         };
         let fps = p.settings.fps.as_f64();
         let gain = 10f32.powf(clip.volume_db / 20.0);
-        let mid = r.center().y + 6.0;
-        let half = (r.height() - 16.0) / 2.0;
+        let mid = r.center().y;
+        let half = r.height() / 2.0 - 2.0;
         let x_start = r.left().max(painter.clip_rect().left());
         let x_end = r.right().min(painter.clip_rect().right());
-        let color = Color32::from_rgb(140, 220, 160);
         let mut x = x_start;
         while x < x_end {
             let local = ((x - r.left()) / self.tl.ppf) as f64;
@@ -1032,7 +1312,7 @@ impl Workspace {
                 let (lo, hi) = (shape(*lo), shape(*hi));
                 painter.line_segment(
                     [pos2(x, mid - hi * half), pos2(x, mid - lo * half)],
-                    Stroke::new(1.0, color),
+                    Stroke::new(1.0, theme::WAVE),
                 );
             }
             x += 1.0;
@@ -1042,9 +1322,17 @@ impl Workspace {
     /// Ponto na linha da faixa (`kind`, `index`) no `frame`, na última timeline desenhada.
     #[cfg(test)]
     pub fn tl_point(&self, kind: TrackKind, index: usize, frame: f32) -> Pos2 {
-        let layout = Layout::new(&self.project_arc, self.tl_area);
+        let layout = Layout::new(&self.project_arc, self.tl_area, self.tl.v_scroll);
         let r = layout.rect_of(Row { kind, index }).expect("linha existe");
         pos2(self.x_of(frame, layout.left), r.center().y)
+    }
+
+    /// Centro do botão de travar no cabeçalho da faixa (para os testes).
+    #[cfg(test)]
+    pub fn tl_lock_button(&self, kind: TrackKind, index: usize) -> Pos2 {
+        let layout = Layout::new(&self.project_arc, self.tl_area, self.tl.v_scroll);
+        let r = layout.rect_of(Row { kind, index }).expect("linha existe");
+        pos2(r.left() + 6.0 + 10.5, r.bottom() - 13.5)
     }
 
     fn payload_len(&self, p: &Project, payload: DragPayload) -> Frame {

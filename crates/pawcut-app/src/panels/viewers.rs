@@ -1,11 +1,17 @@
-//! Source Viewer e Timeline Viewer.
+//! Source Viewer e Timeline Viewer, no layout do Resolve.
 
-use egui::{Color32, Rect, RichText, Sense, Vec2};
-use pawcut_core::{ClipChange, ClipSource, Frame, MediaKind, Transform, format_timecode};
+use egui::{Color32, Rect, Sense, Stroke, Vec2, pos2, vec2};
+use pawcut_core::{ClipChange, Frame, MediaKind, Transform, format_timecode};
 
 use crate::engine::{ViewRequest, ViewSlot};
+use crate::icons::{self, Icon};
 use crate::state::{Monitor, PlaceMode};
-use crate::workspace::{Playback, Workspace};
+use crate::theme;
+use crate::workspace::Workspace;
+
+const HEADER_H: f32 = 26.0;
+const SCRUB_H: f32 = 16.0;
+const TRANSPORT_H: f32 = 34.0;
 
 /// Retângulo com a proporção `aspect` centralizado em `area`.
 fn fit_rect(area: Rect, aspect: f32) -> Rect {
@@ -13,42 +19,145 @@ fn fit_rect(area: Rect, aspect: f32) -> Rect {
     Rect::from_center_size(area.center(), Vec2::new(w, w / aspect))
 }
 
+fn uv() -> Rect {
+    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))
+}
+
+struct ViewerRects {
+    header: Rect,
+    image: Rect,
+    scrub: Rect,
+    transport: Rect,
+}
+
+fn split(area: Rect) -> ViewerRects {
+    let header = Rect::from_min_size(area.min, vec2(area.width(), HEADER_H));
+    let transport = Rect::from_min_max(pos2(area.left(), area.bottom() - TRANSPORT_H), area.max);
+    let scrub = Rect::from_min_max(
+        pos2(area.left(), transport.top() - SCRUB_H),
+        pos2(area.right(), transport.top()),
+    );
+    let image = Rect::from_min_max(
+        pos2(area.left(), header.bottom()),
+        pos2(area.right(), scrub.top()),
+    );
+    ViewerRects {
+        header,
+        image,
+        scrub,
+        transport,
+    }
+}
+
 impl Workspace {
-    fn monitor_frame(&self, ui: &egui::Ui, active: bool, rect: Rect) {
-        let color = if active {
-            Color32::from_rgb(220, 140, 40)
-        } else {
-            Color32::from_gray(50)
-        };
-        ui.painter().rect_stroke(
-            rect,
-            0.0,
-            egui::Stroke::new(1.0, color),
-            egui::StrokeKind::Inside,
+    fn viewer_header(&self, ui: &egui::Ui, r: Rect, title: &str, timecode: &str, active: bool) {
+        let painter = ui.painter();
+        painter.rect_filled(r, 0.0, theme::BAR);
+        painter.line_segment(
+            [r.left_bottom(), r.right_bottom()],
+            Stroke::new(1.0, theme::BORDER),
         );
+        painter.text(
+            r.left_center() + vec2(10.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            title,
+            theme::text(12.0),
+            theme::TEXT,
+        );
+        let tc_color = if active {
+            Color32::WHITE
+        } else {
+            theme::TEXT_DIM
+        };
+        painter.text(
+            r.right_center() - vec2(10.0, 0.0),
+            egui::Align2::RIGHT_CENTER,
+            timecode,
+            theme::mono(14.0),
+            tc_color,
+        );
+    }
+
+    /// Barra fina de scrub; devolve o frame clicado/arrastado.
+    fn scrub_bar(
+        &self,
+        ui: &mut egui::Ui,
+        r: Rect,
+        len: Frame,
+        playhead: Frame,
+        marks: (Option<Frame>, Option<Frame>),
+        id: &str,
+    ) -> Option<Frame> {
+        let resp = ui.interact(r, ui.id().with(id), Sense::click_and_drag());
+        let painter = ui.painter();
+        painter.rect_filled(r, 0.0, theme::BG_DARK);
+        let track = r.shrink2(vec2(10.0, 6.0));
+        painter.rect_filled(track, 2.0, theme::BAR_LIGHT);
+        let len = len.max(1);
+        let x_of =
+            |f: Frame| track.left() + track.width() * (f as f32 / len as f32).clamp(0.0, 1.0);
+        if marks.0.is_some() || marks.1.is_some() {
+            let (a, b) = (marks.0.unwrap_or(0), marks.1.unwrap_or(len));
+            painter.rect_filled(
+                Rect::from_min_max(pos2(x_of(a), track.top()), pos2(x_of(b), track.bottom())),
+                0.0,
+                theme::ACCENT.gamma_multiply(0.55),
+            );
+        }
+        let x = x_of(playhead);
+        painter.line_segment(
+            [pos2(x, r.top() + 2.0), pos2(x, r.bottom() - 2.0)],
+            Stroke::new(2.0, theme::PLAYHEAD),
+        );
+        if (resp.clicked() || resp.dragged())
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            return Some(
+                (((pos.x - track.left()) / track.width()) * len as f32)
+                    .round()
+                    .clamp(0.0, (len - 1) as f32) as Frame,
+            );
+        }
+        if let Some(pos) = resp.hover_pos() {
+            let f = (((pos.x - track.left()) / track.width()) * len as f32).clamp(0.0, len as f32)
+                as Frame;
+            resp.on_hover_text_at_pointer(format_timecode(f, self.project_arc.settings.fps));
+        }
+        None
     }
 
     pub fn timeline_viewer_ui(&mut self, ui: &mut egui::Ui) {
         let project = self.project_arc.clone();
         let s = &project.settings;
         let aspect = s.width as f32 / s.height as f32;
-        let transport_h = 30.0;
-        let area = ui.available_rect_before_wrap();
-        let image_area =
-            Rect::from_min_max(area.min, egui::pos2(area.max.x, area.max.y - transport_h));
-        let pic = fit_rect(image_area.shrink(4.0), aspect);
-        let resp = ui.allocate_rect(image_area, Sense::click_and_drag());
-        ui.painter()
-            .rect_filled(image_area, 0.0, Color32::from_gray(12));
+        let r = split(ui.available_rect_before_wrap());
+        let active = self.st.active_monitor == Monitor::Timeline;
+        let name = self
+            .st
+            .path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map_or("Timeline 1".into(), |n| n.to_string_lossy().into_owned());
+        self.viewer_header(
+            ui,
+            r.header,
+            &name,
+            &format_timecode(self.st.playhead, s.fps),
+            active,
+        );
+
+        ui.painter().rect_filled(r.image, 0.0, Color32::BLACK);
+        let pic = fit_rect(r.image.shrink(6.0), aspect);
         if let Some(tex) = &self.tex_timeline {
-            ui.painter().image(
-                tex.id(),
-                pic,
-                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
+            ui.painter().image(tex.id(), pic, uv(), Color32::WHITE);
+        }
+        if active {
+            ui.painter().line_segment(
+                [r.image.left_top(), r.image.right_top()],
+                Stroke::new(2.0, theme::ACCENT.gamma_multiply(0.7)),
             );
         }
-        self.monitor_frame(ui, self.st.active_monitor == Monitor::Timeline, image_area);
+        let resp = ui.interact(r.image, ui.id().with("tl-image"), Sense::click_and_drag());
 
         // Pede o frame no tamanho em que ele aparece (menor enquanto toca).
         let ppp = ui.ctx().pixels_per_point();
@@ -74,66 +183,46 @@ impl Workspace {
         if resp.clicked() || resp.drag_started() {
             self.st.active_monitor = Monitor::Timeline;
         }
-        // Arrastar no viewer move o clipe visual selecionado (posição do Inspector).
-        if resp.dragged()
-            && let Some(clip) = self.visual_selection(self.st.playhead)
-        {
-            let k = s.width as f32 / pic.width();
-            let d = resp.drag_delta() * k;
-            if d != Vec2::ZERO
-                && let Some(c) = project.clip(clip)
-            {
-                let t = Transform {
-                    x: c.transform.x + d.x,
-                    y: c.transform.y - d.y,
-                    ..c.transform
-                };
-                self.st.apply_coalescing(
-                    pawcut_core::Edit::SetClip {
-                        clip,
-                        change: ClipChange::Transform(t),
-                    },
-                    &format!("viewer-{clip:?}"),
-                );
+        // Arrastar a imagem move o clipe visual selecionado (posição do Inspector).
+        let target = self.visual_selection(self.st.playhead);
+        if let Some(clip) = target {
+            if resp.dragged() {
+                let k = s.width as f32 / pic.width();
+                let d = resp.drag_delta() * k;
+                if d != Vec2::ZERO
+                    && let Some(c) = project.clip(clip)
+                {
+                    let t = Transform {
+                        x: c.transform.x + d.x,
+                        y: c.transform.y - d.y,
+                        ..c.transform
+                    };
+                    self.st.apply_coalescing(
+                        pawcut_core::Edit::SetClip {
+                            clip,
+                            change: ClipChange::Transform(t),
+                        },
+                        &format!("viewer-{clip:?}"),
+                    );
+                }
             }
-        }
-        if self.visual_selection(self.st.playhead).is_some() {
             resp.on_hover_cursor(egui::CursorIcon::Move);
         }
 
-        ui.scope_builder(
-            egui::UiBuilder::new().max_rect(Rect::from_min_max(
-                egui::pos2(area.min.x, area.max.y - transport_h),
-                area.max,
-            )),
-            |ui| {
-                ui.horizontal_centered(|ui| {
-                    self.transport_buttons(ui, Monitor::Timeline);
-                    ui.separator();
-                    ui.label(
-                        RichText::new(format_timecode(self.st.playhead, s.fps))
-                            .monospace()
-                            .size(15.0),
-                    );
-                    ui.label(
-                        RichText::new(format!("/ {}", format_timecode(project.duration(), s.fps)))
-                            .monospace()
-                            .weak(),
-                    );
-                    if let (Some(i), Some(o)) = (self.st.mark_in, self.st.mark_out) {
-                        ui.label(
-                            RichText::new(format!(
-                                "In {} Out {}",
-                                format_timecode(i, s.fps),
-                                format_timecode(o, s.fps)
-                            ))
-                            .small()
-                            .weak(),
-                        );
-                    }
-                });
-            },
-        );
+        let total = project.duration();
+        if let Some(f) = self.scrub_bar(
+            ui,
+            r.scrub,
+            total,
+            self.st.playhead,
+            (self.st.mark_in, self.st.mark_out),
+            "tl-scrub",
+        ) {
+            self.stop();
+            self.st.active_monitor = Monitor::Timeline;
+            self.st.set_playhead(f);
+        }
+        self.transport(ui, r.transport, Monitor::Timeline, |_, _| {});
     }
 
     /// Clipe de vídeo selecionado visível no frame (o de cima), se houver.
@@ -150,6 +239,8 @@ impl Workspace {
     pub fn source_viewer_ui(&mut self, ui: &mut egui::Ui) {
         let project = self.project_arc.clone();
         let fps = project.settings.fps;
+        let r = split(ui.available_rect_before_wrap());
+        let active = self.st.active_monitor == Monitor::Source;
         let Some(media) = self
             .st
             .source
@@ -157,42 +248,69 @@ impl Workspace {
             .and_then(|id| project.media(id))
             .cloned()
         else {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new("Clique numa mídia do Media Pool para ver aqui").weak());
-            });
+            self.viewer_header(ui, r.header, "Source", "--:--:--:--", false);
+            ui.painter().rect_filled(
+                Rect::from_min_max(r.image.min, r.transport.max),
+                0.0,
+                Color32::BLACK,
+            );
+            ui.painter().text(
+                r.image.center(),
+                egui::Align2::CENTER_CENTER,
+                "Clique numa mídia do Media Pool",
+                theme::text(13.0),
+                theme::TEXT_DIM,
+            );
             return;
         };
+        let name = media
+            .info
+            .path
+            .file_name()
+            .map_or("?".into(), |n| n.to_string_lossy().into_owned());
+        self.viewer_header(
+            ui,
+            r.header,
+            &name,
+            &format_timecode(self.st.source.playhead, fps),
+            active,
+        );
         let len = self.st.source_length().unwrap_or(1).max(1);
         let aspect = if media.info.height > 0 {
             media.info.width as f32 / media.info.height as f32
         } else {
             16.0 / 9.0
         };
-        let bottom_h = 58.0;
-        let area = ui.available_rect_before_wrap();
-        let image_area =
-            Rect::from_min_max(area.min, egui::pos2(area.max.x, area.max.y - bottom_h));
-        let resp = ui.allocate_rect(image_area, Sense::click());
-        ui.painter()
-            .rect_filled(image_area, 0.0, Color32::from_gray(12));
+        ui.painter().rect_filled(r.image, 0.0, Color32::BLACK);
+        if active {
+            ui.painter().line_segment(
+                [r.image.left_top(), r.image.right_top()],
+                Stroke::new(2.0, theme::ACCENT.gamma_multiply(0.7)),
+            );
+        }
+        let resp = ui.interact(r.image, ui.id().with("src-image"), Sense::click());
         if media.info.kind == MediaKind::Audio {
+            let c = r.image.center();
+            icons::paint(
+                ui.painter(),
+                Rect::from_center_size(c - vec2(0.0, 14.0), vec2(40.0, 40.0)),
+                Icon::Speaker,
+                theme::TEXT_DIM,
+            );
             ui.painter().text(
-                image_area.center(),
+                c + vec2(0.0, 24.0),
                 egui::Align2::CENTER_CENTER,
-                "🎵 Áudio",
-                egui::FontId::proportional(22.0),
-                Color32::GRAY,
+                "Áudio",
+                theme::text(13.0),
+                theme::TEXT_DIM,
             );
-        } else if let Some(tex) = &self.tex_source {
-            let pic = fit_rect(image_area.shrink(4.0), aspect);
-            ui.painter().image(
-                tex.id(),
-                pic,
-                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
+        } else {
+            let pic = fit_rect(r.image.shrink(6.0), aspect);
+            if let Some(tex) = &self.tex_source {
+                ui.painter().image(tex.id(), pic, uv(), Color32::WHITE);
+            }
             let ppp = ui.ctx().pixels_per_point();
-            let w = ((pic.width() * ppp) as u32).clamp(16, project.settings.width);
+            let w = ((pic.width() * ppp) as u32).clamp(16, project.settings.width.max(640));
             let h = ((w as f32 / aspect) as u32).max(2);
             let key = (media.id, self.st.source.playhead, (w, h));
             if self.requested_source != Some(key) {
@@ -208,70 +326,110 @@ impl Workspace {
                     (w, h),
                 );
             }
-        } else {
-            let seconds = self.st.source.playhead as f64 / fps.as_f64();
-            self.requested_source = Some((media.id, self.st.source.playhead, (640, 360)));
-            self.preview.request(
-                ViewSlot::Source,
-                ViewRequest::Source {
-                    path: media.info.path.clone(),
-                    kind: media.info.kind,
-                    seconds,
-                },
-                (640, 360),
-            );
         }
-        self.monitor_frame(ui, self.st.active_monitor == Monitor::Source, image_area);
         if resp.clicked() {
             self.st.active_monitor = Monitor::Source;
         }
+        if resp.double_clicked() {
+            self.st.place_from_source(PlaceMode::Append);
+        }
+        let marks = (self.st.source.mark_in, self.st.source.mark_out);
+        if let Some(f) = self.scrub_bar(
+            ui,
+            r.scrub,
+            len,
+            self.st.source.playhead,
+            marks,
+            "src-scrub",
+        ) {
+            self.stop();
+            self.st.source.playhead = f;
+            self.st.active_monitor = Monitor::Source;
+        }
+        self.transport(ui, r.transport, Monitor::Source, |ws, ui| {
+            if icons::button(ui, Icon::Insert, 16.0, false, "Insert (F9)").clicked() {
+                ws.st.place_from_source(PlaceMode::Insert);
+            }
+            if icons::button(ui, Icon::Overwrite, 16.0, false, "Overwrite (F10)").clicked() {
+                ws.st.place_from_source(PlaceMode::Overwrite);
+            }
+            if icons::button(ui, Icon::Append, 16.0, false, "Append no fim (Shift+F12)").clicked() {
+                ws.st.place_from_source(PlaceMode::Append);
+            }
+        });
+    }
 
-        let bottom = Rect::from_min_max(egui::pos2(area.min.x, area.max.y - bottom_h), area.max);
-        ui.scope_builder(egui::UiBuilder::new().max_rect(bottom), |ui| {
-            // Barra de scrub com as marcas In/Out.
-            let (bar, bresp) = ui.allocate_exact_size(
-                Vec2::new(ui.available_width(), 16.0),
-                Sense::click_and_drag(),
-            );
-            let painter = ui.painter();
-            painter.rect_filled(bar, 2.0, Color32::from_gray(35));
-            let x_of = |f: Frame| bar.left() + bar.width() * (f as f32 / len as f32);
-            let (mi, mo) = (
-                self.st.source.mark_in.unwrap_or(0),
-                self.st.source.mark_out.unwrap_or(len),
-            );
-            if self.st.source.mark_in.is_some() || self.st.source.mark_out.is_some() {
-                painter.rect_filled(
-                    Rect::from_min_max(
-                        egui::pos2(x_of(mi), bar.top()),
-                        egui::pos2(x_of(mo), bar.bottom()),
-                    ),
-                    0.0,
-                    Color32::from_rgba_unmultiplied(220, 140, 40, 70),
-                );
-            }
-            let px = x_of(self.st.source.playhead);
-            painter.line_segment(
-                [egui::pos2(px, bar.top()), egui::pos2(px, bar.bottom())],
-                egui::Stroke::new(2.0, Color32::from_rgb(230, 60, 60)),
-            );
-            if (bresp.clicked() || bresp.dragged())
-                && let Some(pos) = bresp.interact_pointer_pos()
-            {
-                let f = ((pos.x - bar.left()) / bar.width() * len as f32) as Frame;
-                self.st.source.playhead = f.clamp(0, len - 1);
-                self.st.active_monitor = Monitor::Source;
-            }
-            ui.horizontal(|ui| {
-                self.transport_buttons(ui, Monitor::Source);
-                ui.label(RichText::new(format_timecode(self.st.source.playhead, fps)).monospace());
-                ui.separator();
+    /// Linha de transporte: In/Out à esquerda, controles no centro, `extra` à direita.
+    fn transport(
+        &mut self,
+        ui: &mut egui::Ui,
+        r: Rect,
+        monitor: Monitor,
+        extra: impl FnOnce(&mut Self, &mut egui::Ui),
+    ) {
+        ui.painter().rect_filled(r, 0.0, theme::BAR);
+        let playing = self.playback.is_playing() && self.st.active_monitor == monitor;
+        let center = Rect::from_center_size(r.center(), vec2(7.0 * 26.0, r.height()));
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(center)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let act = |ui: &mut egui::Ui, icon: Icon, on: bool, tip: &str| {
+                    icons::button(ui, icon, 14.0, on, tip).clicked()
+                };
+                if act(ui, Icon::ToStart, false, "Início (Home)") {
+                    self.st.active_monitor = monitor;
+                    self.go_to_start();
+                }
+                if act(ui, Icon::PrevFrame, false, "Frame anterior (←)") {
+                    self.st.active_monitor = monitor;
+                    self.stop();
+                    self.st.step(-1);
+                }
+                if act(ui, Icon::Reverse, false, "Tocar para trás (J)") {
+                    self.st.active_monitor = monitor;
+                    self.play(-1.0);
+                }
+                if act(ui, Icon::Stop, false, "Parar (K)") {
+                    self.stop();
+                }
+                if act(
+                    ui,
+                    if playing { Icon::Pause } else { Icon::Play },
+                    playing,
+                    "Tocar / pausar (Espaço)",
+                ) {
+                    self.st.active_monitor = monitor;
+                    self.toggle_play();
+                }
+                if act(ui, Icon::NextFrame, false, "Próximo frame (→)") {
+                    self.st.active_monitor = monitor;
+                    self.stop();
+                    self.st.step(1);
+                }
+                if act(ui, Icon::ToEnd, false, "Fim (End)") {
+                    self.st.active_monitor = monitor;
+                    self.go_to_end();
+                }
+            },
+        );
+        let left = Rect::from_min_max(
+            r.min + vec2(8.0, 0.0),
+            pos2(center.left() - 4.0, r.bottom()),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(left)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
                 if ui
                     .small_button("In")
                     .on_hover_text("Marcar entrada (I)")
                     .clicked()
                 {
-                    self.st.active_monitor = Monitor::Source;
+                    self.st.active_monitor = monitor;
                     self.st.mark(true);
                 }
                 if ui
@@ -279,68 +437,20 @@ impl Workspace {
                     .on_hover_text("Marcar saída (O)")
                     .clicked()
                 {
-                    self.st.active_monitor = Monitor::Source;
+                    self.st.active_monitor = monitor;
                     self.st.mark(false);
                 }
-                ui.separator();
-                if ui.small_button("Insert").on_hover_text("F9").clicked() {
-                    self.st.place_from_source(PlaceMode::Insert);
-                }
-                if ui.small_button("Overwrite").on_hover_text("F10").clicked() {
-                    self.st.place_from_source(PlaceMode::Overwrite);
-                }
-                if ui
-                    .small_button("Append")
-                    .on_hover_text("Shift+F12")
-                    .clicked()
-                {
-                    self.st.place_from_source(PlaceMode::Append);
-                }
-            });
-        });
-        let _ = ClipSource::SolidColor;
-    }
-
-    fn transport_buttons(&mut self, ui: &mut egui::Ui, monitor: Monitor) {
-        let playing = self.playback.is_playing() && self.st.active_monitor == monitor;
-        if ui
-            .small_button("⏮")
-            .on_hover_text("Início (Home)")
-            .clicked()
-        {
-            self.st.active_monitor = monitor;
-            self.go_to_start();
-        }
-        if ui
-            .small_button("⏴")
-            .on_hover_text("Voltar um frame (←)")
-            .clicked()
-        {
-            self.st.active_monitor = monitor;
-            self.stop();
-            self.st.step(-1);
-        }
-        if ui
-            .small_button(if playing { "⏸" } else { "▶" })
-            .on_hover_text("Tocar/pausar (Espaço)")
-            .clicked()
-        {
-            self.st.active_monitor = monitor;
-            self.toggle_play();
-        }
-        if ui
-            .small_button("⏵")
-            .on_hover_text("Avançar um frame (→)")
-            .clicked()
-        {
-            self.st.active_monitor = monitor;
-            self.stop();
-            self.st.step(1);
-        }
-        if ui.small_button("⏭").on_hover_text("Fim (End)").clicked() {
-            self.st.active_monitor = monitor;
-            self.go_to_end();
-        }
-        let _ = Playback::Stopped;
+            },
+        );
+        let right = Rect::from_min_max(pos2(center.right() + 4.0, r.top()), r.max - vec2(8.0, 0.0));
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(right)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
+                extra(self, ui);
+            },
+        );
+        ui.advance_cursor_after_rect(Rect::from_min_max(ui.max_rect().min, r.max));
     }
 }

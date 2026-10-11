@@ -2,13 +2,15 @@
 
 use std::path::PathBuf;
 
-use egui::{Color32, RichText};
-use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
+use egui::Color32;
+use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 
 use crate::config;
+use crate::icons::{self, Icon};
 use crate::keymap::Action;
 use crate::panels::{DragPayload, Panel};
-use crate::state::{AppState, Tool};
+use crate::state::AppState;
+use crate::theme;
 use crate::workspace::{Pending, Workspace};
 
 pub fn default_layout() -> DockState<Panel> {
@@ -67,11 +69,7 @@ pub struct PawCutApp {
 impl PawCutApp {
     pub fn new(cc: &eframe::CreationContext<'_>, args: Vec<PathBuf>) -> Self {
         let ctx = &cc.egui_ctx;
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = Color32::from_gray(27);
-        visuals.window_fill = Color32::from_gray(32);
-        visuals.selection.bg_fill = Color32::from_rgb(200, 120, 30);
-        ctx.set_visuals(visuals);
+        crate::theme::apply(ctx);
         let mut ws = Workspace::new(
             ctx,
             AppState::new(pawcut_core::Project::new(Default::default())),
@@ -207,46 +205,175 @@ impl PawCutApp {
         });
     }
 
-    fn page_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let _ =
-                ui.selectable_label(self.ws.deliver.is_none(), RichText::new("✂ Edit").strong());
-            if ui
-                .selectable_label(
-                    self.ws.deliver.is_some(),
-                    RichText::new("🚀 Deliver").strong(),
-                )
-                .clicked()
-            {
-                let running = self.ws.deliver.as_ref().is_some_and(|d| d.job.is_some());
-                if running {
-                    // Exportação em andamento: a janela fica aberta (feche pelo X dela para cancelar).
-                } else if self.ws.deliver.is_some() {
-                    self.ws.deliver = None
-                } else {
-                    self.ws.open_deliver()
+    fn toggle_panel(&mut self, panel: Panel) {
+        match self.dock.find_tab(&panel) {
+            Some(path) => {
+                self.dock.remove_tab(path);
+            }
+            None => self.dock.push_to_first_leaf(panel),
+        }
+    }
+
+    /// Barra de interface do Resolve: liga/desliga painéis e mostra o nome do projeto.
+    fn interface_bar(&mut self, ui: &mut egui::Ui) {
+        let rect = ui.max_rect();
+        ui.horizontal_centered(|ui| {
+            for (panel, icon, label) in [
+                (Panel::MediaPool, Icon::MediaPool, "Media Pool"),
+                (Panel::Effects, Icon::Effects, "Effects"),
+            ] {
+                let on = self.dock.find_tab(&panel).is_some();
+                if icons::button(ui, icon, 15.0, on, label).clicked() {
+                    self.toggle_panel(panel);
                 }
+                ui.label(egui::RichText::new(label).size(11.5).color(if on {
+                    theme::TEXT
+                } else {
+                    theme::TEXT_DIM
+                }));
+                ui.add_space(10.0);
             }
-            ui.separator();
-            let tool = match self.ws.st.tool {
-                Tool::Selection => "Seleção",
-                Tool::Blade => "Lâmina",
-            };
-            ui.label(RichText::new(format!("Ferramenta: {tool}")).weak());
-            if let Some(msg) = &self.ws.st.status {
-                ui.separator();
-                ui.label(RichText::new(msg).color(Color32::from_rgb(230, 200, 120)));
-            }
-            if !self
-                .ws
-                .audio
-                .has_device
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                ui.separator();
-                ui.label(RichText::new("sem saída de áudio").weak());
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let on = self.dock.find_tab(&Panel::Inspector).is_some();
+                ui.label(egui::RichText::new("Inspector").size(11.5).color(if on {
+                    theme::TEXT
+                } else {
+                    theme::TEXT_DIM
+                }));
+                if icons::button(ui, Icon::Inspector, 15.0, on, "Inspector").clicked() {
+                    self.toggle_panel(Panel::Inspector);
+                }
+            });
         });
+        let title = self.ws.st.title().replace(" — PawCut", "");
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            title,
+            theme::text(13.0),
+            theme::TEXT,
+        );
+    }
+
+    /// Barra de páginas do Resolve (embaixo, centralizada) e a linha de status.
+    fn page_bar(&mut self, ui: &mut egui::Ui) {
+        let rect = ui.max_rect();
+        ui.painter().text(
+            rect.left_center() + egui::vec2(12.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            "PawCut",
+            theme::text(14.0),
+            theme::TEXT_DIM,
+        );
+        let mut status = String::new();
+        if let Some(msg) = &self.ws.st.status {
+            status = msg.clone();
+        }
+        if !self
+            .ws
+            .audio
+            .has_device
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            status = format!("{status}  ·  sem saída de áudio");
+        }
+        ui.painter().text(
+            rect.right_center() - egui::vec2(12.0, 0.0),
+            egui::Align2::RIGHT_CENTER,
+            status,
+            theme::text(11.5),
+            Color32::from_rgb(230, 200, 130),
+        );
+
+        let pages = egui::Rect::from_center_size(rect.center(), egui::vec2(170.0, rect.height()));
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(pages)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                let deliver_open = self.ws.deliver.is_some();
+                for (icon, label, is_deliver) in [
+                    (Icon::EditPage, "Edit", false),
+                    (Icon::DeliverPage, "Deliver", true),
+                ] {
+                    let on = deliver_open == is_deliver;
+                    let (r, resp) = ui
+                        .allocate_exact_size(egui::vec2(80.0, rect.height()), egui::Sense::click());
+                    if resp.hovered() {
+                        ui.painter()
+                            .rect_filled(r.shrink(2.0), 4.0, theme::BAR_LIGHT);
+                    }
+                    let color = if on { Color32::WHITE } else { theme::TEXT_DIM };
+                    icons::paint(
+                        ui.painter(),
+                        egui::Rect::from_center_size(
+                            r.center() - egui::vec2(0.0, 7.0),
+                            egui::vec2(18.0, 18.0),
+                        ),
+                        icon,
+                        if on { theme::ACCENT } else { color },
+                    );
+                    ui.painter().text(
+                        r.center() + egui::vec2(0.0, 12.0),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        theme::text(10.5),
+                        color,
+                    );
+                    if resp.clicked() && !on {
+                        if is_deliver {
+                            self.ws.open_deliver();
+                        } else if !self.ws.deliver.as_ref().is_some_and(|d| d.job.is_some()) {
+                            // Exportação em andamento continua visível até terminar ou ser cancelada.
+                            self.ws.deliver = None;
+                        }
+                    }
+                }
+            },
+        );
+    }
+
+    /// Aviso por cima de tudo enquanto arquivos do sistema são arrastados sobre a janela.
+    fn file_drop_overlay(&self, ctx: &egui::Context) {
+        let hovering = ctx.input(|i| i.raw.hovered_files.len());
+        if hovering == 0 {
+            return;
+        }
+        let screen = ctx.content_rect();
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("file-drop"),
+        ));
+        painter.rect_filled(screen, 0.0, Color32::from_black_alpha(150));
+        let card = egui::Rect::from_center_size(screen.center(), egui::vec2(420.0, 120.0));
+        painter.rect_filled(card, 8.0, theme::BAR);
+        painter.rect_stroke(
+            card,
+            8.0,
+            egui::Stroke::new(2.0, theme::ACCENT),
+            egui::StrokeKind::Inside,
+        );
+        icons::paint(
+            &painter,
+            egui::Rect::from_center_size(
+                card.center() - egui::vec2(0.0, 22.0),
+                egui::vec2(30.0, 30.0),
+            ),
+            Icon::Import,
+            theme::ACCENT,
+        );
+        let text = if hovering == 1 {
+            "Solte para importar no Media Pool".to_string()
+        } else {
+            format!("Solte para importar {hovering} arquivos")
+        };
+        painter.text(
+            card.center() + egui::vec2(0.0, 22.0),
+            egui::Align2::CENTER_CENTER,
+            text,
+            theme::text(15.0),
+            Color32::WHITE,
+        );
     }
 
     fn handle_close(&mut self, ctx: &egui::Context) {
@@ -315,10 +442,24 @@ impl eframe::App for PawCutApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.ws.begin_frame(&ctx);
-        egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
-        egui::Panel::bottom("pages").show(ui, |ui| self.page_bar(ui));
+        let bar = |fill| {
+            egui::Frame::new()
+                .fill(fill)
+                .inner_margin(egui::Margin::symmetric(6, 0))
+        };
+        egui::Panel::top("menu")
+            .frame(bar(theme::BG_DARK))
+            .show(ui, |ui| self.menu_bar(ui));
+        egui::Panel::top("interface")
+            .exact_size(34.0)
+            .frame(bar(theme::BAR))
+            .show(ui, |ui| self.interface_bar(ui));
+        egui::Panel::bottom("pages")
+            .exact_size(44.0)
+            .frame(bar(theme::BAR))
+            .show(ui, |ui| self.page_bar(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            let style = Style::from_egui(ui.style().as_ref());
+            let style = theme::dock_style(ui.style().as_ref());
             DockArea::new(&mut self.dock)
                 .style(style)
                 .show_leaf_collapse_buttons(false)
@@ -326,6 +467,7 @@ impl eframe::App for PawCutApp {
         });
         self.ws.dialogs_ui(&ctx);
 
+        self.file_drop_overlay(&ctx);
         // Rótulo que acompanha o ponteiro ao arrastar do Media Pool / Toolbox.
         if let Some(payload) = egui::DragAndDrop::payload::<DragPayload>(&ctx)
             && let Some(pos) = ctx.pointer_hover_pos()

@@ -171,10 +171,7 @@ fn keyboard_shortcut_blades_at_playhead() {
 #[test]
 fn lock_button_locks_the_track() {
     let mut h = harness(with_solid);
-    let row = h.state().tl_point(TrackKind::Video, 0, 0.0);
-    let area = h.state().tl_area;
-    // Botão "L" do cabeçalho: canto inferior esquerdo da linha de V1.
-    let lock = egui::pos2(area.left() + 17.0, row.y + 23.0 - 12.0);
+    let lock = h.state().tl_lock_button(TrackKind::Video, 0);
     click(&mut h, lock);
     assert!(h.state().st.project().video_tracks[0].locked);
 }
@@ -361,4 +358,27 @@ mod fixes {
         assert!(ws.playback.is_playing(), "parou logo no começo");
         assert!(ws.st.source.playhead >= 1);
     }
+}
+
+#[test]
+fn wheel_over_track_headers_scrolls_tracks_vertically() {
+    let mut h = harness(|st| {
+        for i in 0..10 {
+            st.drop_generator(Generator::SolidColor, i, 0);
+        }
+    });
+    let area = h.state().tl_area;
+    let over_headers = egui::pos2(area.left() + 40.0, area.center().y);
+    h.hover_at(over_headers);
+    h.step();
+    h.event(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -120.0),
+        modifiers: Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+    });
+    h.run_steps(8);
+    assert!(h.state().tl.v_scroll > 0.0, "a rolagem vertical não andou");
+    let scroll_before = h.state().tl.scroll;
+    assert_eq!(scroll_before, 0.0, "rolar nos cabeçalhos não mexe no tempo");
 }
