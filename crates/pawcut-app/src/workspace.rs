@@ -75,6 +75,8 @@ pub struct Workspace {
     pub project_rev: u64,
     pub tl: TimelineView,
     pub tl_width: f32,
+    /// Área da última timeline desenhada (usada nos testes de interface).
+    pub tl_area: egui::Rect,
     pub playback: Playback,
     pub deliver: Option<DeliverDialog>,
     pub prefs_open: bool,
@@ -109,6 +111,7 @@ impl Workspace {
             project_rev,
             tl: TimelineView::default(),
             tl_width: 1200.0,
+            tl_area: egui::Rect::NOTHING,
             playback: Playback::Stopped,
             deliver: None,
             prefs_open: false,

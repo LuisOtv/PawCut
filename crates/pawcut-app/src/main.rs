@@ -6,6 +6,8 @@ mod engine;
 mod keymap;
 mod panels;
 mod state;
+#[cfg(test)]
+mod ui_tests;
 mod workspace;
 
 use std::path::PathBuf;

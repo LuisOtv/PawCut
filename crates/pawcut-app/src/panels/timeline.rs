@@ -231,6 +231,7 @@ impl Workspace {
         self.timeline_toolbar(ui);
         let area = ui.available_rect_before_wrap();
         self.tl_width = area.width();
+        self.tl_area = area;
         let layout = Layout::new(&p, area);
         let painter = ui.painter_at(area);
         painter.rect_filled(area, 0.0, Color32::from_gray(22));
@@ -290,8 +291,11 @@ impl Workspace {
             let _ = clip;
         }
 
+        // O drag só começa depois que o ponteiro anda alguns pixels: a pegada é onde o botão desceu.
         if lanes_resp.drag_started()
-            && let Some(pos) = lanes_resp.interact_pointer_pos()
+            && let Some(pos) = ui
+                .input(|i| i.pointer.press_origin())
+                .or(lanes_resp.interact_pointer_pos())
         {
             let grab = self.frame_at(pos.x, layout.left).round() as Frame;
             match (self.st.tool, self.hit_clip(&p, &layout, pos)) {
@@ -1032,6 +1036,14 @@ impl Workspace {
             }
             x += 1.0;
         }
+    }
+
+    /// Ponto na linha da faixa (`kind`, `index`) no `frame`, na última timeline desenhada.
+    #[cfg(test)]
+    pub fn tl_point(&self, kind: TrackKind, index: usize, frame: f32) -> Pos2 {
+        let layout = Layout::new(&self.project_arc, self.tl_area);
+        let r = layout.rect_of(Row { kind, index }).expect("linha existe");
+        pos2(self.x_of(frame, layout.left), r.center().y)
     }
 
     fn payload_len(&self, p: &Project, payload: DragPayload) -> Frame {
