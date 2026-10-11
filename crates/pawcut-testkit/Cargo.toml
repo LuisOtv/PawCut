@@ -1,0 +1,8 @@
+[package]
+name = "pawcut-testkit"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true

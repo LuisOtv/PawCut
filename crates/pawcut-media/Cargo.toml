@@ -1,0 +1,15 @@
+[package]
+name = "pawcut-media"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pawcut-core.workspace = true
+ffmpeg-next.workspace = true
+image.workspace = true
+lru.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+pawcut-testkit.workspace = true
+tempfile.workspace = true
