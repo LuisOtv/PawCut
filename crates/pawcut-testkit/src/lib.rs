@@ -170,3 +170,79 @@ pub fn pixel(buf: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
     let i = ((y * w + x) * 4) as usize;
     [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
 }
+
+/// Mesma rampa de cinza do `gray_ramp_video`, em MPEG-TS (começa em 1,4 s), GOP de 15 frames.
+pub fn gray_ramp_ts(dir: &Path, secs: u32) -> PathBuf {
+    let out = dir.join("ramp.ts");
+    let video = format!(
+        "nullsrc=s=64x36:r=30:d={secs},format=yuv420p,geq=lum='16+7*mod(N\\,30)':cb=128:cr=128"
+    );
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        &video,
+        "-c:v",
+        "libx264",
+        "-qp",
+        "0",
+        "-g",
+        "15",
+        "-pix_fmt",
+        "yuv420p",
+        "-f",
+        "mpegts",
+        out.to_str().unwrap(),
+    ]);
+    out
+}
+
+/// Vídeo 64x36 (metade esquerda vermelha, direita azul) marcado para girar 90° na exibição,
+/// como um vídeo vertical de celular.
+pub fn rotated_video(dir: &Path) -> PathBuf {
+    let base = dir.join("base.mp4");
+    let out = dir.join("rotacionado.mp4");
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=red:s=64x36:r=30:d=1,drawbox=x=32:y=0:w=32:h=36:color=blue:t=fill",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        base.to_str().unwrap(),
+    ]);
+    ffmpeg(&[
+        "-display_rotation",
+        "90",
+        "-i",
+        base.to_str().unwrap(),
+        "-c",
+        "copy",
+        out.to_str().unwrap(),
+    ]);
+    out
+}
+
+/// WebM "ao vivo" (como os gravadores de navegador): sem duração no container.
+pub fn live_webm(dir: &Path, secs: u32) -> PathBuf {
+    let out = dir.join("gravacao.webm");
+    let src = format!("color=c=blue:s=64x36:r=30:d={secs}");
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        &src,
+        "-c:v",
+        "libvpx",
+        "-b:v",
+        "200k",
+        "-live",
+        "1",
+        "-f",
+        "webm",
+        out.to_str().unwrap(),
+    ]);
+    out
+}

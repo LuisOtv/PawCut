@@ -3,6 +3,7 @@
 mod audio;
 mod error;
 mod library;
+mod orient;
 mod probe;
 mod video;
 

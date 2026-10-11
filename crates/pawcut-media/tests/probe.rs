@@ -55,3 +55,18 @@ fn unsupported_and_missing_files_are_errors() {
     assert!(matches!(missing, MediaError::Ffmpeg { .. }));
     assert!(missing.to_string().contains("sumiu.mp4"));
 }
+
+#[test]
+fn rotated_video_reports_display_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = probe(&kit::rotated_video(dir.path()), FPS).unwrap();
+    assert_eq!((info.width, info.height), (36, 64));
+}
+
+#[test]
+fn live_webm_without_container_duration_gets_real_length() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = probe(&kit::live_webm(dir.path(), 2), FPS).unwrap();
+    let d = info.duration.unwrap();
+    assert!((58..=62).contains(&d), "duração {d}");
+}

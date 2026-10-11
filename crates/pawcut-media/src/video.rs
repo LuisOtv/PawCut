@@ -25,6 +25,8 @@ pub struct VideoSource {
     start: i64,
     fps: f64,
     size: (u32, u32),
+    /// Graus (horário) para girar cada frame e exibir em pé.
+    rotation: u32,
     /// Último frame entregue.
     last: Option<(i64, Arc<RgbaImage>)>,
     /// Frame já decodificado que passou do último pedido.
@@ -69,17 +71,21 @@ impl VideoSource {
             .into_iter()
             .find(|r| valid(*r))
             .map_or(30.0, f64::from);
+        let rotation = crate::orient::rotation_of(&stream);
         let decoder = ff::codec::context::Context::from_parameters(stream.parameters())
             .and_then(|c| c.decoder().video())
             .map_err(err)?;
-        let size = fit_within((decoder.width(), decoder.height()), fit);
+        let shown = crate::orient::displayed((decoder.width(), decoder.height()), rotation);
+        let size = fit_within(shown, fit);
+        // O scaler trabalha na orientação gravada; o giro vem depois.
+        let scaled = crate::orient::displayed(size, rotation);
         let scaler = ff::software::scaling::Context::get(
             decoder.format(),
             decoder.width(),
             decoder.height(),
             ff::format::Pixel::RGBA,
-            size.0,
-            size.1,
+            scaled.0,
+            scaled.1,
             ff::software::scaling::Flags::BILINEAR,
         )
         .map_err(err)?;
@@ -93,6 +99,7 @@ impl VideoSource {
             start,
             fps,
             size,
+            rotation,
             last: None,
             ahead: None,
             draining: false,
@@ -135,7 +142,7 @@ impl VideoSource {
         let backward = self.last.as_ref().is_some_and(|l| index < l.0);
         let too_far = pos.map_or(index > far, |p| index > p + far);
         if backward || too_far {
-            self.seek(index)?;
+            self.seek_before(index)?;
         }
 
         let mut best: Option<(i64, ff::frame::Video)> = None;
@@ -180,8 +187,31 @@ impl VideoSource {
         }
     }
 
+    /// Seek que garante parar antes de `index`: alguns formatos (MPEG-TS) caem depois do alvo,
+    /// então recua cada vez mais até o primeiro frame decodificado não passar dele.
+    fn seek_before(&mut self, index: i64) -> Result<(), MediaError> {
+        let mut back = 0i64;
+        loop {
+            let target = index - back;
+            self.seek(target)?;
+            let first = self.decode_next()?;
+            match first {
+                // Passou do alvo, ou caiu no fim do arquivo: recua mais.
+                Some((i, _)) if i > index && target > 0 => {
+                    back = (back * 2).max(self.fps.ceil() as i64)
+                }
+                None if target > 0 => back = (back * 2).max(self.fps.ceil() as i64),
+                _ => {
+                    self.eof = first.is_none();
+                    self.ahead = first;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     fn seek(&mut self, index: i64) -> Result<(), MediaError> {
-        let seconds = index as f64 / self.fps + self.start as f64 * self.time_base;
+        let seconds = index.max(0) as f64 / self.fps + self.start as f64 * self.time_base;
         let ts = (seconds * 1_000_000.0) as i64;
         self.input
             .seek(ts, ..ts)
@@ -232,13 +262,16 @@ impl VideoSource {
             .0
             .run(frame, &mut out)
             .map_err(|e| MediaError::ffmpeg(&self.path, e))?;
-        let (w, h) = (self.size.0 as usize, self.size.1 as usize);
+        let (w, h) = crate::orient::displayed(self.size, self.rotation);
+        let (w, h) = (w as usize, h as usize);
         let stride = out.stride(0);
         let data = out.data(0);
         let mut buf = Vec::with_capacity(w * h * 4);
         for row in 0..h {
             buf.extend_from_slice(&data[row * stride..row * stride + w * 4]);
         }
-        Ok(RgbaImage::from_raw(w as u32, h as u32, buf).expect("buffer do tamanho da imagem"))
+        let img =
+            RgbaImage::from_raw(w as u32, h as u32, buf).expect("buffer do tamanho da imagem");
+        Ok(crate::orient::rotate(img, self.rotation))
     }
 }

@@ -57,3 +57,32 @@ fn can_move_to_another_thread() {
     fn assert_send<T: Send>() {}
     assert_send::<VideoSource>();
 }
+
+#[test]
+fn mpeg_ts_seek_lands_on_the_requested_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut src = VideoSource::open(&kit::gray_ramp_ts(dir.path(), 4), (64, 36)).unwrap();
+    for n in [5, 45, 100, 20, 7, 110] {
+        assert_frame(&mut src, n, n);
+    }
+}
+
+#[test]
+fn rotated_phone_video_comes_out_upright() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = kit::rotated_video(dir.path());
+    let mut src = VideoSource::open(&path, (100, 100)).unwrap();
+    assert_eq!(src.size(), (36, 64));
+    let ours = src.frame(3).unwrap();
+    let theirs = kit::grab_frame(&path, 0.1, 36, 64);
+    for (x, y) in [(18, 8), (18, 56)] {
+        let a = ours.get_pixel(x, y).0;
+        let b = kit::pixel(&theirs, 36, x, y);
+        let dominant = |p: [u8; 4]| if p[0] > p[2] { "vermelho" } else { "azul" };
+        assert_eq!(
+            dominant(a),
+            dominant(b),
+            "pixel ({x},{y}): nosso {a:?}, ffmpeg {b:?}"
+        );
+    }
+}

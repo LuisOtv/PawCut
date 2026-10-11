@@ -22,14 +22,46 @@ pub fn default_cache_dir() -> Option<PathBuf> {
     Some(base.join("pawcut"))
 }
 
-/// Carrega uma imagem em RGBA, reduzida para caber em `fit` (nunca aumentada).
+fn image_decoder(path: &Path) -> Result<impl image::ImageDecoder, MediaError> {
+    let err = |source| MediaError::Image {
+        path: path.to_path_buf(),
+        source,
+    };
+    image::ImageReader::open(path)
+        .map_err(|e| err(image::ImageError::IoError(e)))?
+        .with_guessed_format()
+        .map_err(|e| err(image::ImageError::IoError(e)))?
+        .into_decoder()
+        .map_err(err)
+}
+
+/// Tamanho de exibição da imagem (já considerando a orientação EXIF de fotos de celular).
+pub(crate) fn image_size(path: &Path) -> Result<(u32, u32), MediaError> {
+    use image::ImageDecoder;
+    use image::metadata::Orientation as O;
+    let mut decoder = image_decoder(path)?;
+    let (w, h) = decoder.dimensions();
+    let swap = matches!(
+        decoder.orientation().unwrap_or(O::NoTransforms),
+        O::Rotate90 | O::Rotate270 | O::Rotate90FlipH | O::Rotate270FlipH
+    );
+    Ok(if swap { (h, w) } else { (w, h) })
+}
+
+/// Carrega uma imagem em RGBA (em pé, conforme o EXIF), reduzida para caber em `fit` (nunca aumentada).
 pub fn load_image(path: &Path, fit: (u32, u32)) -> Result<RgbaImage, MediaError> {
-    let img = image::open(path)
-        .map_err(|source| MediaError::Image {
+    use image::ImageDecoder;
+    let mut decoder = image_decoder(path)?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img =
+        image::DynamicImage::from_decoder(decoder).map_err(|source| MediaError::Image {
             path: path.to_path_buf(),
             source,
-        })?
-        .to_rgba8();
+        })?;
+    img.apply_orientation(orientation);
+    let img = img.to_rgba8();
     let (w, h) = fit_within(img.dimensions(), fit);
     if (w, h) == img.dimensions() {
         return Ok(img);
@@ -112,8 +144,8 @@ impl MediaLibrary {
         if let Some(img) = self.frames.get(&key) {
             return Ok(img.clone());
         }
-        let decoded = src.frame(index);
-        let img = self.remember_failure(path, decoded)?;
+        // Um frame ruim não condena o arquivo inteiro: só falhar ao abrir marca Media Offline.
+        let img = src.frame(index)?;
         self.frames.put(key, img.clone());
         Ok(img)
     }
