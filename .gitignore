@@ -1,0 +1,3 @@
+/target
+*.mp4
+!tests/fixtures/*.mp4
