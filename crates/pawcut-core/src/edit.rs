@@ -161,6 +161,12 @@ pub enum Edit {
         at: Frame,
         clips: Vec<(TrackId, Clip)>,
     },
+    /// Tira o intervalo `[start, end)` das faixas e puxa o resto (ex.: remover silêncios).
+    RippleDeleteRange {
+        tracks: Vec<TrackId>,
+        start: Frame,
+        end: Frame,
+    },
     /// Tira todos os keyframes do parâmetro (volta ao valor fixo).
     ClearKeyframes {
         clip: ClipId,
@@ -297,6 +303,9 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
         }
         Edit::SetDissolve { clip, frames } => set_dissolve(p, clip, frames),
         Edit::Paste { at, clips } => paste(p, at, clips),
+        Edit::RippleDeleteRange { tracks, start, end } => {
+            ripple_delete_range(p, tracks, start, end)
+        }
         Edit::RippleTrimToPlayhead { clips, edge, at } => ripple_trim_to(p, clips, edge, at),
         Edit::SetKeyframe {
             clip,
@@ -948,4 +957,43 @@ fn paste(p: &mut Project, at: Frame, clips: Vec<(TrackId, Clip)>) -> Result<Outc
         insert_sorted(track, c);
     }
     Ok(out)
+}
+
+fn ripple_delete_range(
+    p: &mut Project,
+    tracks: Vec<TrackId>,
+    start: Frame,
+    end: Frame,
+) -> Result<Outcome, EditError> {
+    if start >= end || start < 0 {
+        return Err(EditError::InvalidValue("intervalo inválido"));
+    }
+    for t in &tracks {
+        unlocked_track(p, *t)?;
+    }
+    let mut links = HashMap::new();
+    for tid in tracks {
+        let (track, ids) = p.track_and_ids(tid).ok_or(EditError::TrackNotFound(tid))?;
+        // Corta nas duas pontas mantendo pares ligados nas metades novas.
+        for at in [end, start] {
+            if let Some(i) = track
+                .clips
+                .iter()
+                .position(|c| c.start < at && at < c.end())
+            {
+                let clip = track.clips.remove(i);
+                let (left, mut right) = split_clip(&clip, at, ClipId(ids.fresh()));
+                right.link = relink(clip.link, &mut links, ids);
+                track.clips.insert(i, left);
+                track.clips.insert(i + 1, right);
+            }
+        }
+        track
+            .clips
+            .retain(|c| !(c.start >= start && c.end() <= end));
+        for c in track.clips.iter_mut().filter(|c| c.start >= end) {
+            c.start -= end - start;
+        }
+    }
+    Ok(Outcome::default())
 }

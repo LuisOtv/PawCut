@@ -261,3 +261,22 @@ fn paste_places_full_copies_with_new_ids_and_links() {
     assert!(nv.link.is_some() && nv.link == na.link && nv.link != clip(&ed, vc).link);
     assert_ne!(nv.id, vc);
 }
+
+#[test]
+fn ripple_delete_range_cuts_time_out_of_several_tracks() {
+    let mut ed = new_editor();
+    let m = add_video(&mut ed, 300, true);
+    place_av(&mut ed, m, 0, 0.0, 100);
+    let (v1, a1) = (v(&ed, 0), a(&ed, 0));
+    ed.apply(Edit::RippleDeleteRange {
+        tracks: vec![v1, a1],
+        start: 30,
+        end: 50,
+    })
+    .unwrap();
+    assert_eq!(spans(&ed, v1), vec![(0, 30), (30, 80)]);
+    assert_eq!(spans(&ed, a1), vec![(0, 30), (30, 80)]);
+    let right = &ed.project().video_tracks[0].clips[1];
+    assert_eq!(right.source_start, 50.0);
+    assert_eq!(right.link, ed.project().audio_tracks[0].clips[1].link);
+}

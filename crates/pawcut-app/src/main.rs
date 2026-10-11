@@ -1,5 +1,6 @@
 //! PawCut: editor de vídeo simples, com cara de página Edit do DaVinci Resolve.
 
+mod analysis;
 mod app;
 mod config;
 mod engine;

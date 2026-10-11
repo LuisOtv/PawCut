@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -146,6 +146,8 @@ struct AudioState {
 
 /// Reprodução de áudio pelo PulseAudio. A posição tocada é o relógio mestre do preview.
 pub struct AudioPlayer {
+    /// Pico recente de cada canal (bits de f32), para os medidores.
+    levels: Arc<[AtomicU32; 2]>,
     state: Arc<Mutex<AudioState>>,
     playing: Arc<AtomicBool>,
     position: Arc<AtomicI64>,
@@ -168,6 +170,8 @@ impl AudioPlayer {
         let position = Arc::new(AtomicI64::new(0));
         let generation = Arc::new(AtomicU64::new(0));
         let has_device = Arc::new(AtomicBool::new(false));
+        let levels = Arc::new([AtomicU32::new(0), AtomicU32::new(0)]);
+        let lv = levels.clone();
         let (st, pl, pos, dev) = (
             state.clone(),
             playing.clone(),
@@ -176,9 +180,10 @@ impl AudioPlayer {
         );
         thread::Builder::new()
             .name("pawcut-audio".into())
-            .spawn(move || audio_loop(sample_rate, st, pl, pos, dev))
+            .spawn(move || audio_loop(sample_rate, st, pl, pos, dev, lv))
             .expect("não foi possível criar a thread de áudio");
         Self {
+            levels,
             state,
             playing,
             position,
@@ -221,6 +226,14 @@ impl AudioPlayer {
         }
     }
 
+    /// Pico recente (0..1) de L e R; zera quando para de tocar.
+    pub fn levels(&self) -> [f32; 2] {
+        [
+            f32::from_bits(self.levels[0].load(Ordering::Relaxed)),
+            f32::from_bits(self.levels[1].load(Ordering::Relaxed)),
+        ]
+    }
+
     pub fn stop(&self) {
         self.playing.store(false, Ordering::SeqCst);
     }
@@ -237,6 +250,7 @@ fn audio_loop(
     playing: Arc<AtomicBool>,
     position: Arc<AtomicI64>,
     has_device: Arc<AtomicBool>,
+    levels: Arc<[AtomicU32; 2]>,
 ) {
     use libpulse_binding::sample::{Format, Spec};
     use libpulse_binding::stream::Direction;
@@ -286,6 +300,9 @@ fn audio_loop(
             }
         }
         if !playing.load(Ordering::SeqCst) {
+            for l in levels.iter() {
+                l.store(0f32.to_bits(), Ordering::Relaxed);
+            }
             if current_gen != u64::MAX {
                 if let Some(d) = &device {
                     let _ = d.flush();
@@ -311,6 +328,16 @@ fn audio_loop(
             pos = start;
         }
         let samples = renderer.mix_audio(&project, pos, AUDIO_CHUNK);
+        for (ch, l) in levels.iter().enumerate() {
+            let peak = samples
+                .iter()
+                .skip(ch)
+                .step_by(2)
+                .fold(0.0f32, |m, v| m.max(v.abs()));
+            // Sobe na hora, desce devagar (como um medidor de verdade).
+            let old = f32::from_bits(l.load(Ordering::Relaxed));
+            l.store(peak.max(old * 0.85).to_bits(), Ordering::Relaxed);
+        }
         pos += AUDIO_CHUNK as i64;
         match &device {
             Some(d) => {

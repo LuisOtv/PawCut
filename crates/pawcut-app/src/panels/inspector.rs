@@ -483,6 +483,44 @@ impl Workspace {
                             -60.0..=24.0,
                             " dB",
                         );
+                        ui.label("");
+                        if ui
+                            .button("Normalizar")
+                            .on_hover_text("Pico em −1 dB")
+                            .clicked()
+                        {
+                            self.st.normalize_selection();
+                        }
+                        ui.end_row();
+                    });
+                    section(ui, "Remover silêncios", |ui| {
+                        ui.label("Limiar");
+                        ui.add(
+                            DragValue::new(&mut self.silence_threshold)
+                                .range(-70.0..=-10.0)
+                                .suffix(" dB"),
+                        );
+                        ui.end_row();
+                        ui.label("Mínimo");
+                        ui.add(
+                            DragValue::new(&mut self.silence_min)
+                                .range(0.1..=5.0)
+                                .speed(0.02)
+                                .suffix(" s"),
+                        );
+                        ui.end_row();
+                        ui.label("");
+                        if ui
+                            .button("Remover silêncios")
+                            .on_hover_text(
+                                "Corta as pausas e fecha os buracos (vídeo ligado junto)",
+                            )
+                            .clicked()
+                        {
+                            let (t, m) = (self.silence_threshold, self.silence_min);
+                            self.st.remove_silences(t, m);
+                        }
+                        ui.end_row();
                     });
                 }
                 if clip.link.is_some() {

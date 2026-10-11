@@ -246,3 +246,18 @@ pub fn live_webm(dir: &Path, secs: u32) -> PathBuf {
     ]);
     out
 }
+
+/// Fala simulada: 1 s de tom, 1 s de silêncio, 1 s de tom (WAV 48 kHz).
+pub fn speech_with_pause(dir: &Path) -> PathBuf {
+    let out = dir.join("fala.wav");
+    ffmpeg(&[
+        "-filter_complex",
+        "sine=frequency=300:duration=1:sample_rate=48000[a];anullsrc=r=48000:cl=mono,atrim=0:1[b];sine=frequency=300:duration=1:sample_rate=48000[c];[a][b][c]concat=n=3:v=0:a=1",
+        "-ac",
+        "2",
+        "-c:a",
+        "pcm_f32le",
+        out.to_str().unwrap(),
+    ]);
+    out
+}

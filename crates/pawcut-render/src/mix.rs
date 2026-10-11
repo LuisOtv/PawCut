@@ -8,10 +8,7 @@ type Window = Option<(Frame, Frame)>;
 
 /// Trecho em que o clipe soa, já contando os dissolves: `(início, fim)` em frames,
 /// mais a janela do dissolve de entrada e a do de saída (do clipe seguinte).
-fn audible(
-    clips: &[Clip],
-    i: usize,
-) -> (Frame, Frame, Window, Window) {
+fn audible(clips: &[Clip], i: usize) -> (Frame, Frame, Window, Window) {
     let c = &clips[i];
     let into = c
         .dissolve_window()

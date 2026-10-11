@@ -222,6 +222,34 @@ impl Workspace {
             resp.on_hover_cursor(egui::CursorIcon::Move);
         }
 
+        // Medidores L/R (dBFS) na lateral direita da imagem, como no Resolve.
+        let levels = self.audio.levels();
+        let meter = Rect::from_min_max(
+            pos2(r.image.right() - 22.0, r.image.top() + 8.0),
+            pos2(r.image.right() - 6.0, r.image.bottom() - 8.0),
+        );
+        ui.painter()
+            .rect_filled(meter, 2.0, Color32::from_rgb(20, 20, 22));
+        for (i, level) in levels.iter().enumerate() {
+            let db = 20.0 * level.max(1e-5).log10();
+            let frac = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+            let col = Rect::from_min_max(
+                pos2(meter.left() + 2.0 + i as f32 * 7.0, meter.top() + 2.0),
+                pos2(meter.left() + 7.0 + i as f32 * 7.0, meter.bottom() - 2.0),
+            );
+            let lit = Rect::from_min_max(
+                pos2(col.left(), col.bottom() - col.height() * frac),
+                col.max,
+            );
+            let color = if db > -3.0 {
+                Color32::from_rgb(235, 70, 60)
+            } else if db > -12.0 {
+                Color32::from_rgb(235, 200, 70)
+            } else {
+                Color32::from_rgb(80, 200, 110)
+            };
+            ui.painter().rect_filled(lit, 0.0, color);
+        }
         let total = project.duration();
         if let Some(f) = self.scrub_bar(
             ui,

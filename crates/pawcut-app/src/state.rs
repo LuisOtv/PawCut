@@ -111,7 +111,7 @@ impl AppState {
             .map_or("Sem título".to_string(), |s| {
                 s.to_string_lossy().into_owned()
             });
-        format!("{}{name} — PawCut", if self.is_dirty() { "● " } else { "" })
+        format!("{}{name} — PawCut", if self.is_dirty() { "• " } else { "" })
     }
 
     pub fn say(&mut self, msg: impl Into<String>) {
@@ -586,6 +586,88 @@ impl AppState {
         self.editor.end_coalescing();
     }
 
+    /// Ajusta o volume dos clipes de áudio selecionados para o pico ficar em −1 dBFS.
+    pub fn normalize_selection(&mut self) {
+        let p = self.project().clone();
+        let mut done = 0;
+        for id in self.expanded(&self.selection.clone()) {
+            let Some((tid, _)) = p.locate(id) else {
+                continue;
+            };
+            if p.track(tid).is_none_or(|t| t.kind != TrackKind::Audio) {
+                continue;
+            }
+            let Some(clip) = p.clip(id) else { continue };
+            if let Some(gain) = crate::analysis::clip_peak(&p, clip)
+                .and_then(|peak| crate::analysis::normalize_gain(peak, -1.0))
+            {
+                let db = (clip.volume_db + gain).clamp(-96.0, 24.0);
+                self.apply_coalescing(
+                    Edit::SetClip {
+                        clip: id,
+                        change: ClipChange::VolumeDb(db),
+                    },
+                    "normalize",
+                );
+                done += 1;
+            }
+        }
+        self.editor.end_coalescing();
+        self.say(if done > 0 {
+            format!("{done} clipe(s) normalizado(s) para −1 dB de pico")
+        } else {
+            "Selecione clipes de áudio".into()
+        });
+    }
+
+    /// Corta os silêncios do clipe de áudio selecionado (e do vídeo ligado), fechando os buracos.
+    pub fn remove_silences(&mut self, threshold_db: f32, min_len: f64) {
+        let p = self.project().clone();
+        let Some(clip) = self
+            .expanded(&self.selection.clone())
+            .into_iter()
+            .filter_map(|id| p.clip(id).map(|c| (id, c)))
+            .find(|(id, _)| {
+                p.locate(*id)
+                    .and_then(|(t, _)| p.track(t))
+                    .is_some_and(|t| t.kind == TrackKind::Audio)
+            })
+            .map(|(_, c)| c.clone())
+        else {
+            self.say("Selecione um clipe com áudio");
+            return;
+        };
+        let runs = crate::analysis::clip_silences(&p, &clip, threshold_db, min_len, 0.12);
+        if runs.is_empty() {
+            self.say("Nenhum silêncio encontrado");
+            return;
+        }
+        let tracks: Vec<TrackId> = p
+            .expand_linked(&[clip.id])
+            .iter()
+            .filter_map(|c| p.locate(*c).map(|(t, _)| t))
+            .collect();
+        // Do fim para o começo, para os tempos ainda valerem depois de cada corte.
+        for (a, b) in runs.iter().rev() {
+            self.apply_coalescing(
+                Edit::RippleDeleteRange {
+                    tracks: tracks.clone(),
+                    start: *a,
+                    end: *b,
+                },
+                "silences",
+            );
+        }
+        self.editor.end_coalescing();
+        self.selection.clear();
+        let total: Frame = runs.iter().map(|(a, b)| b - a).sum();
+        let secs = p.settings.fps.frames_to_seconds(total);
+        self.say(format!(
+            "{} silêncio(s) removido(s), {secs:.1} s a menos",
+            runs.len()
+        ));
+    }
+
     // ---------- Source Viewer ----------
 
     pub fn source_length(&self) -> Option<Frame> {
@@ -924,7 +1006,7 @@ mod tests {
         let path = dir.path().join("p.pawcut");
         let mut s = state();
         s.drop_generator(Generator::SolidColor, 0, 0);
-        assert!(s.title().starts_with("● Sem título"));
+        assert!(s.title().starts_with("• Sem título"));
         s.save_to(&path).unwrap();
         assert!(!s.is_dirty());
         assert_eq!(s.title(), "p — PawCut");
@@ -991,5 +1073,23 @@ mod tests {
         s.set_playhead(140);
         s.add_dissolve();
         assert_eq!(s.project().video_tracks[0].clips[1].dissolve_in, 30);
+    }
+
+    #[test]
+    fn remove_silences_cuts_the_pause_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = pawcut_testkit::speech_with_pause(dir.path());
+        let mut s = state();
+        assert_eq!(s.import(&[wav]), 1);
+        let m = s.project().media[0].id;
+        s.drop_media(m, TrackKind::Audio, 0, 0);
+        let before = s.project().duration();
+        s.remove_silences(-40.0, 0.5);
+        let after = s.project().duration();
+        let removed = s.project().settings.fps.frames_to_seconds(before - after);
+        assert!((removed - 0.76).abs() < 0.1, "removeu {removed:.2} s");
+        assert_eq!(s.project().audio_tracks[0].clips.len(), 2);
+        s.undo();
+        assert_eq!(s.project().duration(), before, "um desfazer volta tudo");
     }
 }
