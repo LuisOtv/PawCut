@@ -41,6 +41,16 @@ pub enum Edge {
     Start,
     End,
 }
+/// Uma propriedade do Inspector.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClipChange {
+    Transform(Transform),
+    VolumeDb(f32),
+    FadeIn(Frame),
+    FadeOut(Frame),
+    /// Só para geradores (cor sólida/texto).
+    Source(ClipSource),
+}
 /// Uma alteração no projeto. Aplicada pelo `Editor`, que guarda o histórico.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Edit {
@@ -64,6 +74,10 @@ pub enum Edit {
     Trim { clips: Vec<ClipId>, edge: Edge, delta: Frame },
     /// Abre espaço em `at` em todas as faixas destravadas e coloca os itens (F9).
     Insert { at: Frame, items: Vec<Placement> },
+    SetClip { clip: ClipId, change: ClipChange },
+    SetSpeed { clips: Vec<ClipId>, speed: f64 },
+    Link { clips: Vec<ClipId> },
+    Unlink { clips: Vec<ClipId> },
 }
 
 /// O que a edição criou, para a interface selecionar.
@@ -128,6 +142,10 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
             }
             place(p, at, items)
         }
+        Edit::SetClip { clip, change } => set_clip(p, clip, change),
+        Edit::SetSpeed { clips, speed } => set_speed(p, clips, speed),
+        Edit::Link { clips } => set_link(p, clips, true),
+        Edit::Unlink { clips } => set_link(p, clips, false),
     }
 }
 
@@ -426,4 +444,91 @@ fn trim(p: &mut Project, clips: Vec<ClipId>, edge: Edge, delta: Frame) -> Result
 fn clamp_fades(c: &mut Clip) {
     c.fade_in = c.fade_in.clamp(0, c.duration);
     c.fade_out = c.fade_out.clamp(0, c.duration - c.fade_in);
+}
+
+fn set_clip(p: &mut Project, id: ClipId, change: ClipChange) -> Result<Outcome, EditError> {
+    locate_unlocked(p, id)?;
+    let c = p.clip_mut(id).expect("clipe validado acima");
+    match change {
+        ClipChange::Transform(t) => {
+            if !(t.scale.is_finite() && t.scale > 0.0) {
+                return Err(EditError::InvalidValue("a escala precisa ser maior que zero"));
+            }
+            if !(0.0..=1.0).contains(&t.opacity) {
+                return Err(EditError::InvalidValue("a opacidade vai de 0 a 1"));
+            }
+            if !(t.x.is_finite() && t.y.is_finite()) {
+                return Err(EditError::InvalidValue("posição inválida"));
+            }
+            c.transform = t;
+        }
+        ClipChange::VolumeDb(db) => {
+            if !(-96.0..=24.0).contains(&db) {
+                return Err(EditError::InvalidValue("o volume vai de -96 dB a +24 dB"));
+            }
+            c.volume_db = db;
+        }
+        ClipChange::FadeIn(f) => {
+            if f < 0 {
+                return Err(EditError::InvalidValue("fade negativo"));
+            }
+            c.fade_in = f.min(c.duration - c.fade_out);
+        }
+        ClipChange::FadeOut(f) => {
+            if f < 0 {
+                return Err(EditError::InvalidValue("fade negativo"));
+            }
+            c.fade_out = f.min(c.duration - c.fade_in);
+        }
+        ClipChange::Source(s) => {
+            if !(c.source.is_generator() && s.is_generator()) {
+                return Err(EditError::InvalidValue("só geradores podem trocar de conteúdo"));
+            }
+            c.source = s;
+        }
+    }
+    Ok(Outcome { clips: vec![id], ..Outcome::default() })
+}
+
+fn set_speed(p: &mut Project, clips: Vec<ClipId>, speed: f64) -> Result<Outcome, EditError> {
+    if !(0.1..=10.0).contains(&speed) {
+        return Err(EditError::InvalidValue("a velocidade vai de 0.1x a 10x"));
+    }
+    let clips = dedup(clips);
+    if clips.is_empty() {
+        return Err(EditError::InvalidValue("nenhum clipe selecionado"));
+    }
+    for &id in &clips {
+        locate_unlocked(p, id)?;
+    }
+    for &id in &clips {
+        let (tid, i) = p.locate(id).expect("clipe validado acima");
+        let track = p.track_mut(tid).expect("faixa do clipe existe");
+        let next_start = track.clips.get(i + 1).map(|n| n.start);
+        let c = &mut track.clips[i];
+        let span = c.duration as f64 * c.speed;
+        let mut duration = ((span / speed).round() as Frame).max(1);
+        if let Some(n) = next_start {
+            duration = duration.min(n - c.start);
+        }
+        c.speed = speed;
+        c.duration = duration;
+        clamp_fades(c);
+    }
+    Ok(Outcome { clips, ..Outcome::default() })
+}
+
+fn set_link(p: &mut Project, clips: Vec<ClipId>, linked: bool) -> Result<Outcome, EditError> {
+    let clips = dedup(clips);
+    if linked && clips.len() < 2 {
+        return Err(EditError::InvalidValue("selecione pelo menos dois clipes para ligar"));
+    }
+    for &id in &clips {
+        locate_unlocked(p, id)?;
+    }
+    let link = linked.then(|| LinkId(p.ids.fresh()));
+    for &id in &clips {
+        p.clip_mut(id).expect("clipe validado acima").link = link;
+    }
+    Ok(Outcome { clips, ..Outcome::default() })
 }
