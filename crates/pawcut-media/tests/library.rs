@@ -80,6 +80,9 @@ fn audio_cache_stays_within_its_budget() {
     lib.audio(&b, 1.0).unwrap();
     assert!(lib.audio_bytes() <= first.samples.len() * 4 + 1000);
     let again = lib.audio(&a, 1.0).unwrap();
-    assert!(!Arc::ptr_eq(&first, &again), "o primeiro foi despejado e decodificado de novo");
+    assert!(
+        !Arc::ptr_eq(&first, &again),
+        "o primeiro foi despejado e decodificado de novo"
+    );
     assert_eq!(*first, *again);
 }

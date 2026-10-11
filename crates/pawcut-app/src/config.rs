@@ -49,3 +49,28 @@ pub fn leftover_autosaves() -> Vec<PathBuf> {
     files.sort();
     files
 }
+
+/// Identificador desta execução do PawCut (para o autosave de projetos sem nome).
+pub fn session_id() -> String {
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    format!("{t}-{}", std::process::id())
+}
+
+/// Nome do autosave: projetos salvos usam um hash do caminho completo (dois "video.pawcut"
+/// em pastas diferentes não colidem); projetos sem nome usam a sessão.
+pub fn autosave_name(project: Option<&std::path::Path>, session: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    match project {
+        Some(p) => {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            p.hash(&mut h);
+            let stem = p
+                .file_stem()
+                .map_or("projeto".into(), |s| s.to_string_lossy().into_owned());
+            format!("{stem}-{:08x}.pawcut", h.finish() as u32)
+        }
+        None => format!("sem-titulo-{session}.pawcut"),
+    }
+}

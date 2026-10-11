@@ -131,3 +131,34 @@ fn revision_changes_on_every_change() {
     let _ = ed.apply(Edit::Delete { clips: vec![] });
     assert_eq!(ed.revision(), before, "edição que falha não muda a revisão");
 }
+
+#[test]
+fn ending_a_coalesced_group_starts_a_new_undo_step() {
+    let mut ed = new_editor();
+    let v1 = v(&ed, 0);
+    let c = place(&mut ed, v1, solid(), 0, 0.0, 10);
+    let set_x = |ed: &mut Editor, x| {
+        let t = Transform {
+            x,
+            ..Transform::default()
+        };
+        ed.apply_coalescing(
+            Edit::SetClip {
+                clip: c,
+                change: ClipChange::Transform(t),
+            },
+            "drag-x",
+        )
+        .unwrap();
+    };
+    set_x(&mut ed, 1.0);
+    set_x(&mut ed, 2.0);
+    ed.end_coalescing();
+    set_x(&mut ed, 5.0);
+    ed.undo();
+    assert_eq!(
+        clip(&ed, c).transform.x,
+        2.0,
+        "o segundo arrasto é um passo separado"
+    );
+}

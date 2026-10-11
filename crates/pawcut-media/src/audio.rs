@@ -164,16 +164,27 @@ fn cache_file(dir: &Path, path: &Path, sample_rate: u32, speed: f64) -> Option<P
 }
 
 /// Igual a `decode_audio`, mas guarda o resultado em `cache_dir` para abrir rápido da próxima vez.
-pub fn load_audio(path: &Path, sample_rate: u32, speed: f64, cache_dir: Option<&Path>) -> Result<Pcm, MediaError> {
+pub fn load_audio(
+    path: &Path,
+    sample_rate: u32,
+    speed: f64,
+    cache_dir: Option<&Path>,
+) -> Result<Pcm, MediaError> {
     let file = cache_dir.and_then(|d| cache_file(d, path, sample_rate, speed));
     if let Some(file) = &file
         && let Some(samples) = read_cache(file)
     {
-        return Ok(Pcm { sample_rate, samples });
+        return Ok(Pcm {
+            sample_rate,
+            samples,
+        });
     }
     let pcm = decode_audio(path, sample_rate, speed)?;
     if let Some(file) = file {
-        write_cache(&file, &pcm.samples).map_err(|source| MediaError::Cache { path: file.clone(), source })?;
+        write_cache(&file, &pcm.samples).map_err(|source| MediaError::Cache {
+            path: file.clone(),
+            source,
+        })?;
     }
     Ok(pcm)
 }
@@ -194,7 +205,13 @@ fn read_cache(file: &Path) -> Option<Vec<f32>> {
         if n % 4 != 0 {
             return None;
         }
-        samples.extend(chunk[..n].as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)));
+        samples.extend(
+            chunk[..n]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b)),
+        );
     }
     Some(samples)
 }

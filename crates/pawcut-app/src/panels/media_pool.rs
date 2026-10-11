@@ -169,12 +169,13 @@ impl Workspace {
                 .set_title("Onde está esse arquivo agora?")
                 .pick_file()
         {
+            self.forget_media(id);
             self.st.relink(id, &path);
             self.forget_media(id);
         }
         if let Some(id) = remove {
-            self.st.apply(pawcut_core::Edit::RemoveMedia(id));
-            if self.st.source.media == Some(id) {
+            let removed = self.st.apply(pawcut_core::Edit::RemoveMedia(id)).is_some();
+            if removed && self.st.source.media == Some(id) {
                 self.st.source = Default::default();
             }
         }

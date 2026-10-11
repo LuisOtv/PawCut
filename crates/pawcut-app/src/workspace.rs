@@ -85,6 +85,13 @@ pub struct Workspace {
     pub new_project: Option<NewProjectDialog>,
     pub confirm: Option<Pending>,
     pub recovery: Vec<PathBuf>,
+    /// Pasta e arquivo do autosave desta sessão (só este arquivo é apagado automaticamente).
+    pub autosave_dir: PathBuf,
+    pub autosave_path: PathBuf,
+    session: String,
+    /// Fechar o app assim que a exportação em andamento terminar (ou for cancelada).
+    pub quit_after_export: bool,
+    pub export_quit_prompt: bool,
     pub allow_close: bool,
     last_autosave: Instant,
     last_offline_check: Instant,
@@ -120,6 +127,11 @@ impl Workspace {
             new_project: None,
             confirm: None,
             recovery: config::leftover_autosaves(),
+            autosave_dir: config::autosave_dir(),
+            autosave_path: PathBuf::new(),
+            session: config::session_id(),
+            quit_after_export: false,
+            export_quit_prompt: false,
             allow_close: false,
             last_autosave: Instant::now(),
             last_offline_check: Instant::now(),
@@ -133,6 +145,8 @@ impl Workspace {
             self.project_rev = self.st.editor.revision();
             if matches!(self.playback, Playback::Timeline { audio: true, .. }) {
                 self.audio.update_project(self.project_arc.clone());
+            } else {
+                self.audio.prepare(self.project_arc.clone());
             }
         }
     }
@@ -157,6 +171,16 @@ impl Workspace {
         }
         self.tick();
         self.handle_keys(ctx);
+        self.refresh_project_arc();
+        if ctx.input(|i| {
+            i.pointer.any_released() || i.key_pressed(Key::Enter) || i.key_pressed(Key::Tab)
+        }) {
+            self.st.editor.end_coalescing();
+        }
+        if self.quit_after_export && self.deliver.as_ref().is_none_or(|d| d.job.is_none()) {
+            self.quit_after_export = false;
+            self.request(Pending::Quit);
+        }
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -175,8 +199,16 @@ impl Workspace {
             self.last_offline_check = Instant::now();
             let before = self.st.offline.clone();
             self.st.refresh_offline();
-            for id in before.symmetric_difference(&self.st.offline) {
-                self.thumbs.remove(id);
+            let changed: Vec<MediaId> = before
+                .symmetric_difference(&self.st.offline)
+                .copied()
+                .collect();
+            for id in changed {
+                self.thumbs.remove(&id);
+                if let Some(m) = self.st.project().media(id) {
+                    let path = m.info.path.clone();
+                    self.forget_path(&path);
+                }
             }
         }
         if self.playback.is_playing() {
@@ -221,11 +253,12 @@ impl Workspace {
             } => {
                 let len = self.st.source_length().unwrap_or(0);
                 let frame = origin + (since.elapsed().as_secs_f64() * fps.as_f64() * rate) as Frame;
-                if frame >= len - 1 || frame <= 0 {
-                    self.st.source.playhead = frame.clamp(0, (len - 1).max(0));
+                let last = (len - 1).max(0);
+                if (rate > 0.0 && frame >= last) || (rate < 0.0 && frame <= 0) {
+                    self.st.source.playhead = frame.clamp(0, last);
                     self.stop();
                 } else {
-                    self.st.source.playhead = frame;
+                    self.st.source.playhead = frame.clamp(0, last);
                 }
             }
         }
@@ -493,8 +526,10 @@ impl Workspace {
 
     pub fn forget_media(&mut self, id: MediaId) {
         self.thumbs.remove(&id);
-        self.requested_source = None;
-        self.requested_timeline = None;
+        if let Some(m) = self.st.project().media(id) {
+            let path = m.info.path.clone();
+            self.forget_path(&path);
+        }
     }
 
     pub fn import_dialog(&mut self) {
@@ -573,6 +608,15 @@ impl Workspace {
         self.requested_timeline = None;
         self.project_rev = u64::MAX;
         self.refresh_project_arc();
+        self.refresh_autosave_path();
+    }
+
+    /// Recalcula o arquivo de autosave desta sessão (depois de abrir, criar ou "salvar como").
+    pub fn refresh_autosave_path(&mut self) {
+        self.autosave_path = self.autosave_dir.join(config::autosave_name(
+            self.st.path.as_deref(),
+            &self.session,
+        ));
     }
 
     /// Salva (ou "Salvar como"). Devolve se salvou.
@@ -605,6 +649,7 @@ impl Workspace {
         match self.st.save_to(&path) {
             Ok(()) => {
                 self.discard_autosave();
+                self.refresh_autosave_path();
                 self.st.say(format!("Salvo em {}", path.display()));
                 true
             }
@@ -615,23 +660,20 @@ impl Workspace {
         }
     }
 
-    fn autosave_file(&self) -> PathBuf {
-        let stem = self
-            .st
-            .path
-            .as_ref()
-            .and_then(|p| p.file_stem())
-            .map_or("sem-titulo".into(), |s| s.to_string_lossy().into_owned());
-        config::autosave_dir().join(format!("{stem}-autosave.pawcut"))
-    }
-
     fn autosave(&mut self) {
         self.last_autosave = Instant::now();
-        if !self.st.is_dirty() {
-            return;
+        if self.st.is_dirty() {
+            self.autosave_now();
         }
-        let path = self.autosave_file();
-        let result = std::fs::create_dir_all(config::autosave_dir())
+    }
+
+    /// Grava o autosave desta sessão agora.
+    pub fn autosave_now(&mut self) {
+        if self.autosave_path.as_os_str().is_empty() {
+            self.refresh_autosave_path();
+        }
+        let path = self.autosave_path.clone();
+        let result = std::fs::create_dir_all(&self.autosave_dir)
             .map_err(|e| e.to_string())
             .and_then(|_| {
                 pawcut_core::save_project(self.st.project(), &path).map_err(|e| e.to_string())
@@ -641,7 +683,18 @@ impl Workspace {
         }
     }
 
+    /// Apaga só o autosave desta sessão; autosaves de outras sessões só saem pelo diálogo de recuperação.
     pub fn discard_autosave(&mut self) {
-        let _ = std::fs::remove_file(self.autosave_file());
+        if !self.autosave_path.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.autosave_path);
+        }
+    }
+
+    /// Avisa as threads de preview e de áudio que um arquivo mudou (voltou, sumiu ou foi reconectado).
+    pub fn forget_path(&mut self, path: &Path) {
+        self.preview.forget(path);
+        self.audio.forget(path);
+        self.requested_timeline = None;
+        self.requested_source = None;
     }
 }

@@ -456,6 +456,7 @@ impl Workspace {
                 }
                 (Tool::Selection, Some((clip, _))) => self.st.select(clip, additive),
                 (_, None) => {
+                    self.stop();
                     self.st.selection.clear();
                     let f = self.frame_at(pos.x, layout.left).round() as Frame;
                     self.st.set_playhead(f);

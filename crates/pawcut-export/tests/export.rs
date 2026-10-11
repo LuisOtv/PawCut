@@ -167,8 +167,20 @@ fn offline_media_stops_the_export() {
 fn offline_audio_also_stops_the_export() {
     let dir = tempfile::tempdir().unwrap();
     let mut ed = editor();
-    put(&mut ed, TrackKind::Video, ClipSource::SolidColor(Rgba::new(0, 0, 255, 255)), 0, 30);
-    let info = MediaInfo { path: "/nao/existe.wav".into(), kind: MediaKind::Audio, duration: Some(60), width: 0, height: 0 };
+    put(
+        &mut ed,
+        TrackKind::Video,
+        ClipSource::SolidColor(Rgba::new(0, 0, 255, 255)),
+        0,
+        30,
+    );
+    let info = MediaInfo {
+        path: "/nao/existe.wav".into(),
+        kind: MediaKind::Audio,
+        duration: Some(60),
+        width: 0,
+        height: 0,
+    };
     let m = ed.apply(Edit::AddMedia(info)).unwrap().media.unwrap();
     put(&mut ed, TrackKind::Audio, ClipSource::Media(m), 5, 20);
     let out = dir.path().join("mudo.mp4");

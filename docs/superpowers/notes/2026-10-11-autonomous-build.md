@@ -31,3 +31,30 @@ Aqui ficam as decisões que tomei no caminho, com o custo de cada uma se estiver
 - **Bug achado pelos testes de interface:** a pegada do arrasto usava a posição depois do limiar de drag e passou a usar `press_origin`.
 - **Ganchos de depuração** (`PAWCUT_SCREENSHOT`, `PAWCUT_ACTIONS`, `PAWCUT_PLAYHEAD`) permitem tirar screenshots automáticos da janela.
 - **Preview em até 1920×1080:** a biblioteca de mídia do preview reduz os frames para caber nesse tamanho. Projetos 4K aparecem reduzidos no viewer, mas exportam em 4K.
+
+## Revisão final (Opus) e correções
+- **Crítico, autosave:** o nome passou a ser único (hash do caminho, ou id da sessão para projetos sem nome). Só o autosave da própria sessão é apagado automaticamente. Autosaves de sessões anteriores só saem pelo diálogo, que agora tem as opções "Recuperar", "Apagar" e "Agora não". O arquivo recuperado vira o autosave da sessão até o projeto ser salvo. Abrir o app passando arquivos não descarta mais a recuperação.
+- **Corrigidos com teste:**
+  - vídeo de celular girado sai em pé (probe e decode);
+  - fotos com EXIF saem em pé;
+  - o seek em MPEG-TS recua até ficar antes do alvo;
+  - WebM ao vivo tem duração;
+  - erro num frame não marca o arquivo offline;
+  - o PCM em memória tem orçamento de 1,5 GB com LRU e o cache é lido e gravado em streaming;
+  - a exportação recusa áudio offline;
+  - o Source Viewer toca a partir do frame 0;
+  - o desfazer agrupado fecha ao soltar o mouse ou dar Enter/Tab.
+- **Corrigidos sem teste automático:**
+  - o viewer não fica mais uma edição atrasado (o projeto é atualizado antes de cada aba);
+  - arquivo que volta a existir ou é reconectado avisa as threads de preview e áudio;
+  - fechar o app durante uma exportação pergunta antes e cancela de forma limpa;
+  - o áudio é decodificado em segundo plano antes do play;
+  - a aba Deliver não abandona uma exportação em andamento;
+  - clicar no vazio durante o play para a reprodução;
+  - "Remover" só limpa o Source Viewer se a remoção deu certo.
+- **Menores deixados para depois:**
+  - o `start_time` do áudio é ignorado (~23 ms em `.mts`);
+  - o VFR é indexado pela taxa média (erro ≤ 1 frame);
+  - franjas escuras em PNG com alfa escalado, porque o alfa não é pré-multiplicado;
+  - o cache de texto pode crescer com títulos enormes;
+  - faixas criadas por um arrasto recusado continuam lá.

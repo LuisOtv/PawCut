@@ -42,6 +42,8 @@ impl TabViewer for Workspace {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Panel) {
+        // Uma aba anterior pode ter editado o projeto neste mesmo frame.
+        self.refresh_project_arc();
         match tab {
             Panel::MediaPool => self.media_pool_ui(ui),
             Panel::Effects => self.effects_ui(ui),
@@ -75,7 +77,6 @@ impl PawCutApp {
             AppState::new(pawcut_core::Project::new(Default::default())),
         );
         if !args.is_empty() {
-            ws.recovery.clear();
             ws.open_paths(args);
         }
         Self {
@@ -217,7 +218,10 @@ impl PawCutApp {
                 )
                 .clicked()
             {
-                if self.ws.deliver.is_some() {
+                let running = self.ws.deliver.as_ref().is_some_and(|d| d.job.is_some());
+                if running {
+                    // Exportação em andamento: a janela fica aberta (feche pelo X dela para cancelar).
+                } else if self.ws.deliver.is_some() {
                     self.ws.deliver = None
                 } else {
                     self.ws.open_deliver()
@@ -247,7 +251,11 @@ impl PawCutApp {
 
     fn handle_close(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.ws.st.is_dirty() && !self.ws.allow_close {
+            let exporting = self.ws.deliver.as_ref().is_some_and(|d| d.job.is_some());
+            if exporting && !self.ws.allow_close {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.ws.export_quit_prompt = true;
+            } else if self.ws.st.is_dirty() && !self.ws.allow_close {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.ws.confirm = Some(Pending::Quit);
             } else {

@@ -238,9 +238,11 @@ fn first_missing_media(project: &Project) -> Option<(Frame, PathBuf)> {
         .all_tracks()
         .flat_map(|t| t.clips.iter())
         .filter_map(|c| match &c.source {
-            ClipSource::Media(id) => project.media(*id).filter(|m| !m.info.path.exists()).map(|m| (c.start, m.info.path.clone())),
+            ClipSource::Media(id) => project
+                .media(*id)
+                .filter(|m| !m.info.path.exists())
+                .map(|m| (c.start, m.info.path.clone())),
             _ => None,
         })
         .min_by_key(|(start, _)| *start)
 }
-

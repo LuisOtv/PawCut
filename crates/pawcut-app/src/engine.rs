@@ -40,6 +40,12 @@ struct Job {
     size: (u32, u32),
 }
 
+enum Msg {
+    Render(Job),
+    /// O arquivo mudou (voltou, sumiu, foi reconectado): esquecer o que está em cache.
+    Forget(PathBuf),
+}
+
 pub struct Rendered {
     pub slot: ViewSlot,
     pub image: RgbaImage,
@@ -48,13 +54,13 @@ pub struct Rendered {
 /// Thread que renderiza os viewers. Pedidos acumulados são descartados: só o mais novo de cada
 /// viewer é atendido.
 pub struct PreviewWorker {
-    tx: Sender<Job>,
+    tx: Sender<Msg>,
     pub results: Receiver<Rendered>,
 }
 
 impl PreviewWorker {
     pub fn spawn(fit: (u32, u32), sample_rate: u32, repaint: impl Fn() + Send + 'static) -> Self {
-        let (tx, rx) = channel::<Job>();
+        let (tx, rx) = channel::<Msg>();
         let (out_tx, results) = channel();
         thread::Builder::new()
             .name("pawcut-preview".into())
@@ -63,9 +69,13 @@ impl PreviewWorker {
                     Renderer::new(MediaLibrary::new(fit, sample_rate, default_cache_dir()));
                 while let Ok(first) = rx.recv() {
                     let mut latest: HashMap<ViewSlot, Job> = HashMap::new();
-                    latest.insert(first.slot, first);
-                    while let Ok(more) = rx.try_recv() {
-                        latest.insert(more.slot, more);
+                    for msg in std::iter::once(first).chain(rx.try_iter()) {
+                        match msg {
+                            Msg::Render(job) => {
+                                latest.insert(job.slot, job);
+                            }
+                            Msg::Forget(path) => renderer.media().forget(&path),
+                        }
                     }
                     for (_, job) in latest {
                         let image = render(&mut renderer, &job);
@@ -87,11 +97,15 @@ impl PreviewWorker {
     }
 
     pub fn request(&self, slot: ViewSlot, request: ViewRequest, size: (u32, u32)) {
-        let _ = self.tx.send(Job {
+        let _ = self.tx.send(Msg::Render(Job {
             slot,
             request,
             size,
-        });
+        }));
+    }
+
+    pub fn forget(&self, path: &Path) {
+        let _ = self.tx.send(Msg::Forget(path.to_path_buf()));
     }
 }
 
@@ -125,6 +139,9 @@ struct AudioState {
     project: Option<Arc<Project>>,
     start_sample: i64,
     generation: u64,
+    /// Projeto cujo áudio deve ser decodificado com antecedência (antes do play).
+    warm: Option<Arc<Project>>,
+    forget: Vec<PathBuf>,
 }
 
 /// Reprodução de áudio pelo PulseAudio. A posição tocada é o relógio mestre do preview.
@@ -144,6 +161,8 @@ impl AudioPlayer {
             project: None,
             start_sample: 0,
             generation: 0,
+            warm: None,
+            forget: Vec::new(),
         }));
         let playing = Arc::new(AtomicBool::new(false));
         let position = Arc::new(AtomicI64::new(0));
@@ -186,6 +205,19 @@ impl AudioPlayer {
             s.project = Some(project);
             s.start_sample = resume;
             s.generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        }
+    }
+
+    /// Decodifica em segundo plano o áudio que o projeto usa, para o play começar na hora.
+    pub fn prepare(&self, project: Arc<Project>) {
+        if let Ok(mut s) = self.state.lock() {
+            s.warm = Some(project);
+        }
+    }
+
+    pub fn forget(&self, path: &Path) {
+        if let Ok(mut s) = self.state.lock() {
+            s.forget.push(path.to_path_buf());
         }
     }
 
@@ -232,6 +264,27 @@ fn audio_loop(
     let mut pos = 0i64;
     let chunk_time = Duration::from_secs_f64(AUDIO_CHUNK as f64 / sample_rate as f64);
     loop {
+        let (forget, warm) = {
+            let mut s = state.lock().expect("estado de áudio");
+            let warm = if playing.load(Ordering::SeqCst) {
+                None
+            } else {
+                s.warm.take()
+            };
+            (std::mem::take(&mut s.forget), warm)
+        };
+        for path in forget {
+            renderer.media().forget(&path);
+        }
+        if let Some(project) = warm {
+            for clip in project.audio_tracks.iter().flat_map(|t| t.clips.iter()) {
+                if let pawcut_core::ClipSource::Media(id) = &clip.source
+                    && let Some(m) = project.media(*id)
+                {
+                    let _ = renderer.media().audio(&m.info.path, clip.speed);
+                }
+            }
+        }
         if !playing.load(Ordering::SeqCst) {
             if current_gen != u64::MAX {
                 if let Some(d) = &device {

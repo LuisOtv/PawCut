@@ -84,6 +84,7 @@ impl Workspace {
         self.new_project_ui(ctx);
         self.confirm_ui(ctx);
         self.recovery_ui(ctx);
+        self.export_quit_ui(ctx);
     }
 
     fn deliver_ui(&mut self, ctx: &egui::Context) {
@@ -368,56 +369,88 @@ impl Workspace {
         if self.recovery.is_empty() {
             return;
         }
-        let mut action = None;
+        enum Choice {
+            Recover(usize),
+            Delete(usize),
+            Later,
+        }
+        let mut choice = None;
         egui::Modal::new(egui::Id::new("recovery")).show(ctx, |ui| {
-            ui.set_width(420.0);
+            ui.set_width(460.0);
             ui.heading("Recuperar projeto?");
             ui.label("O PawCut não fechou direito da última vez. Achei estes autosaves:");
+            ui.add_space(4.0);
             for (i, p) in self.recovery.iter().enumerate() {
                 let when = std::fs::metadata(p)
                     .and_then(|m| m.modified())
                     .ok()
                     .and_then(|t| t.elapsed().ok())
-                    .map_or(String::new(), |e| format!(" (há {} min)", e.as_secs() / 60));
+                    .map_or(String::new(), |e| format!(" — há {} min", e.as_secs() / 60));
                 ui.horizontal(|ui| {
                     ui.label(format!(
                         "{}{when}",
                         p.file_name().map_or("?".into(), |n| n.to_string_lossy())
                     ));
                     if ui.button("Recuperar").clicked() {
-                        action = Some(Some(i));
+                        choice = Some(Choice::Recover(i));
+                    }
+                    if ui.small_button("Apagar").clicked() {
+                        choice = Some(Choice::Delete(i));
                     }
                 });
             }
-            if ui.button("Ignorar e apagar").clicked() {
-                action = Some(None);
+            ui.add_space(6.0);
+            if ui.button("Agora não (perguntar de novo depois)").clicked() {
+                choice = Some(Choice::Later);
             }
         });
-        match action {
-            Some(Some(i)) => {
+        match choice {
+            Some(Choice::Recover(i)) => {
                 let path = self.recovery[i].clone();
                 match crate::state::AppState::open(&path) {
                     Ok(mut st) => {
                         st.path = None;
                         st.saved_revision = u64::MAX;
                         self.replace_state(st);
+                        // O próprio arquivo recuperado vira o autosave desta sessão:
+                        // só some quando o projeto for salvo de verdade.
+                        self.autosave_path = path;
+                        self.recovery.clear();
                         self.st.say("Projeto recuperado — salve com Ctrl+Shift+S");
                     }
-                    Err(e) => self.st.say(e.to_string()),
-                }
-                for p in self.recovery.drain(..) {
-                    if p != path {
-                        let _ = std::fs::remove_file(p);
-                    }
-                }
-                let _ = std::fs::remove_file(&path);
-            }
-            Some(None) => {
-                for p in self.recovery.drain(..) {
-                    let _ = std::fs::remove_file(p);
+                    Err(e) => self.st.say(format!("Não deu para recuperar: {e}")),
                 }
             }
+            Some(Choice::Delete(i)) => {
+                let path = self.recovery.remove(i);
+                let _ = std::fs::remove_file(path);
+            }
+            Some(Choice::Later) => self.recovery.clear(),
             None => {}
         }
+    }
+
+    fn export_quit_ui(&mut self, ctx: &egui::Context) {
+        if !self.export_quit_prompt {
+            return;
+        }
+        egui::Modal::new(egui::Id::new("export-quit")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.heading("Exportação em andamento");
+            ui.label("Fechar agora cancela a exportação (o arquivo incompleto é apagado).");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancelar exportação e sair").clicked() {
+                    if let Some(job) = self.deliver.as_ref().and_then(|d| d.job.as_ref()) {
+                        job.cancel.store(true, Ordering::Relaxed);
+                    }
+                    self.quit_after_export = true;
+                    self.export_quit_prompt = false;
+                }
+                if ui.button("Continuar exportando").clicked() {
+                    self.export_quit_prompt = false;
+                }
+            });
+        });
     }
 }

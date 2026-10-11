@@ -67,6 +67,11 @@ impl Editor {
         Ok(outcome)
     }
 
+    /// Fecha o grupo de `apply_coalescing` atual (ex.: o usuário soltou o mouse).
+    pub fn end_coalescing(&mut self) {
+        self.coalesce = None;
+    }
+
     /// Muda a cada alteração (inclusive desfazer/refazer): serve para saber se há algo não salvo.
     pub fn revision(&self) -> u64 {
         self.revision

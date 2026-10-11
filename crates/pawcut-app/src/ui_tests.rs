@@ -295,3 +295,70 @@ mod whole_app {
         h.run_steps(5);
     }
 }
+
+mod fixes {
+    use std::time::Duration;
+
+    use pawcut_core::*;
+
+    use crate::state::{AppState, Monitor};
+    use crate::workspace::Workspace;
+
+    fn workspace(st: AppState) -> (Workspace, tempfile::TempDir) {
+        let ctx = egui::Context::default();
+        let mut ws = Workspace::new(&ctx, st);
+        let dir = tempfile::tempdir().unwrap();
+        ws.autosave_dir = dir.path().to_path_buf();
+        ws.recovery.clear();
+        ws.refresh_autosave_path();
+        (ws, dir)
+    }
+
+    #[test]
+    fn autosave_never_touches_files_from_other_sessions() {
+        let mut st = AppState::new(Project::new(ProjectSettings::default()));
+        st.drop_generator(crate::state::Generator::Text, 0, 0);
+        let (mut ws, dir) = workspace(st);
+        let foreign = dir.path().join("sem-titulo-de-outra-sessao.pawcut");
+        std::fs::write(&foreign, "{}").unwrap();
+        ws.autosave_now();
+        let own = ws.autosave_path.clone();
+        assert!(own.exists());
+        assert_ne!(own, foreign);
+        ws.discard_autosave();
+        assert!(!own.exists());
+        assert!(foreign.exists(), "autosave de outra sessão continua lá");
+    }
+
+    #[test]
+    fn autosave_names_do_not_collide_for_same_file_name() {
+        let a = crate::config::autosave_name(Some(std::path::Path::new("/a/video.pawcut")), "s1");
+        let b = crate::config::autosave_name(Some(std::path::Path::new("/b/video.pawcut")), "s1");
+        assert_ne!(a, b);
+        let u1 = crate::config::autosave_name(None, "s1");
+        let u2 = crate::config::autosave_name(None, "s2");
+        assert_ne!(u1, u2);
+    }
+
+    #[test]
+    fn source_viewer_plays_from_the_first_frame() {
+        let mut st = AppState::new(Project::new(ProjectSettings::default()));
+        let info = MediaInfo {
+            path: "/videos/x.mp4".into(),
+            kind: MediaKind::Video { has_audio: false },
+            duration: Some(300),
+            width: 1920,
+            height: 1080,
+        };
+        let m = st.apply(Edit::AddMedia(info)).unwrap().media.unwrap();
+        st.open_in_source(m);
+        let (mut ws, _dir) = workspace(st);
+        assert_eq!(ws.st.active_monitor, Monitor::Source);
+        ws.play(1.0);
+        std::thread::sleep(Duration::from_millis(60));
+        let ctx = ws.ctx.clone();
+        ws.begin_frame(&ctx);
+        assert!(ws.playback.is_playing(), "parou logo no começo");
+        assert!(ws.st.source.playhead >= 1);
+    }
+}

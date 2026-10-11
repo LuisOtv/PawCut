@@ -176,7 +176,8 @@ impl MediaLibrary {
         if let Some(pcm) = self.audio.get(&key) {
             return Ok(pcm.clone());
         }
-        let loaded = load_audio(path, self.sample_rate, speed, self.cache_dir.as_deref()).map(Arc::new);
+        let loaded =
+            load_audio(path, self.sample_rate, speed, self.cache_dir.as_deref()).map(Arc::new);
         let pcm = self.remember_failure(path, loaded)?;
         self.audio_bytes += pcm.samples.len() * 4;
         self.audio.put(key, pcm.clone());
@@ -208,7 +209,12 @@ impl MediaLibrary {
         self.failed.remove(path);
         self.videos.remove(path);
         self.images.remove(path);
-        let stale: Vec<_> = self.audio.iter().filter(|((p, _), _)| p == path).map(|(k, _)| k.clone()).collect();
+        let stale: Vec<_> = self
+            .audio
+            .iter()
+            .filter(|((p, _), _)| p == path)
+            .map(|(k, _)| k.clone())
+            .collect();
         for k in stale {
             if let Some(old) = self.audio.pop(&k) {
                 self.audio_bytes -= old.samples.len() * 4;
