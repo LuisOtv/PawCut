@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 
 use egui::{RichText, Window};
 use pawcut_core::{FrameRate, ProjectSettings, format_timecode};
-use pawcut_export::{AudioFormat, ExportSettings, VideoCodec};
+use pawcut_export::{AudioFormat, EncoderSpeed, ExportSettings, VideoCodec};
 
 use crate::config;
 use crate::engine::ExportJob;
@@ -14,67 +14,247 @@ use crate::workspace::{Pending, Workspace};
 
 pub struct DeliverDialog {
     pub output: String,
-    pub crf: u8,
-    pub preset: usize,
+    pub opts: DeliverOptions,
+    /// Preset rápido que gerou as opções atuais (`None` = personalizado).
+    pub preset: Option<usize>,
     pub only_in_out: bool,
     pub job: Option<ExportJob>,
     pub message: Option<Result<String, String>>,
 }
 
-/// Presets de exportação: nome, altura de saída (`None` = do projeto), codec, só áudio, extensão.
-/// Nome, altura de saída, codec, só áudio, extensão.
-type DeliverPreset = (
-    &'static str,
-    Option<u32>,
-    VideoCodec,
-    Option<AudioFormat>,
-    &'static str,
-);
+/// Contêiner do arquivo de saída.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Mp4,
+    Mov,
+    Mkv,
+    Mp3,
+    Wav,
+}
 
-pub const DELIVER_PRESETS: [DeliverPreset; 6] = [
-    (
-        "Resolução do projeto (H.264)",
-        None,
-        VideoCodec::H264,
-        None,
-        "mp4",
-    ),
-    (
-        "YouTube 1080p (H.264)",
-        Some(1080),
-        VideoCodec::H264,
-        None,
-        "mp4",
-    ),
-    (
-        "YouTube 4K (H.265)",
-        Some(2160),
-        VideoCodec::H265,
-        None,
-        "mp4",
-    ),
-    (
-        "Rápido 720p (H.264)",
-        Some(720),
-        VideoCodec::H264,
-        None,
-        "mp4",
-    ),
-    (
-        "Só áudio — MP3",
-        None,
-        VideoCodec::H264,
-        Some(AudioFormat::Mp3),
-        "mp3",
-    ),
-    (
-        "Só áudio — WAV",
-        None,
-        VideoCodec::H264,
-        Some(AudioFormat::Wav),
-        "wav",
-    ),
+impl Format {
+    pub const ALL: [Format; 5] = [
+        Format::Mp4,
+        Format::Mov,
+        Format::Mkv,
+        Format::Mp3,
+        Format::Wav,
+    ];
+
+    pub fn ext(self) -> &'static str {
+        match self {
+            Format::Mp4 => "mp4",
+            Format::Mov => "mov",
+            Format::Mkv => "mkv",
+            Format::Mp3 => "mp3",
+            Format::Wav => "wav",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Format::Mp4 => "MP4",
+            Format::Mov => "QuickTime (MOV)",
+            Format::Mkv => "Matroska (MKV)",
+            Format::Mp3 => "MP3 (só áudio)",
+            Format::Wav => "WAV (só áudio)",
+        }
+    }
+
+    fn audio_only(self) -> Option<AudioFormat> {
+        match self {
+            Format::Mp3 => Some(AudioFormat::Mp3),
+            Format::Wav => Some(AudioFormat::Wav),
+            _ => None,
+        }
+    }
+
+    fn codecs(self) -> &'static [VideoCodec] {
+        match self {
+            Format::Mp4 => &[VideoCodec::H264, VideoCodec::H265],
+            Format::Mov | Format::Mkv => &[VideoCodec::H264, VideoCodec::H265, VideoCodec::ProRes],
+            Format::Mp3 | Format::Wav => &[],
+        }
+    }
+}
+
+fn codec_label(c: VideoCodec) -> &'static str {
+    match c {
+        VideoCodec::H264 => "H.264 (compatível com tudo)",
+        VideoCodec::H265 => "H.265 / HEVC (arquivo menor)",
+        VideoCodec::ProRes => "Apple ProRes 422 HQ (para editar)",
+    }
+}
+
+fn speed_label(s: EncoderSpeed) -> &'static str {
+    match s {
+        EncoderSpeed::Ultrafast => "Muito rápida (arquivo maior)",
+        EncoderSpeed::Veryfast => "Rápida",
+        EncoderSpeed::Fast => "Um pouco rápida",
+        EncoderSpeed::Medium => "Equilibrada",
+        EncoderSpeed::Slow => "Lenta (arquivo menor)",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    Project,
+    /// Lado menor em pixels, mantendo a proporção do projeto.
+    Short(u32),
+    Fixed(u32, u32),
+    Custom,
+}
+
+pub const RESOLUTIONS: [(&str, Resolution); 10] = [
+    ("Do projeto", Resolution::Project),
+    ("2160p (4K UHD)", Resolution::Short(2160)),
+    ("1440p (2K)", Resolution::Short(1440)),
+    ("1080p (Full HD)", Resolution::Short(1080)),
+    ("720p (HD)", Resolution::Short(720)),
+    ("480p", Resolution::Short(480)),
+    ("1080×1920 — vertical 9:16", Resolution::Fixed(1080, 1920)),
+    ("1080×1350 — retrato 4:5", Resolution::Fixed(1080, 1350)),
+    ("1080×1080 — quadrado", Resolution::Fixed(1080, 1080)),
+    ("Personalizada", Resolution::Custom),
 ];
+
+pub const FRAME_RATES: [(&str, Option<FrameRate>); 9] = [
+    ("Do projeto", None),
+    ("23,976", Some(FrameRate::new(24000, 1001))),
+    ("24", Some(FrameRate::new(24, 1))),
+    ("25", Some(FrameRate::new(25, 1))),
+    ("29,97", Some(FrameRate::new(30000, 1001))),
+    ("30", Some(FrameRate::new(30, 1))),
+    ("50", Some(FrameRate::new(50, 1))),
+    ("59,94", Some(FrameRate::new(60000, 1001))),
+    ("60", Some(FrameRate::new(60, 1))),
+];
+
+/// Tudo que o usuário escolhe na janela de exportação (menos o arquivo e o trecho).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeliverOptions {
+    pub format: Format,
+    pub codec: VideoCodec,
+    /// Índice em `RESOLUTIONS`.
+    pub resolution: usize,
+    pub custom: (u32, u32),
+    /// Índice em `FRAME_RATES`.
+    pub fps: usize,
+    pub use_bitrate: bool,
+    pub crf: u8,
+    pub bitrate_mbps: f32,
+    pub speed: EncoderSpeed,
+    pub audio: bool,
+    pub audio_kbps: u32,
+}
+
+impl Default for DeliverOptions {
+    fn default() -> Self {
+        Self {
+            format: Format::Mp4,
+            codec: VideoCodec::H264,
+            resolution: 0,
+            custom: (1920, 1080),
+            fps: 0,
+            use_bitrate: false,
+            crf: 18,
+            bitrate_mbps: 16.0,
+            speed: EncoderSpeed::Medium,
+            audio: true,
+            audio_kbps: 192,
+        }
+    }
+}
+
+impl DeliverOptions {
+    /// Tamanho de saída para um projeto `w`×`h`.
+    pub fn size(&self, w: u32, h: u32) -> (u32, u32) {
+        match RESOLUTIONS[self.resolution].1 {
+            Resolution::Project => (w, h),
+            Resolution::Short(t) => deliver_size(w, h, Some(t)),
+            Resolution::Fixed(a, b) => (a, b),
+            Resolution::Custom => (self.custom.0.max(16), self.custom.1.max(16)),
+        }
+    }
+
+    pub fn export_settings(
+        &self,
+        project: &pawcut_core::Project,
+        output: PathBuf,
+        range: Option<(pawcut_core::Frame, pawcut_core::Frame)>,
+    ) -> ExportSettings {
+        let s = &project.settings;
+        let size = self.size(s.width, s.height);
+        ExportSettings {
+            output,
+            crf: self.crf,
+            range,
+            size: (size != (s.width, s.height)).then_some(size),
+            codec: self.codec,
+            audio_only: self.format.audio_only(),
+            fps: FRAME_RATES[self.fps].1,
+            bitrate_kbps: self
+                .use_bitrate
+                .then_some((self.bitrate_mbps * 1000.0).round() as u32),
+            speed: self.speed,
+            audio_kbps: self.audio.then_some(self.audio_kbps),
+        }
+    }
+}
+
+/// Presets rápidos (preenchem as opções; dá para ajustar depois).
+pub const QUICK_PRESETS: [&str; 7] = [
+    "YouTube 1080p",
+    "YouTube 4K",
+    "Reels / TikTok / Shorts",
+    "Rápido 720p",
+    "Master ProRes",
+    "Só áudio MP3",
+    "Só áudio WAV",
+];
+
+pub fn quick_preset(i: usize) -> DeliverOptions {
+    let base = DeliverOptions::default();
+    match i {
+        0 => DeliverOptions {
+            resolution: 3,
+            ..base
+        },
+        1 => DeliverOptions {
+            codec: VideoCodec::H265,
+            resolution: 1,
+            crf: 20,
+            ..base
+        },
+        2 => DeliverOptions {
+            resolution: 6,
+            fps: 5,
+            crf: 20,
+            ..base
+        },
+        3 => DeliverOptions {
+            resolution: 4,
+            crf: 23,
+            speed: EncoderSpeed::Veryfast,
+            audio_kbps: 128,
+            ..base
+        },
+        4 => DeliverOptions {
+            format: Format::Mov,
+            codec: VideoCodec::ProRes,
+            ..base
+        },
+        5 => DeliverOptions {
+            format: Format::Mp3,
+            audio_kbps: 256,
+            ..base
+        },
+        _ => DeliverOptions {
+            format: Format::Wav,
+            ..base
+        },
+    }
+}
 
 pub struct NewProjectDialog {
     pub preset: usize,
@@ -128,8 +308,8 @@ impl Workspace {
             };
             self.deliver = Some(DeliverDialog {
                 output: dir.join(format!("{stem}.mp4")).display().to_string(),
-                crf: 18,
-                preset: 0,
+                opts: quick_preset(0),
+                preset: Some(0),
                 only_in_out: false,
                 job: None,
                 message: None,
@@ -302,34 +482,62 @@ impl Workspace {
         let mut start = false;
         let mut pick_output = false;
         let mut still = false;
+        let before = d.opts.clone();
+        let mut picked_preset = None;
         Window::new("Deliver — Exportar")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(480.0)
+            .default_width(560.0)
             .show(ctx, |ui| {
-                egui::Grid::new("deliver-grid")
+                // Presets rápidos, como a fileira de presets do Render Settings do Resolve.
+                ui.label(RichText::new("Presets").strong());
+                ui.horizontal_wrapped(|ui| {
+                    for (i, name) in QUICK_PRESETS.iter().enumerate() {
+                        if ui.selectable_label(d.preset == Some(i), *name).clicked() {
+                            picked_preset = Some(i);
+                        }
+                    }
+                    ui.label(
+                        RichText::new(if d.preset.is_none() {
+                            "· personalizado"
+                        } else {
+                            ""
+                        })
+                        .weak(),
+                    );
+                });
+                ui.separator();
+
+                let label = |ui: &mut egui::Ui, text: &str| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(text).color(crate::theme::TEXT_DIM));
+                    });
+                };
+                egui::Grid::new("deliver-file")
                     .num_columns(2)
-                    .spacing([10.0, 8.0])
+                    .spacing([12.0, 8.0])
+                    .min_col_width(110.0)
                     .show(ui, |ui| {
-                        ui.label("Formato");
-                        let before = d.preset;
-                        egui::ComboBox::from_id_salt("deliver-preset")
-                            .width(260.0)
-                            .selected_text(DELIVER_PRESETS[d.preset].0)
+                        label(ui, "Arquivo");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut d.output).desired_width(340.0));
+                            if ui.button("Procurar…").clicked() {
+                                pick_output = true;
+                            }
+                        });
+                        ui.end_row();
+                        label(ui, "Formato");
+                        egui::ComboBox::from_id_salt("deliver-format")
+                            .width(220.0)
+                            .selected_text(d.opts.format.label())
                             .show_ui(ui, |ui| {
-                                for (i, p) in DELIVER_PRESETS.iter().enumerate() {
-                                    ui.selectable_value(&mut d.preset, i, p.0);
+                                for f in Format::ALL {
+                                    ui.selectable_value(&mut d.opts.format, f, f.label());
                                 }
                             });
-                        if d.preset != before {
-                            // Troca a extensão do arquivo junto com o formato.
-                            let mut out = PathBuf::from(d.output.trim());
-                            out.set_extension(DELIVER_PRESETS[d.preset].4);
-                            d.output = out.display().to_string();
-                        }
                         ui.end_row();
-                        ui.label("Trecho");
+                        label(ui, "Trecho");
                         ui.horizontal(|ui| {
                             ui.radio_value(&mut d.only_in_out, false, "Timeline inteira");
                             ui.add_enabled_ui(marks.is_some(), |ui| {
@@ -338,37 +546,183 @@ impl Workspace {
                             });
                         });
                         ui.end_row();
-                        ui.label("Arquivo");
-                        ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut d.output).desired_width(300.0));
-                            if ui.button("…").clicked() {
-                                pick_output = true;
+                    });
+
+                let audio_only = d.opts.format.audio_only().is_some();
+                if !audio_only {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Vídeo").strong());
+                    egui::Grid::new("deliver-video")
+                        .num_columns(2)
+                        .spacing([12.0, 8.0])
+                        .min_col_width(110.0)
+                        .show(ui, |ui| {
+                            label(ui, "Codec");
+                            egui::ComboBox::from_id_salt("deliver-codec")
+                                .width(260.0)
+                                .selected_text(codec_label(d.opts.codec))
+                                .show_ui(ui, |ui| {
+                                    for c in d.opts.format.codecs() {
+                                        ui.selectable_value(&mut d.opts.codec, *c, codec_label(*c));
+                                    }
+                                });
+                            ui.end_row();
+                            label(ui, "Resolução");
+                            ui.horizontal(|ui| {
+                                egui::ComboBox::from_id_salt("deliver-res")
+                                    .width(220.0)
+                                    .selected_text(RESOLUTIONS[d.opts.resolution].0)
+                                    .show_ui(ui, |ui| {
+                                        for (i, (name, _)) in RESOLUTIONS.iter().enumerate() {
+                                            ui.selectable_value(&mut d.opts.resolution, i, *name);
+                                        }
+                                    });
+                                if RESOLUTIONS[d.opts.resolution].1 == Resolution::Custom {
+                                    ui.add(
+                                        egui::DragValue::new(&mut d.opts.custom.0)
+                                            .range(16..=8192)
+                                            .suffix(" L"),
+                                    );
+                                    ui.label("×");
+                                    ui.add(
+                                        egui::DragValue::new(&mut d.opts.custom.1)
+                                            .range(16..=8192)
+                                            .suffix(" A"),
+                                    );
+                                } else {
+                                    let (w, h) = d.opts.size(s.width, s.height);
+                                    ui.label(RichText::new(format!("{w}×{h}")).weak());
+                                }
+                            });
+                            ui.end_row();
+                            label(ui, "Frame rate");
+                            ui.horizontal(|ui| {
+                                egui::ComboBox::from_id_salt("deliver-fps")
+                                    .width(120.0)
+                                    .selected_text(FRAME_RATES[d.opts.fps].0)
+                                    .show_ui(ui, |ui| {
+                                        for (i, (name, _)) in FRAME_RATES.iter().enumerate() {
+                                            ui.selectable_value(&mut d.opts.fps, i, *name);
+                                        }
+                                    });
+                                ui.label(RichText::new("fps").weak());
+                                if d.opts.fps == 0 {
+                                    ui.label(
+                                        RichText::new(format!("({})", fps_text(s.fps))).weak(),
+                                    );
+                                }
+                            });
+                            ui.end_row();
+                            if d.opts.codec != VideoCodec::ProRes {
+                                label(ui, "Qualidade");
+                                ui.horizontal(|ui| {
+                                    ui.radio_value(&mut d.opts.use_bitrate, false, "Constante");
+                                    ui.radio_value(&mut d.opts.use_bitrate, true, "Bitrate");
+                                });
+                                ui.end_row();
+                                ui.label("");
+                                if d.opts.use_bitrate {
+                                    ui.add(
+                                        egui::Slider::new(&mut d.opts.bitrate_mbps, 1.0..=100.0)
+                                            .logarithmic(true)
+                                            .suffix(" Mb/s"),
+                                    );
+                                } else {
+                                    ui.add(
+                                        egui::Slider::new(&mut d.opts.crf, 14..=32)
+                                            .text("CRF (menor = melhor)"),
+                                    );
+                                }
+                                ui.end_row();
+                                label(ui, "Codificação");
+                                egui::ComboBox::from_id_salt("deliver-speed")
+                                    .width(220.0)
+                                    .selected_text(speed_label(d.opts.speed))
+                                    .show_ui(ui, |ui| {
+                                        for sp in EncoderSpeed::ALL {
+                                            ui.selectable_value(
+                                                &mut d.opts.speed,
+                                                sp,
+                                                speed_label(sp),
+                                            );
+                                        }
+                                    });
+                                ui.end_row();
                             }
                         });
-                        ui.end_row();
-                        if DELIVER_PRESETS[d.preset].3.is_none() {
-                            ui.label("Qualidade");
-                            ui.add(
-                                egui::Slider::new(&mut d.crf, 14..=32).text("CRF (menor = melhor)"),
-                            );
+                }
+
+                ui.add_space(6.0);
+                ui.label(RichText::new("Áudio").strong());
+                egui::Grid::new("deliver-audio")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .min_col_width(110.0)
+                    .show(ui, |ui| {
+                        if !audio_only {
+                            label(ui, "Exportar áudio");
+                            ui.checkbox(&mut d.opts.audio, "");
                             ui.end_row();
                         }
+                        let lossy = d.opts.format != Format::Wav
+                            && !(d.opts.codec == VideoCodec::ProRes && !audio_only);
+                        if (d.opts.audio || audio_only) && lossy {
+                            label(ui, "Bitrate");
+                            egui::ComboBox::from_id_salt("deliver-abr")
+                                .width(120.0)
+                                .selected_text(format!("{} kb/s", d.opts.audio_kbps))
+                                .show_ui(ui, |ui| {
+                                    for k in [128, 192, 256, 320] {
+                                        ui.selectable_value(
+                                            &mut d.opts.audio_kbps,
+                                            k,
+                                            format!("{k} kb/s"),
+                                        );
+                                    }
+                                });
+                            ui.end_row();
+                        }
+                        label(ui, "Amostragem");
+                        ui.label(RichText::new(format!("{} Hz · estéreo", s.sample_rate)).weak());
+                        ui.end_row();
                     });
+
+                // Resumo do que vai sair.
                 let (from, to) = if d.only_in_out {
                     marks.unwrap_or((0, project.duration()))
                 } else {
                     (0, project.duration())
                 };
-                let (w, h) = deliver_size(s.width, s.height, DELIVER_PRESETS[d.preset].1);
-                ui.label(
-                    RichText::new(format!(
-                        "{w}×{h} · {} fps · duração {}",
-                        s.fps.as_f64(),
+                let secs = s.fps.frames_to_seconds(to - from);
+                let summary = if audio_only {
+                    format!(
+                        "{} · duração {}",
+                        d.opts.format.label(),
                         format_timecode(to - from, s.fps)
-                    ))
-                    .weak(),
-                );
-                ui.add_space(8.0);
+                    )
+                } else {
+                    let (w, h) = d.opts.size(s.width, s.height);
+                    let fps = FRAME_RATES[d.opts.fps].1.unwrap_or(s.fps);
+                    let mut t = format!(
+                        "{w}×{h} · {} fps · duração {}",
+                        fps_text(fps),
+                        format_timecode(to - from, s.fps)
+                    );
+                    if d.opts.use_bitrate && d.opts.codec != VideoCodec::ProRes {
+                        let kbps = d.opts.bitrate_mbps as f64 * 1000.0
+                            + if d.opts.audio {
+                                d.opts.audio_kbps as f64
+                            } else {
+                                0.0
+                            };
+                        t.push_str(&format!(" · ~{:.0} MB", kbps * secs / 8000.0));
+                    }
+                    t
+                };
+                ui.add_space(6.0);
+                ui.separator();
+                ui.label(RichText::new(summary).weak());
+                ui.add_space(4.0);
                 match &d.job {
                     Some(job) => {
                         let done = job.done.load(Ordering::Relaxed) as f32;
@@ -396,7 +750,8 @@ impl Workspace {
                             if ui
                                 .add_enabled(
                                     ok,
-                                    egui::Button::new(RichText::new("Exportar").strong()),
+                                    egui::Button::new(RichText::new("Exportar").strong())
+                                        .min_size(egui::vec2(110.0, 26.0)),
                                 )
                                 .clicked()
                             {
@@ -426,8 +781,26 @@ impl Workspace {
                     None => {}
                 }
             });
+        if let Some(i) = picked_preset {
+            d.opts = quick_preset(i);
+        }
+        // Codec que não cabe no formato escolhido volta para o primeiro que cabe.
+        if let Some(first) = d.opts.format.codecs().first()
+            && !d.opts.format.codecs().contains(&d.opts.codec)
+        {
+            d.opts.codec = *first;
+        }
+        if d.opts != before {
+            d.preset = picked_preset;
+            if d.opts.format != before.format {
+                // Troca a extensão do arquivo junto com o formato.
+                let mut out = PathBuf::from(d.output.trim());
+                out.set_extension(d.opts.format.ext());
+                d.output = out.display().to_string();
+            }
+        }
         if pick_output {
-            let ext = DELIVER_PRESETS[d.preset].4;
+            let ext = d.opts.format.ext();
             self.ask_file(crate::file_dialog::Purpose::ExportTo, move || {
                 rfd::FileDialog::new()
                     .add_filter(ext.to_uppercase(), &[ext])
@@ -456,25 +829,14 @@ impl Workspace {
             );
         }
         if start {
-            let preset = DELIVER_PRESETS[d.preset];
             let mut output = PathBuf::from(d.output.trim());
             if output.extension().is_none() {
-                output.set_extension(preset.4);
+                output.set_extension(d.opts.format.ext());
             }
             d.output = output.display().to_string();
             d.message = None;
             let range = if d.only_in_out { marks } else { None };
-            let size = preset
-                .1
-                .map(|_| deliver_size(project.settings.width, project.settings.height, preset.1));
-            let settings = ExportSettings {
-                output,
-                crf: d.crf,
-                range,
-                size,
-                codec: preset.2,
-                audio_only: preset.3,
-            };
+            let settings = d.opts.export_settings(&project, output, range);
             let c = ctx.clone();
             d.job = Some(ExportJob::start((*project).clone(), settings, move || {
                 c.request_repaint()
@@ -743,6 +1105,16 @@ impl Workspace {
     }
 }
 
+/// "29,97" / "30" — fps com vírgula, sem casas à toa.
+fn fps_text(f: FrameRate) -> String {
+    let v = f.as_f64();
+    if (v - v.round()).abs() < 1e-6 {
+        format!("{}", v.round() as i64)
+    } else {
+        format!("{v:.3}").trim_end_matches('0').replace('.', ",")
+    }
+}
+
 /// Tamanho de saída: a altura do preset no formato do projeto (vertical usa a altura como lado menor).
 pub fn deliver_size(w: u32, h: u32, target: Option<u32>) -> (u32, u32) {
     let Some(t) = target else { return (w, h) };
@@ -750,4 +1122,43 @@ pub fn deliver_size(w: u32, h: u32, target: Option<u32>) -> (u32, u32) {
     let k = t as f32 / short;
     let even = |v: f32| (v.round() as u32).div_ceil(2) * 2;
     (even(w as f32 * k), even(h as f32 * k))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pawcut_core::{Project, ProjectSettings};
+
+    #[test]
+    fn deliver_options_build_export_settings() {
+        let project = Project::new(ProjectSettings::default());
+        let (w, h) = (project.settings.width, project.settings.height);
+        let reels = quick_preset(2).export_settings(&project, "a.mp4".into(), None);
+        assert_eq!(reels.size, Some((1080, 1920)));
+        assert_eq!(reels.fps, Some(FrameRate::new(30, 1)));
+        let same = DeliverOptions::default().export_settings(&project, "a.mp4".into(), None);
+        assert_eq!(same.size, None, "resolução do projeto não reescala");
+        let opts = DeliverOptions {
+            use_bitrate: true,
+            bitrate_mbps: 8.0,
+            audio: false,
+            resolution: 9,
+            custom: (640, 360),
+            ..DeliverOptions::default()
+        };
+        let s = opts.export_settings(&project, "a.mkv".into(), Some((10, 20)));
+        assert_eq!(s.bitrate_kbps, Some(8000));
+        assert_eq!(s.audio_kbps, None);
+        assert_eq!(s.size, Some((640, 360)));
+        assert_eq!(s.range, Some((10, 20)));
+        assert_eq!(
+            quick_preset(5)
+                .export_settings(&project, "a.mp3".into(), None)
+                .audio_only,
+            Some(AudioFormat::Mp3)
+        );
+        assert_eq!(DeliverOptions::default().size(w, h), (w, h));
+        assert_eq!(fps_text(FrameRate::new(30000, 1001)), "29,97");
+        assert_eq!(fps_text(FrameRate::new(24000, 1001)), "23,976");
+    }
 }

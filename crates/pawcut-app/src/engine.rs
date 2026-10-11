@@ -508,9 +508,7 @@ impl ExportJob {
         let done = Arc::new(AtomicI64::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
         let result = Arc::new(Mutex::new(None));
-        let total = settings.range.map_or(project.duration(), |(a, b)| {
-            (b.min(project.duration()) - a).max(0)
-        });
+        let total = pawcut_export::frame_count(&project, &settings);
         let (d, c, r) = (done.clone(), cancel.clone(), result.clone());
         thread::Builder::new()
             .name("pawcut-export".into())

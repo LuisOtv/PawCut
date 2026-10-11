@@ -7,7 +7,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-use pawcut_core::{ClipId, ClipSource, Frame, Project};
+use pawcut_core::{ClipId, ClipSource, Frame, FrameRate, Project};
 use pawcut_render::Renderer;
 use thiserror::Error;
 
@@ -23,6 +23,13 @@ pub struct ExportSettings {
     pub codec: VideoCodec,
     /// Exportar só o áudio.
     pub audio_only: Option<AudioFormat>,
+    /// Taxa de quadros da saída; `None` = a do projeto.
+    pub fps: Option<FrameRate>,
+    /// Bitrate do vídeo em kbps; `None` = qualidade constante (`crf`).
+    pub bitrate_kbps: Option<u32>,
+    pub speed: EncoderSpeed,
+    /// Bitrate do áudio em kbps; `None` = arquivo sem áudio.
+    pub audio_kbps: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -31,6 +38,39 @@ pub enum VideoCodec {
     H264,
     /// HEVC: arquivos menores, mais lento para exportar.
     H265,
+    /// ProRes 422 HQ (.mov): para continuar editando em outro programa.
+    ProRes,
+}
+
+/// Velocidade do encoder (preset do x264/x265): mais lento = arquivo menor na mesma qualidade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EncoderSpeed {
+    Ultrafast,
+    Veryfast,
+    Fast,
+    #[default]
+    Medium,
+    Slow,
+}
+
+impl EncoderSpeed {
+    pub const ALL: [EncoderSpeed; 5] = [
+        EncoderSpeed::Ultrafast,
+        EncoderSpeed::Veryfast,
+        EncoderSpeed::Fast,
+        EncoderSpeed::Medium,
+        EncoderSpeed::Slow,
+    ];
+
+    fn preset(self) -> &'static str {
+        match self {
+            EncoderSpeed::Ultrafast => "ultrafast",
+            EncoderSpeed::Veryfast => "veryfast",
+            EncoderSpeed::Fast => "fast",
+            EncoderSpeed::Medium => "medium",
+            EncoderSpeed::Slow => "slow",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +88,37 @@ impl Default for ExportSettings {
             size: None,
             codec: VideoCodec::H264,
             audio_only: None,
+            fps: None,
+            bitrate_kbps: None,
+            speed: EncoderSpeed::Medium,
+            audio_kbps: Some(192),
         }
+    }
+}
+
+/// Quantos frames o arquivo vai ter (muda quando a taxa de saída é outra).
+pub fn frame_count(project: &Project, settings: &ExportSettings) -> Frame {
+    let (from, to) = settings.range.unwrap_or((0, project.duration()));
+    let total = (to.min(project.duration()) - from.max(0)).max(0);
+    match settings.fps {
+        Some(out) => {
+            let p = project.settings.fps;
+            (i128::from(total) * i128::from(out.num) * i128::from(p.den)
+                / (i128::from(out.den) * i128::from(p.num))) as Frame
+        }
+        None => total,
+    }
+}
+
+/// Frame do projeto mostrado no frame `i` da saída.
+fn source_frame(project: &Project, settings: &ExportSettings, i: Frame) -> Frame {
+    match settings.fps {
+        Some(out) => {
+            let p = project.settings.fps;
+            (i128::from(i) * i128::from(p.num) * i128::from(out.den)
+                / (i128::from(p.den) * i128::from(out.num))) as Frame
+        }
+        None => i,
     }
 }
 
@@ -98,7 +168,10 @@ pub fn export(
     }
     let work = tempfile::tempdir()?;
     let audio = work.path().join("audio.f32");
-    write_audio(project, renderer, from, total, &audio, cancel)?;
+    let with_audio = settings.audio_only.is_some() || settings.audio_kbps.is_some();
+    if with_audio {
+        write_audio(project, renderer, from, total, &audio, cancel)?;
+    }
 
     if let Some(format) = settings.audio_only {
         let mut child = spawn_audio_ffmpeg(project, &audio, format, &settings.output)?;
@@ -116,7 +189,7 @@ pub fn export(
         return result;
     }
 
-    let mut child = spawn_ffmpeg(project, &audio, settings)?;
+    let mut child = spawn_ffmpeg(project, with_audio.then_some(audio.as_path()), settings)?;
     let mut stderr = child.stderr.take().expect("stderr configurado");
     let log = thread::spawn(move || {
         let mut s = String::new();
@@ -127,8 +200,8 @@ pub fn export(
     let fed = feed_frames(
         project,
         renderer,
+        settings,
         (from, total),
-        output_size(project, settings),
         &mut stdin,
         cancel,
         &mut on_progress,
@@ -199,67 +272,127 @@ fn write_audio(
     Ok(())
 }
 
+fn even(v: u32) -> u32 {
+    v.max(2).div_ceil(2) * 2
+}
+
 /// Tamanho da saída (par, como o H.264/H.265 em 4:2:0 exige).
 fn output_size(project: &Project, settings: &ExportSettings) -> (u32, u32) {
     let (w, h) = settings
         .size
         .unwrap_or((project.settings.width, project.settings.height));
-    (w.max(2).div_ceil(2) * 2, h.max(2).div_ceil(2) * 2)
+    (even(w), even(h))
+}
+
+/// Tamanho da imagem dentro da saída: a proporção do projeto, com barras pretas se a saída
+/// tiver outra proporção (ex.: projeto 16:9 exportado em 9:16).
+fn picture_size(project: &Project, settings: &ExportSettings) -> (u32, u32) {
+    let (w, h) = output_size(project, settings);
+    let (pw, ph) = (
+        project.settings.width.max(1) as f64,
+        project.settings.height.max(1) as f64,
+    );
+    let k = (w as f64 / pw).min(h as f64 / ph);
+    let fit = (even((pw * k).round() as u32), even((ph * k).round() as u32));
+    // Diferença de um ou dois pixels é arredondamento: estica em vez de pôr uma barra fina.
+    if w.abs_diff(fit.0) <= 2 && h.abs_diff(fit.1) <= 2 {
+        (w, h)
+    } else {
+        (fit.0.min(w), fit.1.min(h))
+    }
 }
 
 fn spawn_ffmpeg(
     project: &Project,
-    audio: &Path,
+    audio: Option<&Path>,
     settings: &ExportSettings,
 ) -> Result<Child, ExportError> {
     let s = &project.settings;
     let (w, h) = output_size(project, settings);
+    let (pw, ph) = picture_size(project, settings);
+    let fps = settings.fps.unwrap_or(s.fps);
     let crf = settings.crf.to_string();
-    let codec: &[&str] = match settings.codec {
-        VideoCodec::H264 => &["-c:v", "libx264", "-preset", "medium", "-crf", &crf],
+    let preset = settings.speed.preset();
+    let mut video: Vec<String> = Vec::new();
+    let mut push = |args: &[&str]| video.extend(args.iter().map(|a| a.to_string()));
+    match settings.codec {
+        VideoCodec::H264 => push(&["-c:v", "libx264", "-preset", preset, "-pix_fmt", "yuv420p"]),
         // A tag hvc1 faz o arquivo abrir no QuickTime/iPhone.
-        VideoCodec::H265 => &[
+        VideoCodec::H265 => push(&[
             "-c:v",
             "libx265",
             "-preset",
-            "medium",
-            "-crf",
-            &crf,
+            preset,
+            "-pix_fmt",
+            "yuv420p",
             "-tag:v",
             "hvc1",
             "-x265-params",
             "log-level=error",
-        ],
-    };
+        ]),
+        VideoCodec::ProRes => push(&[
+            "-c:v",
+            "prores_ks",
+            "-profile:v",
+            "3",
+            "-pix_fmt",
+            "yuv422p10le",
+        ]),
+    }
+    if settings.codec != VideoCodec::ProRes {
+        match settings.bitrate_kbps {
+            Some(kbps) => push(&[
+                "-b:v",
+                &format!("{kbps}k"),
+                "-maxrate",
+                &format!("{}k", kbps * 3 / 2),
+                "-bufsize",
+                &format!("{}k", kbps * 2),
+            ]),
+            None => push(&["-crf", &crf]),
+        }
+    }
+    if (pw, ph) != (w, h) {
+        push(&["-vf", &format!("pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black")]);
+    }
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-v", "error", "-y"])
         .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
-        .args(["-s", &format!("{w}x{h}")])
-        .args(["-framerate", &format!("{}/{}", s.fps.num, s.fps.den)])
-        .args(["-i", "-"])
-        .args([
-            "-f",
-            "f32le",
-            "-ar",
-            &s.sample_rate.to_string(),
-            "-ac",
-            "2",
-            "-i",
-        ])
-        .arg(audio)
-        .args(["-map", "0:v:0", "-map", "1:a:0"])
-        .args(codec)
-        .args([
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-movflags",
-            "+faststart",
-        ])
-        .arg(&settings.output)
+        .args(["-s", &format!("{pw}x{ph}")])
+        .args(["-framerate", &format!("{}/{}", fps.num, fps.den)])
+        .args(["-i", "-"]);
+    match (audio, settings.audio_kbps) {
+        (Some(audio), Some(kbps)) => {
+            cmd.args([
+                "-f",
+                "f32le",
+                "-ar",
+                &s.sample_rate.to_string(),
+                "-ac",
+                "2",
+                "-i",
+            ])
+            .arg(audio)
+            .args(["-map", "0:v:0", "-map", "1:a:0"]);
+            if settings.codec == VideoCodec::ProRes {
+                cmd.args(["-c:a", "pcm_s16le"]);
+            } else {
+                cmd.args(["-c:a", "aac", "-b:a", &format!("{kbps}k")]);
+            }
+        }
+        _ => {
+            cmd.arg("-an");
+        }
+    }
+    cmd.args(&video);
+    let mp4_like = settings
+        .output
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mp4") || e.eq_ignore_ascii_case("mov"));
+    if mp4_like {
+        cmd.args(["-movflags", "+faststart"]);
+    }
+    cmd.arg(&settings.output)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -312,26 +445,38 @@ fn spawn_audio_ffmpeg(
 fn feed_frames(
     project: &Project,
     renderer: &mut Renderer,
+    settings: &ExportSettings,
     (from, total): (Frame, Frame),
-    (w, h): (u32, u32),
     stdin: &mut ChildStdin,
     cancel: &AtomicBool,
     on_progress: &mut impl FnMut(Progress),
 ) -> Result<(), ExportError> {
-    for i in 0..total {
+    let (w, h) = picture_size(project, settings);
+    let count = frame_count(project, settings);
+    // Com mais fps na saída que no projeto o mesmo frame se repete: reaproveita a imagem.
+    let mut last: Option<(Frame, Vec<u8>)> = None;
+    for i in 0..count {
         if cancel.load(Ordering::Relaxed) {
             return Err(ExportError::Cancelled);
         }
-        let frame = from + i;
-        let rendered = renderer.render_frame(project, frame, w, h);
-        if let Some(&clip) = rendered.offline.first() {
-            return Err(ExportError::Offline {
-                frame,
-                path: media_path(project, clip),
-            });
+        let frame = from + source_frame(project, settings, i).min(total - 1);
+        if last.as_ref().is_none_or(|(f, _)| *f != frame) {
+            let rendered = renderer.render_frame(project, frame, w, h);
+            if let Some(&clip) = rendered.offline.first() {
+                return Err(ExportError::Offline {
+                    frame,
+                    path: media_path(project, clip),
+                });
+            }
+            last = Some((frame, rendered.image.into_raw()));
         }
-        stdin.write_all(rendered.image.as_raw())?;
-        on_progress(Progress { done: i + 1, total });
+        if let Some((_, bytes)) = &last {
+            stdin.write_all(bytes)?;
+        }
+        on_progress(Progress {
+            done: i + 1,
+            total: count,
+        });
     }
     Ok(())
 }

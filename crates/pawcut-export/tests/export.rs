@@ -299,3 +299,95 @@ fn saves_the_current_frame_as_png() {
     assert_eq!(img.dimensions(), (W, H));
     assert_eq!(img.get_pixel(5, 5).0, [255, 0, 0, 255]);
 }
+
+fn video_stream(path: &std::path::Path) -> serde_json::Value {
+    kit::ffprobe(path)["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["codec_type"] == "video")
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn exports_at_another_frame_rate_keeping_the_duration() {
+    let dir = tempfile::tempdir().unwrap();
+    let ed = two_second_project(dir.path());
+    let out = dir.path().join("60.mp4");
+    let settings = ExportSettings {
+        output: out.clone(),
+        fps: Some(FrameRate::new(60, 1)),
+        ..Default::default()
+    };
+    assert_eq!(pawcut_export::frame_count(ed.project(), &settings), 120);
+    run_with(&ed, settings).unwrap();
+    let v = video_stream(&out);
+    assert_eq!(v["r_frame_rate"], "60/1");
+    assert!(
+        (duration(&out) - 2.0).abs() < 0.1,
+        "duração {}",
+        duration(&out)
+    );
+}
+
+#[test]
+fn vertical_output_from_a_wide_project_gets_black_bars() {
+    let dir = tempfile::tempdir().unwrap();
+    let ed = two_second_project(dir.path());
+    let out = dir.path().join("vertical.mp4");
+    run_with(
+        &ed,
+        ExportSettings {
+            output: out.clone(),
+            size: Some((180, 320)),
+            bitrate_kbps: Some(800),
+            speed: pawcut_export::EncoderSpeed::Ultrafast,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let v = video_stream(&out);
+    assert_eq!(
+        (v["width"].as_u64(), v["height"].as_u64()),
+        (Some(180), Some(320))
+    );
+    let img = kit::grab_frame(&out, 0.5, 180, 320);
+    let top = kit::pixel(&img, 180, 90, 10);
+    let mid = kit::pixel(&img, 180, 90, 160);
+    assert!(top[0] < 30 && top[1] < 30, "barra preta em cima: {top:?}");
+    assert!(
+        mid[0] > 200 && mid[1] < 60,
+        "imagem vermelha no meio: {mid:?}"
+    );
+}
+
+#[test]
+fn exports_prores_mov_and_files_without_audio() {
+    let dir = tempfile::tempdir().unwrap();
+    let ed = two_second_project(dir.path());
+    let mov = dir.path().join("master.mov");
+    run_with(
+        &ed,
+        ExportSettings {
+            output: mov.clone(),
+            codec: pawcut_export::VideoCodec::ProRes,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(video_stream(&mov)["codec_name"], "prores");
+
+    let mute = dir.path().join("mudo.mkv");
+    run_with(
+        &ed,
+        ExportSettings {
+            output: mute.clone(),
+            audio_kbps: None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let streams = kit::ffprobe(&mute)["streams"].as_array().unwrap().clone();
+    assert_eq!(streams.len(), 1, "sem trilha de áudio");
+}

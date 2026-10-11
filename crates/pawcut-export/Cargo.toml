@@ -14,3 +14,4 @@ thiserror.workspace = true
 [dev-dependencies]
 image.workspace = true
 pawcut-testkit.workspace = true
+serde_json.workspace = true
