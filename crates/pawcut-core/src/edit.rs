@@ -167,6 +167,15 @@ pub enum Edit {
         start: Frame,
         end: Frame,
     },
+    /// Fecha o buraco da faixa que contém `at` (puxa o que vem depois).
+    CloseGap {
+        track: TrackId,
+        at: Frame,
+    },
+    /// Fecha todos os buracos da faixa (os clipes ficam encostados a partir do primeiro).
+    CloseAllGaps {
+        track: TrackId,
+    },
     /// Tira todos os keyframes do parâmetro (volta ao valor fixo).
     ClearKeyframes {
         clip: ClipId,
@@ -303,6 +312,38 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
         }
         Edit::SetDissolve { clip, frames } => set_dissolve(p, clip, frames),
         Edit::Paste { at, clips } => paste(p, at, clips),
+        Edit::CloseGap { track, at } => {
+            unlocked_track(p, track)?;
+            let t = p.track_mut(track).expect("faixa validada");
+            let next = t
+                .clips
+                .iter()
+                .position(|c| c.start > at)
+                .ok_or(EditError::NoChange)?;
+            let gap_start = if next == 0 {
+                0
+            } else {
+                t.clips[next - 1].end()
+            };
+            if at < gap_start {
+                return Err(EditError::NoChange);
+            }
+            let len = t.clips[next].start - gap_start;
+            for c in &mut t.clips[next..] {
+                c.start -= len;
+            }
+            Ok(Outcome::default())
+        }
+        Edit::CloseAllGaps { track } => {
+            unlocked_track(p, track)?;
+            let t = p.track_mut(track).expect("faixa validada");
+            let mut cursor = t.clips.first().map_or(0, |c| c.start);
+            for c in &mut t.clips {
+                c.start = cursor;
+                cursor = c.end();
+            }
+            Ok(Outcome::default())
+        }
         Edit::RippleDeleteRange { tracks, start, end } => {
             ripple_delete_range(p, tracks, start, end)
         }
@@ -996,4 +1037,45 @@ fn ripple_delete_range(
         }
     }
     Ok(Outcome::default())
+}
+
+impl Edit {
+    /// Nome curto da edição para o menu "Desfazer: …".
+    pub fn label(&self) -> &'static str {
+        match self {
+            Edit::AddMedia(_) => "Importar mídia",
+            Edit::RelinkMedia { .. } => "Reconectar mídia",
+            Edit::RemoveMedia(_) => "Remover mídia",
+            Edit::AddTrack(_) => "Adicionar faixa",
+            Edit::RemoveTrack(_) => "Apagar faixa",
+            Edit::SetTrackFlags { .. } => "Opções da faixa",
+            Edit::Overwrite { .. } => "Overwrite",
+            Edit::Insert { .. } => "Insert",
+            Edit::Append { .. } => "Append",
+            Edit::Move { .. } => "Mover clipe",
+            Edit::Trim { .. } => "Aparar clipe",
+            Edit::Blade { .. } => "Cortar",
+            Edit::Delete { .. } => "Apagar",
+            Edit::RippleDelete { .. } => "Apagar com ripple",
+            Edit::SetClip { change, .. } => match change {
+                ClipChange::Transform(_) => "Transform",
+                ClipChange::VolumeDb(_) => "Volume",
+                ClipChange::FadeIn(_) | ClipChange::FadeOut(_) => "Fade",
+                ClipChange::Source(_) => "Editar gerador",
+                ClipChange::Color(_) => "Cor",
+            },
+            Edit::SetSpeed { .. } => "Velocidade",
+            Edit::Link { .. } => "Ligar clipes",
+            Edit::Unlink { .. } => "Separar áudio e vídeo",
+            Edit::SetMarker { .. } => "Marcador",
+            Edit::SetResolution { .. } => "Resolução do projeto",
+            Edit::SetDissolve { .. } => "Dissolve",
+            Edit::RippleTrimToPlayhead { .. } => "Cortar até o cursor",
+            Edit::SetKeyframe { .. } | Edit::ClearKeyframes { .. } => "Keyframe",
+            Edit::Paste { .. } => "Colar",
+            Edit::RippleDeleteRange { .. } => "Remover trecho",
+            Edit::CloseGap { .. } => "Fechar buraco",
+            Edit::CloseAllGaps { .. } => "Fechar buracos",
+        }
+    }
 }

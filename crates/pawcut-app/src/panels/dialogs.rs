@@ -23,7 +23,13 @@ pub struct DeliverDialog {
 
 /// Presets de exportação: nome, altura de saída (`None` = do projeto), codec, só áudio, extensão.
 /// Nome, altura de saída, codec, só áudio, extensão.
-type DeliverPreset = (&'static str, Option<u32>, VideoCodec, Option<AudioFormat>, &'static str);
+type DeliverPreset = (
+    &'static str,
+    Option<u32>,
+    VideoCodec,
+    Option<AudioFormat>,
+    &'static str,
+);
 
 pub const DELIVER_PRESETS: [DeliverPreset; 6] = [
     (

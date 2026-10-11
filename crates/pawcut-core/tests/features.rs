@@ -280,3 +280,33 @@ fn ripple_delete_range_cuts_time_out_of_several_tracks() {
     assert_eq!(right.source_start, 50.0);
     assert_eq!(right.link, ed.project().audio_tracks[0].clips[1].link);
 }
+
+#[test]
+fn close_gap_and_close_all_gaps() {
+    let mut ed = new_editor();
+    let v1 = v(&ed, 0);
+    place(&mut ed, v1, solid(), 10, 0.0, 10);
+    place(&mut ed, v1, solid(), 30, 0.0, 10);
+    place(&mut ed, v1, solid(), 60, 0.0, 10);
+    ed.apply(Edit::CloseGap { track: v1, at: 25 }).unwrap();
+    assert_eq!(spans(&ed, v1), vec![(10, 20), (20, 30), (50, 60)]);
+    assert_eq!(
+        ed.apply(Edit::CloseGap { track: v1, at: 15 }),
+        Err(EditError::NoChange)
+    );
+    ed.apply(Edit::CloseAllGaps { track: v1 }).unwrap();
+    assert_eq!(spans(&ed, v1), vec![(10, 20), (20, 30), (30, 40)]);
+    ed.apply(Edit::CloseGap { track: v1, at: 0 }).unwrap();
+    assert_eq!(spans(&ed, v1), vec![(0, 10), (10, 20), (20, 30)]);
+}
+
+#[test]
+fn undo_and_redo_have_names() {
+    let mut ed = new_editor();
+    let v1 = v(&ed, 0);
+    place(&mut ed, v1, solid(), 0, 0.0, 10);
+    assert_eq!(ed.undo_label(), Some("Overwrite"));
+    ed.undo();
+    assert_eq!(ed.redo_label(), Some("Overwrite"));
+    assert_eq!(ed.undo_label(), None);
+}

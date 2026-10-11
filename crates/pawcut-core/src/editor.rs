@@ -7,8 +7,8 @@ const HISTORY_LIMIT: usize = 200;
 #[derive(Debug, Clone)]
 pub struct Editor {
     project: Project,
-    undo: Vec<Project>,
-    redo: Vec<Project>,
+    undo: Vec<(Project, &'static str)>,
+    redo: Vec<(Project, &'static str)>,
     /// Chave do grupo de `apply_coalescing` em andamento.
     coalesce: Option<String>,
     revision: u64,
@@ -31,13 +31,15 @@ impl Editor {
 
     /// Aplica a edição numa cópia. Em caso de erro ou edição vazia, o projeto e o histórico ficam intactos.
     pub fn apply(&mut self, edit: Edit) -> Result<Outcome, EditError> {
+        let label = edit.label();
         let mut next = self.project.clone();
         let outcome = edit::apply(&mut next, edit)?;
         edit::normalize_links(&mut next);
         if next == self.project {
             return Err(EditError::NoChange);
         }
-        self.undo.push(std::mem::replace(&mut self.project, next));
+        self.undo
+            .push((std::mem::replace(&mut self.project, next), label));
         if self.undo.len() > HISTORY_LIMIT {
             self.undo.remove(0);
         }
@@ -79,8 +81,9 @@ impl Editor {
 
     pub fn undo(&mut self) -> bool {
         match self.undo.pop() {
-            Some(prev) => {
-                self.redo.push(std::mem::replace(&mut self.project, prev));
+            Some((prev, label)) => {
+                self.redo
+                    .push((std::mem::replace(&mut self.project, prev), label));
                 self.coalesce = None;
                 self.revision += 1;
                 true
@@ -91,14 +94,24 @@ impl Editor {
 
     pub fn redo(&mut self) -> bool {
         match self.redo.pop() {
-            Some(next) => {
-                self.undo.push(std::mem::replace(&mut self.project, next));
+            Some((next, label)) => {
+                self.undo
+                    .push((std::mem::replace(&mut self.project, next), label));
                 self.coalesce = None;
                 self.revision += 1;
                 true
             }
             None => false,
         }
+    }
+
+    /// Nome do que "Desfazer" vai desfazer.
+    pub fn undo_label(&self) -> Option<&'static str> {
+        self.undo.last().map(|(_, l)| *l)
+    }
+
+    pub fn redo_label(&self) -> Option<&'static str> {
+        self.redo.last().map(|(_, l)| *l)
     }
 
     pub fn can_undo(&self) -> bool {

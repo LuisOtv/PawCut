@@ -20,4 +20,4 @@ pub use model::{
     PROJECT_VERSION, Param, Project, ProjectSettings, Rgba, TextAlign, TextStyle, Track, TrackKind,
     Transform,
 };
-pub use time::{Frame, FrameRate, format_timecode};
+pub use time::{Frame, FrameRate, format_timecode, parse_timecode};
