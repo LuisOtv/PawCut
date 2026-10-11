@@ -1,0 +1,15 @@
+[package]
+name = "pawcut-render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pawcut-core.workspace = true
+pawcut-media.workspace = true
+image.workspace = true
+rayon.workspace = true
+cosmic-text.workspace = true
+
+[dev-dependencies]
+pawcut-testkit.workspace = true
+tempfile.workspace = true
