@@ -2,9 +2,12 @@
 
 mod error;
 mod probe;
+mod video;
 
 pub use error::MediaError;
+pub use image::RgbaImage;
 pub use probe::probe;
+pub use video::VideoSource;
 
 use std::sync::Once;
 
