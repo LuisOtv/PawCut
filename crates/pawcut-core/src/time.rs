@@ -54,6 +54,59 @@ pub fn format_timecode(frame: Frame, rate: FrameRate) -> String {
     )
 }
 
+/// Lê um tempo digitado: `01:00:05:12` (ou só as partes da direita, `5:12`), dígitos colados
+/// como no Resolve (`512` = 5 s 12 fr), `150f` (frames) e relativo a `current` com `+` / `-`.
+pub fn parse_timecode(input: &str, rate: FrameRate, current: Frame) -> Option<Frame> {
+    let s: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+    let (sign, body) = match s.chars().next()? {
+        '+' => (1, &s[1..]),
+        '-' => (-1, &s[1..]),
+        _ => (0, s.as_str()),
+    };
+    if body.is_empty() {
+        return None;
+    }
+    let fps = rate.nominal();
+    let value = if let Some(frames) = body.strip_suffix(['f', 'F']) {
+        frames.parse::<Frame>().ok()?
+    } else {
+        let parts: Vec<i64> = if body.contains([':', ';', '.']) {
+            body.split([':', ';', '.'])
+                .map(|p| {
+                    if p.is_empty() {
+                        Some(0)
+                    } else {
+                        p.parse::<i64>().ok()
+                    }
+                })
+                .collect::<Option<_>>()?
+        } else {
+            if !body.chars().all(|c| c.is_ascii_digit()) || body.len() > 8 {
+                return None;
+            }
+            // Dígitos colados: de dois em dois a partir da direita (FF, SS, MM, HH).
+            let padded = format!("{body:0>8}");
+            (0..4)
+                .map(|i| padded[i * 2..i * 2 + 2].parse::<i64>().unwrap_or(0))
+                .collect()
+        };
+        if parts.len() > 4 {
+            return None;
+        }
+        let mut units = [0i64; 4]; // HH MM SS FF
+        for (slot, v) in units.iter_mut().rev().zip(parts.iter().rev()) {
+            *slot = *v;
+        }
+        ((units[0] * 60 + units[1]) * 60 + units[2]) * fps + units[3]
+    };
+    let out = match sign {
+        1 => current + value,
+        -1 => current - value,
+        _ => value,
+    };
+    Some(out.max(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +138,20 @@ mod tests {
         assert!((FPS30.frames_to_seconds(45) - 1.5).abs() < 1e-9);
         assert_eq!(FPS30.frame_to_sample(30, 48_000), 48_000);
         assert_eq!(NTSC.frame_to_sample(30, 48_000), 48_048);
+    }
+
+    #[test]
+    fn parses_typed_timecodes() {
+        let r = FPS30;
+        assert_eq!(parse_timecode("01:00:05:12", r, 0), Some(30 * 3605 + 12));
+        assert_eq!(parse_timecode("5:12", r, 0), Some(5 * 30 + 12));
+        assert_eq!(parse_timecode("512", r, 0), Some(5 * 30 + 12));
+        assert_eq!(parse_timecode("10000", r, 0), Some(60 * 30));
+        assert_eq!(parse_timecode("150f", r, 0), Some(150));
+        assert_eq!(parse_timecode("+30", r, 100), Some(130));
+        assert_eq!(parse_timecode("-1:00", r, 100), Some(70));
+        assert_eq!(parse_timecode("-1:00", r, 10), Some(0));
+        assert_eq!(parse_timecode("abc", r, 0), None);
+        assert_eq!(parse_timecode("", r, 0), None);
     }
 }

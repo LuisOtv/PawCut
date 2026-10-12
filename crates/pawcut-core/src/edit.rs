@@ -4,7 +4,8 @@ use thiserror::Error;
 
 use crate::ids::{ClipId, LinkId, MediaId, TrackId};
 use crate::model::{
-    Clip, ClipSource, MediaInfo, MediaKind, MediaRef, Project, Track, TrackKind, Transform,
+    Clip, ClipSource, ColorAdjust, Keyframe, Marker, MediaInfo, MediaKind, MediaRef, Param,
+    Project, Track, TrackKind, Transform,
 };
 use crate::time::Frame;
 use crate::track_ops::{clear_range, insert_sorted, relink, ripple_open, split_clip};
@@ -52,11 +53,20 @@ pub enum ClipChange {
     FadeOut(Frame),
     /// Só para geradores (cor sólida/texto).
     Source(ClipSource),
+    /// Matiz/Saturação/Luminosidade.
+    Color(ColorAdjust),
 }
 /// Uma alteração no projeto. Aplicada pelo `Editor`, que guarda o histórico.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Edit {
     AddMedia(MediaInfo),
+    /// Aponta a mídia para outro arquivo (Relink), mantendo os clipes.
+    RelinkMedia {
+        media: MediaId,
+        info: MediaInfo,
+    },
+    /// Tira a mídia do Media Pool; recusa se algum clipe usa.
+    RemoveMedia(MediaId),
     AddTrack(TrackKind),
     RemoveTrack(TrackId),
     SetTrackFlags {
@@ -117,6 +127,66 @@ pub enum Edit {
     Unlink {
         clips: Vec<ClipId>,
     },
+    /// Cria/troca (`Some`) ou apaga (`None`) o marcador em `frame`.
+    SetMarker {
+        frame: Frame,
+        marker: Option<Marker>,
+    },
+    /// Muda a resolução do projeto (o FPS fica fixo).
+    SetResolution {
+        width: u32,
+        height: u32,
+    },
+    /// Cross dissolve com o clipe anterior (adjacente) da faixa; 0 tira.
+    SetDissolve {
+        clip: ClipId,
+        frames: Frame,
+    },
+    /// Corta do início até `at` (Edge::Start) ou de `at` até o fim (Edge::End) e fecha o buraco.
+    RippleTrimToPlayhead {
+        clips: Vec<ClipId>,
+        edge: Edge,
+        at: Frame,
+    },
+    /// Cria/troca (`Some`) ou apaga (`None`) o keyframe do parâmetro no tempo da fonte `at`.
+    SetKeyframe {
+        clip: ClipId,
+        param: Param,
+        at: f64,
+        value: Option<f32>,
+    },
+    /// Cola cópias completas de clipes em `at` (o `start` de cada um é o deslocamento),
+    /// por cima do que houver; ganham ids novos e os links são refeitos entre as cópias.
+    Paste {
+        at: Frame,
+        clips: Vec<(TrackId, Clip)>,
+    },
+    /// Tira o intervalo `[start, end)` das faixas e puxa o resto (ex.: remover silêncios).
+    RippleDeleteRange {
+        tracks: Vec<TrackId>,
+        start: Frame,
+        end: Frame,
+    },
+    /// Tira o intervalo `[start, end)` das faixas deixando o buraco (Lift).
+    DeleteRange {
+        tracks: Vec<TrackId>,
+        start: Frame,
+        end: Frame,
+    },
+    /// Fecha o buraco da faixa que contém `at` (puxa o que vem depois).
+    CloseGap {
+        track: TrackId,
+        at: Frame,
+    },
+    /// Fecha todos os buracos da faixa (os clipes ficam encostados a partir do primeiro).
+    CloseAllGaps {
+        track: TrackId,
+    },
+    /// Tira todos os keyframes do parâmetro (volta ao valor fixo).
+    ClearKeyframes {
+        clip: ClipId,
+        param: Param,
+    },
 }
 
 /// O que a edição criou, para a interface selecionar.
@@ -154,6 +224,32 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
                 media: Some(id),
                 ..Outcome::default()
             })
+        }
+        Edit::RelinkMedia { media, info } => {
+            let m = p
+                .media
+                .iter_mut()
+                .find(|m| m.id == media)
+                .ok_or(EditError::MediaNotFound(media))?;
+            m.info = info;
+            Ok(Outcome {
+                media: Some(media),
+                ..Outcome::default()
+            })
+        }
+        Edit::RemoveMedia(media) => {
+            p.media(media).ok_or(EditError::MediaNotFound(media))?;
+            let used = p
+                .all_tracks()
+                .flat_map(|t| &t.clips)
+                .any(|c| c.source == ClipSource::Media(media));
+            if used {
+                return Err(EditError::InvalidValue(
+                    "a mídia está sendo usada na timeline",
+                ));
+            }
+            p.media.retain(|m| m.id != media);
+            Ok(Outcome::default())
         }
         Edit::AddTrack(kind) => Ok(Outcome {
             track: Some(p.add_track(kind)),
@@ -203,6 +299,77 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
         Edit::SetSpeed { clips, speed } => set_speed(p, clips, speed),
         Edit::Link { clips } => set_link(p, clips, true),
         Edit::Unlink { clips } => set_link(p, clips, false),
+        Edit::SetMarker { frame, marker } => {
+            p.markers.retain(|m| m.frame != frame);
+            if let Some(mut m) = marker {
+                m.frame = frame.max(0);
+                p.markers.push(m);
+                p.markers.sort_by_key(|m| m.frame);
+            }
+            Ok(Outcome::default())
+        }
+        Edit::SetResolution { width, height } => {
+            if !(16..=16384).contains(&width) || !(16..=16384).contains(&height) {
+                return Err(EditError::InvalidValue("resolução inválida"));
+            }
+            p.settings.width = width;
+            p.settings.height = height;
+            Ok(Outcome::default())
+        }
+        Edit::SetDissolve { clip, frames } => set_dissolve(p, clip, frames),
+        Edit::Paste { at, clips } => paste(p, at, clips),
+        Edit::CloseGap { track, at } => {
+            unlocked_track(p, track)?;
+            let t = p.track_mut(track).expect("faixa validada");
+            let next = t
+                .clips
+                .iter()
+                .position(|c| c.start > at)
+                .ok_or(EditError::NoChange)?;
+            let gap_start = if next == 0 {
+                0
+            } else {
+                t.clips[next - 1].end()
+            };
+            if at < gap_start {
+                return Err(EditError::NoChange);
+            }
+            let len = t.clips[next].start - gap_start;
+            for c in &mut t.clips[next..] {
+                c.start -= len;
+            }
+            Ok(Outcome::default())
+        }
+        Edit::CloseAllGaps { track } => {
+            unlocked_track(p, track)?;
+            let t = p.track_mut(track).expect("faixa validada");
+            let mut cursor = t.clips.first().map_or(0, |c| c.start);
+            for c in &mut t.clips {
+                c.start = cursor;
+                cursor = c.end();
+            }
+            Ok(Outcome::default())
+        }
+        Edit::RippleDeleteRange { tracks, start, end } => delete_range(p, tracks, start, end, true),
+        Edit::DeleteRange { tracks, start, end } => delete_range(p, tracks, start, end, false),
+        Edit::RippleTrimToPlayhead { clips, edge, at } => ripple_trim_to(p, clips, edge, at),
+        Edit::SetKeyframe {
+            clip,
+            param,
+            at,
+            value,
+        } => set_keyframe(p, clip, param, at, value),
+        Edit::ClearKeyframes { clip, param } => {
+            locate_unlocked(p, clip)?;
+            p.clip_mut(clip)
+                .expect("clipe validado acima")
+                .keyframes
+                .remove(&param);
+            Ok(Outcome {
+                clips: vec![clip],
+                ..Outcome::default()
+            })
+        }
     }
 }
 
@@ -325,6 +492,9 @@ fn place(p: &mut Project, at: Frame, items: Vec<Placement>) -> Result<Outcome, E
             fade_out: 0,
             transform: Transform::default(),
             link,
+            dissolve_in: 0,
+            color: ColorAdjust::default(),
+            keyframes: Default::default(),
         };
         let (track, ids) = p
             .track_and_ids(pl.track)
@@ -563,6 +733,17 @@ fn set_clip(p: &mut Project, id: ClipId, change: ClipChange) -> Result<Outcome, 
             if !(t.x.is_finite() && t.y.is_finite()) {
                 return Err(EditError::InvalidValue("posição inválida"));
             }
+            let k = t.crop;
+            let ok = |v: f32| (0.0..0.95).contains(&v);
+            if !(ok(k.left)
+                && ok(k.right)
+                && ok(k.top)
+                && ok(k.bottom)
+                && k.left + k.right < 0.95
+                && k.top + k.bottom < 0.95)
+            {
+                return Err(EditError::InvalidValue("recorte inválido"));
+            }
             c.transform = t;
         }
         ClipChange::VolumeDb(db) => {
@@ -591,6 +772,16 @@ fn set_clip(p: &mut Project, id: ClipId, change: ClipChange) -> Result<Outcome, 
             }
             validate_source(&s)?;
             c.source = s;
+        }
+        ClipChange::Color(color) => {
+            for (param, v) in [
+                (Param::Hue, color.hue),
+                (Param::Saturation, color.saturation),
+                (Param::Lightness, color.lightness),
+            ] {
+                validate_param(param, v)?;
+            }
+            c.color = color;
         }
     }
     Ok(Outcome {
@@ -679,4 +870,221 @@ fn validate_source(source: &ClipSource) -> Result<(), EditError> {
         ));
     }
     Ok(())
+}
+
+/// Faixa válida de cada parâmetro animável.
+fn validate_param(param: Param, v: f32) -> Result<(), EditError> {
+    let ok = v.is_finite()
+        && match param {
+            Param::X | Param::Y => true,
+            Param::Scale => v > 0.0,
+            Param::Opacity => (0.0..=1.0).contains(&v),
+            Param::VolumeDb => (-96.0..=24.0).contains(&v),
+            Param::Hue => (-180.0..=180.0).contains(&v),
+            Param::Saturation | Param::Lightness => (-100.0..=100.0).contains(&v),
+        };
+    if ok {
+        Ok(())
+    } else {
+        Err(EditError::InvalidValue("valor fora da faixa do parâmetro"))
+    }
+}
+
+fn set_keyframe(
+    p: &mut Project,
+    id: ClipId,
+    param: Param,
+    at: f64,
+    value: Option<f32>,
+) -> Result<Outcome, EditError> {
+    locate_unlocked(p, id)?;
+    if !at.is_finite() {
+        return Err(EditError::InvalidValue("tempo do keyframe inválido"));
+    }
+    if let Some(v) = value {
+        validate_param(param, v)?;
+    }
+    let c = p.clip_mut(id).expect("clipe validado acima");
+    let keys = c.keyframes.entry(param).or_default();
+    // Keyframes a menos de meio frame um do outro são o mesmo keyframe.
+    keys.retain(|k| (k.at - at).abs() >= 0.5);
+    if let Some(value) = value {
+        keys.push(Keyframe {
+            at,
+            value,
+            ease: Default::default(),
+        });
+        keys.sort_by(|a, b| a.at.total_cmp(&b.at));
+    }
+    if keys.is_empty() {
+        c.keyframes.remove(&param);
+    }
+    Ok(Outcome {
+        clips: vec![id],
+        ..Outcome::default()
+    })
+}
+
+fn set_dissolve(p: &mut Project, id: ClipId, frames: Frame) -> Result<Outcome, EditError> {
+    let (tid, i) = locate_unlocked(p, id)?;
+    if frames < 0 {
+        return Err(EditError::InvalidValue("duração negativa"));
+    }
+    let track = p.track_mut(tid).expect("faixa do clipe existe");
+    if frames > 0 && (i == 0 || track.clips[i - 1].end() != track.clips[i].start) {
+        return Err(EditError::InvalidValue(
+            "o dissolve precisa de um clipe encostado antes deste",
+        ));
+    }
+    let max = if i > 0 {
+        track.clips[i - 1].duration.min(track.clips[i].duration)
+    } else {
+        0
+    };
+    track.clips[i].dissolve_in = frames.min(max);
+    Ok(Outcome {
+        clips: vec![id],
+        ..Outcome::default()
+    })
+}
+
+/// Corta até o cursor e fecha o buraco (Shift+[ / Shift+] no Resolve).
+fn ripple_trim_to(
+    p: &mut Project,
+    clips: Vec<ClipId>,
+    edge: Edge,
+    at: Frame,
+) -> Result<Outcome, EditError> {
+    let clips: Vec<ClipId> = dedup(clips)
+        .into_iter()
+        .filter(|id| p.clip(*id).is_some_and(|c| c.start < at && at < c.end()))
+        .collect();
+    if clips.is_empty() {
+        return Err(EditError::NoChange);
+    }
+    let right = blade(p, at, BladeTarget::Clips(clips.clone()))?.clips;
+    match edge {
+        Edge::Start => delete(p, clips, true)?,
+        Edge::End => delete(p, right, true)?,
+    };
+    Ok(Outcome::default())
+}
+
+fn paste(p: &mut Project, at: Frame, clips: Vec<(TrackId, Clip)>) -> Result<Outcome, EditError> {
+    if clips.is_empty() {
+        return Err(EditError::InvalidValue("nada para colar"));
+    }
+    for (tid, c) in &clips {
+        let track = unlocked_track(p, *tid)?;
+        let draft = Placement {
+            track: *tid,
+            draft: ClipDraft {
+                source: c.source.clone(),
+                source_start: c.source_start,
+                duration: 1,
+            },
+        };
+        validate_draft(p, &draft)?;
+        if c.duration < 1 || at + c.start < 0 {
+            return Err(EditError::InvalidValue("clipe colado inválido"));
+        }
+        let _ = track;
+    }
+    let mut links = HashMap::new();
+    let mut out = Outcome::default();
+    for (tid, mut c) in clips {
+        c.id = ClipId(p.ids.fresh());
+        c.start += at;
+        c.dissolve_in = 0;
+        let (track, ids) = p.track_and_ids(tid).ok_or(EditError::TrackNotFound(tid))?;
+        c.link = relink(c.link, &mut links, ids);
+        clear_range(track, c.start, c.end(), ids);
+        out.clips.push(c.id);
+        insert_sorted(track, c);
+    }
+    Ok(out)
+}
+
+fn delete_range(
+    p: &mut Project,
+    tracks: Vec<TrackId>,
+    start: Frame,
+    end: Frame,
+    ripple: bool,
+) -> Result<Outcome, EditError> {
+    if start >= end || start < 0 {
+        return Err(EditError::InvalidValue("intervalo inválido"));
+    }
+    for t in &tracks {
+        unlocked_track(p, *t)?;
+    }
+    let mut links = HashMap::new();
+    for tid in tracks {
+        let (track, ids) = p.track_and_ids(tid).ok_or(EditError::TrackNotFound(tid))?;
+        // Corta nas duas pontas mantendo pares ligados nas metades novas.
+        for at in [end, start] {
+            if let Some(i) = track
+                .clips
+                .iter()
+                .position(|c| c.start < at && at < c.end())
+            {
+                let clip = track.clips.remove(i);
+                let (left, mut right) = split_clip(&clip, at, ClipId(ids.fresh()));
+                right.link = relink(clip.link, &mut links, ids);
+                track.clips.insert(i, left);
+                track.clips.insert(i + 1, right);
+            }
+        }
+        track
+            .clips
+            .retain(|c| !(c.start >= start && c.end() <= end));
+        if ripple {
+            for c in track.clips.iter_mut().filter(|c| c.start >= end) {
+                c.start -= end - start;
+            }
+        }
+    }
+    Ok(Outcome::default())
+}
+
+impl Edit {
+    /// Nome curto da edição para o menu "Desfazer: …".
+    pub fn label(&self) -> &'static str {
+        match self {
+            Edit::AddMedia(_) => "Importar mídia",
+            Edit::RelinkMedia { .. } => "Reconectar mídia",
+            Edit::RemoveMedia(_) => "Remover mídia",
+            Edit::AddTrack(_) => "Adicionar faixa",
+            Edit::RemoveTrack(_) => "Apagar faixa",
+            Edit::SetTrackFlags { .. } => "Opções da faixa",
+            Edit::Overwrite { .. } => "Overwrite",
+            Edit::Insert { .. } => "Insert",
+            Edit::Append { .. } => "Append",
+            Edit::Move { .. } => "Mover clipe",
+            Edit::Trim { .. } => "Aparar clipe",
+            Edit::Blade { .. } => "Cortar",
+            Edit::Delete { .. } => "Apagar",
+            Edit::RippleDelete { .. } => "Apagar com ripple",
+            Edit::SetClip { change, .. } => match change {
+                ClipChange::Transform(_) => "Transform",
+                ClipChange::VolumeDb(_) => "Volume",
+                ClipChange::FadeIn(_) | ClipChange::FadeOut(_) => "Fade",
+                ClipChange::Source(_) => "Editar gerador",
+                ClipChange::Color(_) => "Cor",
+            },
+            Edit::SetSpeed { .. } => "Velocidade",
+            Edit::Link { .. } => "Ligar clipes",
+            Edit::Unlink { .. } => "Separar áudio e vídeo",
+            Edit::SetMarker { .. } => "Marcador",
+            Edit::SetResolution { .. } => "Resolução do projeto",
+            Edit::SetDissolve { .. } => "Dissolve",
+            Edit::RippleTrimToPlayhead { .. } => "Cortar até o cursor",
+            Edit::SetKeyframe { .. } | Edit::ClearKeyframes { .. } => "Keyframe",
+            Edit::Paste { .. } => "Colar",
+            Edit::RippleDeleteRange { .. } => "Remover trecho",
+            Edit::DeleteRange { .. } => "Apagar trecho",
+            Edit::CloseGap { .. } => "Fechar buraco",
+            Edit::CloseAllGaps { .. } => "Fechar buracos",
+        }
+    }
 }

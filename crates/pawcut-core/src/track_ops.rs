@@ -18,6 +18,7 @@ pub(crate) fn split_clip(clip: &Clip, at: Frame, right_id: ClipId) -> (Clip, Cli
     right.duration = clip.end() - at;
     right.source_start = clip.source_time_at(at);
     right.fade_in = 0;
+    right.dissolve_in = 0;
     right.fade_out = right.fade_out.min(right.duration);
     (left, right)
 }
@@ -105,6 +106,9 @@ mod tests {
             fade_out: 0,
             transform: Transform::default(),
             link: None,
+            dissolve_in: 0,
+            color: Default::default(),
+            keyframes: Default::default(),
         }
     }
 

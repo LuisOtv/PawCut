@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -6,7 +7,7 @@ use crate::ids::{ClipId, LinkId, MediaId, TrackId};
 use crate::time::{Frame, FrameRate};
 
 /// Versão do formato `.pawcut` que esta build lê e grava.
-pub const PROJECT_VERSION: u32 = 1;
+pub const PROJECT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rgba {
@@ -64,12 +65,63 @@ pub struct MediaRef {
     pub info: MediaInfo,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TextAlign {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+fn black() -> Rgba {
+    Rgba::new(0, 0, 0, 255)
+}
+
+fn translucent_black() -> Rgba {
+    Rgba::new(0, 0, 0, 160)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextStyle {
     pub text: String,
     pub font: String,
     pub size: f32,
     pub color: Rgba,
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub align: TextAlign,
+    /// Espessura do contorno em pixels do projeto (0 = sem contorno).
+    #[serde(default)]
+    pub outline: f32,
+    #[serde(default = "black")]
+    pub outline_color: Rgba,
+    /// Sombra projetada (deslocada para baixo e para a direita).
+    #[serde(default)]
+    pub shadow: bool,
+    /// Caixa atrás do texto (cor com transparência), como legenda.
+    #[serde(default)]
+    pub background: bool,
+    #[serde(default = "translucent_black")]
+    pub background_color: Rgba,
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        Self {
+            text: "Título".into(),
+            font: "Sans".into(),
+            size: 96.0,
+            color: Rgba::new(255, 255, 255, 255),
+            bold: false,
+            align: TextAlign::Center,
+            outline: 0.0,
+            outline_color: black(),
+            shadow: false,
+            background: false,
+            background_color: translucent_black(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -85,13 +137,29 @@ impl ClipSource {
     }
 }
 
-/// Transform fixo: deslocamento em pixels a partir do centro, escala e opacidade (0..=1).
+/// Recorte em fração da imagem (0..1) em cada borda.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Crop {
+    pub left: f32,
+    pub right: f32,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+/// Transform: deslocamento em pixels a partir do centro, escala, opacidade (0..=1),
+/// recorte e espelhamento. Posição, escala e opacidade podem ter keyframes.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Transform {
     pub x: f32,
     pub y: f32,
     pub scale: f32,
     pub opacity: f32,
+    #[serde(default)]
+    pub crop: Crop,
+    #[serde(default)]
+    pub flip_h: bool,
+    #[serde(default)]
+    pub flip_v: bool,
 }
 
 impl Default for Transform {
@@ -101,8 +169,78 @@ impl Default for Transform {
             y: 0.0,
             scale: 1.0,
             opacity: 1.0,
+            crop: Crop::default(),
+            flip_h: false,
+            flip_v: false,
         }
     }
+}
+
+/// Matiz/Saturação/Luminosidade, como o Ctrl+U do Photoshop.
+/// `hue` em graus (−180..180), `saturation` e `lightness` de −100 a 100.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct ColorAdjust {
+    pub hue: f32,
+    pub saturation: f32,
+    pub lightness: f32,
+}
+
+impl ColorAdjust {
+    pub fn is_identity(&self) -> bool {
+        self.hue == 0.0 && self.saturation == 0.0 && self.lightness == 0.0
+    }
+}
+
+/// Parâmetros que podem ter keyframes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Param {
+    X,
+    Y,
+    Scale,
+    Opacity,
+    VolumeDb,
+    Hue,
+    Saturation,
+    Lightness,
+}
+
+impl Param {
+    pub const ALL: [Param; 8] = [
+        Param::X,
+        Param::Y,
+        Param::Scale,
+        Param::Opacity,
+        Param::VolumeDb,
+        Param::Hue,
+        Param::Saturation,
+        Param::Lightness,
+    ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Ease {
+    Linear,
+    /// Acelera e desacelera (ease in/out).
+    #[default]
+    Smooth,
+}
+
+/// Um keyframe. `at` é o tempo da fonte (em frames do projeto a 1x), assim mover, aparar,
+/// cortar ou mudar a velocidade do clipe não desloca a animação do conteúdo.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Keyframe {
+    pub at: f64,
+    pub value: f32,
+    #[serde(default)]
+    pub ease: Ease,
+}
+
+/// Marcador na régua da timeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Marker {
+    pub frame: Frame,
+    pub color: Rgba,
+    pub note: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -121,6 +259,13 @@ pub struct Clip {
     pub fade_out: Frame,
     pub transform: Transform,
     pub link: Option<LinkId>,
+    /// Cross dissolve com o clipe anterior da faixa, centrado no corte (0 = corte seco).
+    #[serde(default)]
+    pub dissolve_in: Frame,
+    #[serde(default)]
+    pub color: ColorAdjust,
+    #[serde(default)]
+    pub keyframes: BTreeMap<Param, Vec<Keyframe>>,
 }
 
 impl Clip {
@@ -135,6 +280,73 @@ impl Clip {
     /// Tempo da fonte mostrado no frame `frame` da timeline.
     pub fn source_time_at(&self, frame: Frame) -> f64 {
         self.source_start + (frame - self.start) as f64 * self.speed
+    }
+
+    /// Valor fixo do parâmetro (o que vale quando não há keyframes).
+    pub fn static_param(&self, param: Param) -> f32 {
+        let t = &self.transform;
+        match param {
+            Param::X => t.x,
+            Param::Y => t.y,
+            Param::Scale => t.scale,
+            Param::Opacity => t.opacity,
+            Param::VolumeDb => self.volume_db,
+            Param::Hue => self.color.hue,
+            Param::Saturation => self.color.saturation,
+            Param::Lightness => self.color.lightness,
+        }
+    }
+
+    /// Valor do parâmetro no tempo da fonte `s`, interpolando os keyframes.
+    pub fn param_at_source(&self, param: Param, s: f64) -> f32 {
+        let Some(keys) = self.keyframes.get(&param).filter(|k| !k.is_empty()) else {
+            return self.static_param(param);
+        };
+        let i = keys.partition_point(|k| k.at <= s);
+        if i == 0 {
+            return keys[0].value;
+        }
+        if i == keys.len() {
+            return keys[i - 1].value;
+        }
+        let (a, b) = (keys[i - 1], keys[i]);
+        let mut t = ((s - a.at) / (b.at - a.at)).clamp(0.0, 1.0) as f32;
+        if b.ease == Ease::Smooth {
+            t = t * t * (3.0 - 2.0 * t);
+        }
+        a.value + (b.value - a.value) * t
+    }
+
+    /// Valor do parâmetro no frame `frame` da timeline.
+    pub fn param(&self, param: Param, frame: Frame) -> f32 {
+        self.param_at_source(param, self.source_time_at(frame))
+    }
+
+    /// Transform no frame (com os keyframes aplicados).
+    pub fn transform_at(&self, frame: Frame) -> Transform {
+        Transform {
+            x: self.param(Param::X, frame),
+            y: self.param(Param::Y, frame),
+            scale: self.param(Param::Scale, frame).max(0.001),
+            opacity: self.param(Param::Opacity, frame).clamp(0.0, 1.0),
+            ..self.transform
+        }
+    }
+
+    pub fn color_at(&self, frame: Frame) -> ColorAdjust {
+        ColorAdjust {
+            hue: self.param(Param::Hue, frame),
+            saturation: self.param(Param::Saturation, frame),
+            lightness: self.param(Param::Lightness, frame),
+        }
+    }
+
+    /// Janela `[início, fim)` do dissolve de entrada, centrada no corte.
+    pub fn dissolve_window(&self) -> Option<(Frame, Frame)> {
+        (self.dissolve_in > 0).then(|| {
+            let before = self.dissolve_in / 2;
+            (self.start - before, self.start - before + self.dissolve_in)
+        })
     }
 }
 
@@ -175,6 +387,24 @@ impl Track {
         self.clips.iter().find(|c| c.contains(frame))
     }
 
+    /// Clipes visíveis no frame com o peso de cada um: normalmente um só (peso 1);
+    /// dentro de um cross dissolve, o anterior saindo e o seguinte entrando.
+    pub fn layers_at(&self, frame: Frame) -> Vec<(&Clip, f32)> {
+        for (i, c) in self.clips.iter().enumerate() {
+            let Some((a, b)) = c.dissolve_window() else {
+                continue;
+            };
+            if frame < a || frame >= b || i == 0 || self.clips[i - 1].end() != c.start {
+                continue;
+            }
+            let alpha = ((frame - a) as f32 + 0.5) / c.dissolve_in as f32;
+            return vec![(&self.clips[i - 1], 1.0 - alpha), (c, alpha)];
+        }
+        self.clip_at(frame)
+            .map(|c| vec![(c, 1.0)])
+            .unwrap_or_default()
+    }
+
     pub fn end(&self) -> Frame {
         self.clips.last().map_or(0, Clip::end)
     }
@@ -206,6 +436,8 @@ pub struct Project {
     /// Índice 0 = V1 (a de baixo). Faixas de cima cobrem as de baixo.
     pub video_tracks: Vec<Track>,
     pub audio_tracks: Vec<Track>,
+    #[serde(default)]
+    pub markers: Vec<Marker>,
     pub(crate) ids: IdGen,
 }
 
@@ -218,6 +450,7 @@ impl Project {
             media: Vec::new(),
             video_tracks: Vec::new(),
             audio_tracks: Vec::new(),
+            markers: Vec::new(),
             ids: IdGen::default(),
         };
         p.add_track(TrackKind::Video);
@@ -371,6 +604,9 @@ mod tests {
             fade_out: 0,
             transform: Transform::default(),
             link: link.map(LinkId),
+            dissolve_in: 0,
+            color: Default::default(),
+            keyframes: Default::default(),
         }
     }
 

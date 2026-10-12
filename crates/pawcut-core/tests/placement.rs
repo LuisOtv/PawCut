@@ -134,3 +134,44 @@ fn add_and_remove_tracks() {
     ed.apply(Edit::RemoveTrack(v2)).unwrap();
     assert_eq!(ed.project().video_tracks.len(), 1);
 }
+
+#[test]
+fn relink_points_media_to_a_new_file() {
+    let mut ed = new_editor();
+    let m = add_video(&mut ed, 300, true);
+    let info = MediaInfo {
+        path: "/novo/lugar.mp4".into(),
+        kind: MediaKind::Video { has_audio: true },
+        duration: Some(300),
+        width: 1280,
+        height: 720,
+    };
+    ed.apply(Edit::RelinkMedia {
+        media: m,
+        info: info.clone(),
+    })
+    .unwrap();
+    assert_eq!(ed.project().media(m).unwrap().info, info);
+    assert_eq!(
+        ed.apply(Edit::RelinkMedia {
+            media: MediaId(999),
+            info
+        }),
+        Err(EditError::MediaNotFound(MediaId(999)))
+    );
+}
+
+#[test]
+fn media_in_use_cannot_be_removed() {
+    let mut ed = new_editor();
+    let used = add_video(&mut ed, 300, false);
+    let unused = add_video(&mut ed, 300, false);
+    let v1 = v(&ed, 0);
+    place(&mut ed, v1, ClipSource::Media(used), 0, 0.0, 10);
+    assert!(matches!(
+        ed.apply(Edit::RemoveMedia(used)),
+        Err(EditError::InvalidValue(_))
+    ));
+    ed.apply(Edit::RemoveMedia(unused)).unwrap();
+    assert!(ed.project().media(unused).is_none());
+}
