@@ -2658,6 +2658,7 @@ dependencies = [
  "pawcut-media",
  "pawcut-render",
  "pawcut-testkit",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
 ]
