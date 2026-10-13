@@ -146,6 +146,8 @@ pub(crate) struct DrawOpts {
     pub flip_h: bool,
     pub flip_v: bool,
     pub color: Option<ColorAdjust>,
+    /// Rotação em radianos em volta do centro do retângulo (positivo = anti-horário).
+    pub angle: f32,
 }
 
 impl Default for DrawOpts {
@@ -158,6 +160,7 @@ impl Default for DrawOpts {
             flip_h: false,
             flip_v: false,
             color: None,
+            angle: 0.0,
         }
     }
 }
@@ -171,7 +174,24 @@ pub(crate) fn draw_image(
     opts: &DrawOpts,
 ) {
     let (w, h) = canvas.dimensions();
-    let ((x0, x1), (y0, y1)) = (span(r.x0, r.w, w), span(r.y0, r.h, h));
+    // Com rotação, percorre a caixa que contém o retângulo girado e volta cada pixel para
+    // as coordenadas do retângulo original.
+    let (sin, cos) = opts.angle.sin_cos();
+    let (cx, cy) = (r.x0 + r.w / 2.0, r.y0 + r.h / 2.0);
+    let hw = r.w / 2.0 * cos.abs() + r.h / 2.0 * sin.abs();
+    let hh = r.w / 2.0 * sin.abs() + r.h / 2.0 * cos.abs();
+    let rotated = opts.angle != 0.0;
+    let bbox = if rotated {
+        Rect {
+            x0: cx - hw,
+            y0: cy - hh,
+            w: hw * 2.0,
+            h: hh * 2.0,
+        }
+    } else {
+        r
+    };
+    let ((x0, x1), (y0, y1)) = (span(bbox.x0, bbox.w, w), span(bbox.y0, bbox.h, h));
     if opacity <= 0.0 || x0 == x1 || y0 == y1 || src.width() == 0 || src.height() == 0 {
         return;
     }
@@ -181,16 +201,24 @@ pub(crate) fn draw_image(
         .enumerate()
         .filter(|(y, _)| (y0..y1).contains(y))
         .for_each(|(y, row)| {
-            let mut fy = (y as f32 + 0.5 - r.y0) / r.h;
-            if opts.flip_v {
-                fy = 1.0 - fy;
-            }
-            let v = (opts.v0 + (opts.v1 - opts.v0) * fy) * sh - 0.5;
             for x in x0..x1 {
-                let mut fx = (x as f32 + 0.5 - r.x0) / r.w;
+                let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                let (lx, ly) = if rotated {
+                    (dx * cos - dy * sin, dx * sin + dy * cos)
+                } else {
+                    (dx, dy)
+                };
+                let (mut fx, mut fy) = (lx / r.w + 0.5, ly / r.h + 0.5);
+                if rotated && !((0.0..1.0).contains(&fx) && (0.0..1.0).contains(&fy)) {
+                    continue;
+                }
+                if opts.flip_v {
+                    fy = 1.0 - fy;
+                }
                 if opts.flip_h {
                     fx = 1.0 - fx;
                 }
+                let v = (opts.v0 + (opts.v1 - opts.v0) * fy) * sh - 0.5;
                 let u = (opts.u0 + (opts.u1 - opts.u0) * fx) * sw - 0.5;
                 let p = sample(src, u, v);
                 let mut rgb = [p[0], p[1], p[2]];
@@ -247,6 +275,37 @@ mod tests {
             None,
         );
         assert_eq!(c.get_pixel(0, 0).0, [128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn rotation_turns_the_image_counter_clockwise() {
+        // 2×1: vermelho à esquerda, verde à direita, desenhado num quadrado 8×8 girado 90°.
+        let mut src = RgbaImage::new(2, 1);
+        src.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        src.put_pixel(1, 0, image::Rgba([0, 255, 0, 255]));
+        let mut c = black(8, 8);
+        let opts = DrawOpts {
+            angle: std::f32::consts::FRAC_PI_2,
+            ..DrawOpts::default()
+        };
+        let r = Rect {
+            x0: 0.0,
+            y0: 0.0,
+            w: 8.0,
+            h: 8.0,
+        };
+        draw_image(&mut c, &src, r, 1.0, &opts);
+        // Anti-horário: a esquerda vai para baixo, a direita vai para cima.
+        assert!(
+            c.get_pixel(4, 7).0[0] > 200,
+            "embaixo vermelho {:?}",
+            c.get_pixel(4, 7)
+        );
+        assert!(
+            c.get_pixel(4, 0).0[1] > 200,
+            "em cima verde {:?}",
+            c.get_pixel(4, 0)
+        );
     }
 
     #[test]

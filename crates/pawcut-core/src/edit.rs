@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::ids::{ClipId, LinkId, MediaId, TrackId};
 use crate::model::{
-    Clip, ClipSource, ColorAdjust, Keyframe, Marker, MediaInfo, MediaKind, MediaRef, Param,
+    Clip, ClipSource, ColorAdjust, Ease, Keyframe, Marker, MediaInfo, MediaKind, MediaRef, Param,
     Project, Track, TrackKind, Transform,
 };
 use crate::time::Frame;
@@ -55,6 +55,10 @@ pub enum ClipChange {
     Source(ClipSource),
     /// Matiz/Saturação/Luminosidade.
     Color(ColorAdjust),
+    /// Liga/desliga o clipe sem tirar da timeline.
+    Enabled(bool),
+    /// Congela no tempo da fonte (`Some`) ou volta a tocar (`None`).
+    Freeze(Option<f64>),
 }
 /// Uma alteração no projeto. Aplicada pelo `Editor`, que guarda o histórico.
 #[derive(Debug, Clone, PartialEq)]
@@ -186,6 +190,32 @@ pub enum Edit {
     ClearKeyframes {
         clip: ClipId,
         param: Param,
+    },
+    /// Curva de chegada do keyframe em `at` (tempo da fonte).
+    SetKeyframeEase {
+        clip: ClipId,
+        param: Param,
+        at: f64,
+        ease: Ease,
+    },
+    /// Arrasta a borda e empurra o resto da faixa junto (ripple trim). No início o clipe
+    /// fica no lugar e o conteúdo é que encurta/estica; o que vem depois anda o mesmo tanto.
+    RippleTrim {
+        clips: Vec<ClipId>,
+        edge: Edge,
+        delta: Frame,
+    },
+    /// Move o corte entre pares de clipes encostados (esquerdo, direito) sem mudar a duração
+    /// total (roll).
+    Roll {
+        cuts: Vec<(ClipId, ClipId)>,
+        delta: Frame,
+    },
+    /// Muda o trecho da fonte usado sem mexer na posição nem na duração (slip).
+    /// Positivo mostra um trecho mais adiante da fonte.
+    Slip {
+        clips: Vec<ClipId>,
+        delta: Frame,
     },
 }
 
@@ -359,6 +389,31 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
             at,
             value,
         } => set_keyframe(p, clip, param, at, value),
+        Edit::SetKeyframeEase {
+            clip,
+            param,
+            at,
+            ease,
+        } => {
+            locate_unlocked(p, clip)?;
+            let c = p.clip_mut(clip).expect("clipe validado acima");
+            let k = c
+                .keyframes
+                .get_mut(&param)
+                .and_then(|keys| keys.iter_mut().find(|k| (k.at - at).abs() < 0.5))
+                .ok_or(EditError::InvalidValue("não há keyframe nesse ponto"))?;
+            if k.ease == ease {
+                return Err(EditError::NoChange);
+            }
+            k.ease = ease;
+            Ok(Outcome {
+                clips: vec![clip],
+                ..Outcome::default()
+            })
+        }
+        Edit::RippleTrim { clips, edge, delta } => ripple_trim(p, clips, edge, delta),
+        Edit::Roll { cuts, delta } => roll(p, cuts, delta),
+        Edit::Slip { clips, delta } => slip(p, clips, delta),
         Edit::ClearKeyframes { clip, param } => {
             locate_unlocked(p, clip)?;
             p.clip_mut(clip)
@@ -495,6 +550,8 @@ fn place(p: &mut Project, at: Frame, items: Vec<Placement>) -> Result<Outcome, E
             dissolve_in: 0,
             color: ColorAdjust::default(),
             keyframes: Default::default(),
+            enabled: true,
+            freeze: None,
         };
         let (track, ids) = p
             .track_and_ids(pl.track)
@@ -783,6 +840,18 @@ fn set_clip(p: &mut Project, id: ClipId, change: ClipChange) -> Result<Outcome, 
             }
             c.color = color;
         }
+        ClipChange::Enabled(on) => {
+            if c.enabled == on {
+                return Err(EditError::NoChange);
+            }
+            c.enabled = on;
+        }
+        ClipChange::Freeze(at) => {
+            if at.is_some_and(|v| !v.is_finite() || v < 0.0) {
+                return Err(EditError::InvalidValue("tempo do congelamento inválido"));
+            }
+            c.freeze = at;
+        }
     }
     Ok(Outcome {
         clips: vec![id],
@@ -882,6 +951,7 @@ fn validate_param(param: Param, v: f32) -> Result<(), EditError> {
             Param::VolumeDb => (-96.0..=24.0).contains(&v),
             Param::Hue => (-180.0..=180.0).contains(&v),
             Param::Saturation | Param::Lightness => (-100.0..=100.0).contains(&v),
+            Param::Rotation => (-3600.0..=3600.0).contains(&v),
         };
     if ok {
         Ok(())
@@ -921,6 +991,151 @@ fn set_keyframe(
     }
     Ok(Outcome {
         clips: vec![id],
+        ..Outcome::default()
+    })
+}
+
+/// Quanto a borda do clipe pode andar sem passar da fonte: (mínimo, máximo) do delta.
+fn source_limits(p: &Project, c: &Clip, edge: Edge) -> (Frame, Frame) {
+    let len = p.source_length(&c.source);
+    match edge {
+        Edge::End => {
+            let hi = len.map_or(Frame::MAX, |len| {
+                ((len as f64 - c.source_start) / c.speed + 1e-9).floor() as Frame - c.duration
+            });
+            (1 - c.duration, hi.max(0))
+        }
+        Edge::Start => {
+            let lo = if len.is_some() {
+                -(((c.source_start / c.speed) + 1e-9).floor() as Frame)
+            } else {
+                Frame::MIN / 4
+            };
+            (lo.min(0), c.duration - 1)
+        }
+    }
+}
+
+fn ripple_trim(
+    p: &mut Project,
+    clips: Vec<ClipId>,
+    edge: Edge,
+    delta: Frame,
+) -> Result<Outcome, EditError> {
+    // Um clipe por faixa (o primeiro de cada).
+    let mut per_track: Vec<(TrackId, ClipId)> = Vec::new();
+    for id in dedup(clips) {
+        let (tid, _) = locate_unlocked(p, id)?;
+        if !per_track.iter().any(|(t, _)| *t == tid) {
+            per_track.push((tid, id));
+        }
+    }
+    if per_track.is_empty() {
+        return Err(EditError::InvalidValue("nenhum clipe selecionado"));
+    }
+    let (mut lo, mut hi) = (Frame::MIN, Frame::MAX);
+    for (_, id) in &per_track {
+        let c = p.clip(*id).expect("clipe validado");
+        let (l, h) = source_limits(p, c, edge);
+        lo = lo.max(l);
+        hi = hi.min(h);
+    }
+    let d = if lo > hi { 0 } else { delta.clamp(lo, hi) };
+    if d == 0 {
+        return Err(EditError::NoChange);
+    }
+    // No fim a duração muda +d; no início muda −d. O resto da faixa anda o mesmo tanto.
+    let shift = if edge == Edge::End { d } else { -d };
+    for (tid, id) in &per_track {
+        let old_end = p.clip(*id).expect("clipe validado").end();
+        let track = p.track_mut(*tid).expect("faixa validada");
+        for c in track.clips.iter_mut() {
+            if c.id == *id {
+                match edge {
+                    Edge::End => c.duration += d,
+                    Edge::Start => {
+                        c.source_start = c.source_time_at(c.start + d);
+                        c.duration -= d;
+                    }
+                }
+                clamp_fades(c);
+            } else if c.start >= old_end {
+                c.start += shift;
+            }
+        }
+    }
+    Ok(Outcome {
+        clips: per_track.into_iter().map(|(_, c)| c).collect(),
+        ..Outcome::default()
+    })
+}
+
+fn roll(p: &mut Project, cuts: Vec<(ClipId, ClipId)>, delta: Frame) -> Result<Outcome, EditError> {
+    if cuts.is_empty() {
+        return Err(EditError::InvalidValue("nenhum corte"));
+    }
+    let (mut lo, mut hi) = (Frame::MIN, Frame::MAX);
+    for (a, b) in &cuts {
+        let (ta, _) = locate_unlocked(p, *a)?;
+        let (tb, _) = locate_unlocked(p, *b)?;
+        let (ca, cb) = (p.clip(*a).expect("ok"), p.clip(*b).expect("ok"));
+        if ta != tb || ca.end() != cb.start {
+            return Err(EditError::InvalidValue(
+                "o roll precisa de dois clipes encostados",
+            ));
+        }
+        let (la, ha) = source_limits(p, ca, Edge::End);
+        let (lb, hb) = source_limits(p, cb, Edge::Start);
+        lo = lo.max(la).max(lb);
+        hi = hi.min(ha).min(hb);
+    }
+    let d = if lo > hi { 0 } else { delta.clamp(lo, hi) };
+    if d == 0 {
+        return Err(EditError::NoChange);
+    }
+    let mut out = Outcome::default();
+    for (a, b) in cuts {
+        let ca = p.clip_mut(a).expect("ok");
+        ca.duration += d;
+        clamp_fades(ca);
+        let cb = p.clip_mut(b).expect("ok");
+        cb.source_start = cb.source_time_at(cb.start + d);
+        cb.start += d;
+        cb.duration -= d;
+        cb.dissolve_in = cb.dissolve_in.min(cb.duration);
+        clamp_fades(cb);
+        out.clips.extend([a, b]);
+    }
+    Ok(out)
+}
+
+fn slip(p: &mut Project, clips: Vec<ClipId>, delta: Frame) -> Result<Outcome, EditError> {
+    let clips = dedup(clips);
+    if clips.is_empty() {
+        return Err(EditError::InvalidValue("nenhum clipe selecionado"));
+    }
+    // Quanto cada clipe pode deslizar (em frames da timeline) sem sair da fonte.
+    let (mut lo, mut hi) = (Frame::MIN, Frame::MAX);
+    for id in &clips {
+        locate_unlocked(p, *id)?;
+        let c = p.clip(*id).expect("ok");
+        let Some(len) = p.source_length(&c.source) else {
+            return Err(EditError::InvalidValue("só clipes de mídia podem deslizar"));
+        };
+        let used = c.duration as f64 * c.speed;
+        lo = lo.max(-((c.source_start / c.speed + 1e-9).floor() as Frame));
+        hi = hi.min(((len as f64 - used - c.source_start) / c.speed + 1e-9).floor() as Frame);
+    }
+    let d = if lo > hi { 0 } else { delta.clamp(lo, hi) };
+    if d == 0 {
+        return Err(EditError::NoChange);
+    }
+    for id in &clips {
+        let c = p.clip_mut(*id).expect("ok");
+        c.source_start += d as f64 * c.speed;
+    }
+    Ok(Outcome {
+        clips,
         ..Outcome::default()
     })
 }
@@ -1071,6 +1286,10 @@ impl Edit {
                 ClipChange::FadeIn(_) | ClipChange::FadeOut(_) => "Fade",
                 ClipChange::Source(_) => "Editar gerador",
                 ClipChange::Color(_) => "Cor",
+                ClipChange::Enabled(true) => "Ligar clipe",
+                ClipChange::Enabled(false) => "Desligar clipe",
+                ClipChange::Freeze(Some(_)) => "Congelar frame",
+                ClipChange::Freeze(None) => "Descongelar",
             },
             Edit::SetSpeed { .. } => "Velocidade",
             Edit::Link { .. } => "Ligar clipes",
@@ -1084,6 +1303,10 @@ impl Edit {
             Edit::RippleDeleteRange { .. } => "Remover trecho",
             Edit::DeleteRange { .. } => "Apagar trecho",
             Edit::CloseGap { .. } => "Fechar buraco",
+            Edit::SetKeyframeEase { .. } => "Curva do keyframe",
+            Edit::RippleTrim { .. } => "Ripple trim",
+            Edit::Roll { .. } => "Roll",
+            Edit::Slip { .. } => "Slip",
             Edit::CloseAllGaps { .. } => "Fechar buracos",
         }
     }

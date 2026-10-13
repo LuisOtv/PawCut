@@ -34,6 +34,8 @@ pub enum Icon {
     Overwrite,
     Append,
     Skim,
+    Trim,
+    Loop,
 }
 
 fn p(r: Rect, x: f32, y: f32) -> Pos2 {
@@ -45,6 +47,30 @@ pub fn paint(painter: &Painter, r: Rect, icon: Icon, c: Color32) {
     let s = Stroke::new((r.width() / 11.0).max(1.2), c);
     let poly = |pts: Vec<Pos2>| Shape::convex_polygon(pts, c, Stroke::NONE);
     match icon {
+        Icon::Loop => {
+            // Seta em volta: um retângulo arredondado aberto com a ponta da seta.
+            let pts: Vec<Pos2> = (0..=24)
+                .map(|i| {
+                    let a = std::f32::consts::TAU * (0.08 + 0.84 * i as f32 / 24.0);
+                    p(r, 0.5 + 0.36 * a.cos(), 0.5 + 0.3 * a.sin())
+                })
+                .collect();
+            let tip = *pts.last().expect("pontos");
+            painter.add(Shape::line(pts, s));
+            painter.add(poly(vec![
+                tip + vec2(r.width() * 0.16, 0.0),
+                tip + vec2(-r.width() * 0.04, -r.height() * 0.16),
+                tip + vec2(-r.width() * 0.04, r.height() * 0.16),
+            ]));
+        }
+        Icon::Trim => {
+            // ][ : duas bordas se encontrando no corte.
+            for (x, dir) in [(0.42, -1.0), (0.58, 1.0)] {
+                painter.line_segment([p(r, x, 0.15), p(r, x, 0.85)], s);
+                painter.line_segment([p(r, x, 0.15), p(r, x + 0.18 * dir, 0.15)], s);
+                painter.line_segment([p(r, x, 0.85), p(r, x + 0.18 * dir, 0.85)], s);
+            }
+        }
         Icon::Skim => {
             painter.rect_stroke(
                 Rect::from_min_max(p(r, 0.12, 0.28), p(r, 0.88, 0.78)),

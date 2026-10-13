@@ -331,6 +331,136 @@ fn inspector_has_tabs_and_shows_linked_audio() {
     assert!(h.query_by_label("Matiz").is_some());
 }
 
+fn two_media_clips(st: &mut AppState) {
+    st.apply(Edit::AddMedia(MediaInfo {
+        path: "/videos/x.mp4".into(),
+        kind: MediaKind::Video { has_audio: false },
+        duration: Some(300),
+        width: 1920,
+        height: 1080,
+    }));
+    let m = st.project().media[0].id;
+    st.drop_media(m, TrackKind::Video, 0, 0);
+    st.drop_media(m, TrackKind::Video, 0, 300);
+    // Encurta para ter fonte sobrando dos dois lados: [0,100) e [100,200) com fonte em 50.
+    let ids: Vec<ClipId> = st.project().video_tracks[0]
+        .clips
+        .iter()
+        .map(|c| c.id)
+        .collect();
+    st.apply(Edit::Trim {
+        clips: vec![ids[0]],
+        edge: Edge::End,
+        delta: -200,
+    });
+    st.apply(Edit::Trim {
+        clips: vec![ids[1]],
+        edge: Edge::Start,
+        delta: 50,
+    });
+    st.apply(Edit::Trim {
+        clips: vec![ids[1]],
+        edge: Edge::End,
+        delta: -150,
+    });
+    st.apply(Edit::Move {
+        clips: vec![ids[1]],
+        delta: -250,
+        video_track_delta: 0,
+        audio_track_delta: 0,
+    });
+    st.selection.clear();
+}
+
+#[test]
+fn trim_tool_ripples_rolls_and_slips() {
+    let mut h = harness(two_media_clips);
+    assert_eq!(v1_spans(&h), vec![(0, 100), (100, 200)]);
+    h.state_mut().st.tool = Tool::Trim;
+    h.run_steps(1);
+    // Ripple: borda de início do segundo clipe, longe do corte… usa a borda final do segundo.
+    let edge = h.state().tl_point(TrackKind::Video, 0, 200.0) - egui::vec2(3.0, 0.0);
+    drag(&mut h, edge, edge + egui::vec2(40.0, 0.0)); // ppf 2 → +20 frames
+    assert_eq!(v1_spans(&h), vec![(0, 100), (100, 220)]);
+    // Roll: bem no corte.
+    let cut = h.state().tl_point(TrackKind::Video, 0, 100.0);
+    drag(&mut h, cut, cut - egui::vec2(20.0, 0.0)); // −10 frames
+    assert_eq!(v1_spans(&h), vec![(0, 90), (90, 220)]);
+    // Slip: meio do primeiro clipe; a posição não muda, a fonte muda.
+    let before = h.state().st.project().video_tracks[0].clips[0].source_start;
+    let mid = h.state().tl_point(TrackKind::Video, 0, 45.0);
+    drag(&mut h, mid, mid - egui::vec2(20.0, 0.0)); // arrastar para a esquerda = mais adiante
+    assert_eq!(v1_spans(&h), vec![(0, 90), (90, 220)]);
+    let after = h.state().st.project().video_tracks[0].clips[0].source_start;
+    assert_eq!(after - before, 10.0);
+}
+
+#[test]
+fn alt_drag_duplicates_the_clip() {
+    let mut h = harness(with_solid);
+    let from = h.state().tl_point(TrackKind::Video, 0, 75.0);
+    let to = h.state().tl_point(TrackKind::Video, 0, 275.0);
+    h.hover_at(from);
+    h.step();
+    let alt = Modifiers::ALT;
+    h.event(Event::PointerButton {
+        pos: from,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: alt,
+    });
+    h.event(Event::ModifiersChanged(alt));
+    h.step();
+    for k in 1..=4 {
+        h.hover_at(from + (to - from) * (k as f32 / 4.0));
+        h.step();
+    }
+    h.event(Event::PointerButton {
+        pos: to,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: alt,
+    });
+    h.run_steps(2);
+    assert_eq!(v1_spans(&h), vec![(0, 150), (200, 350)]);
+}
+
+#[test]
+fn command_palette_runs_an_action() {
+    let mut h = harness(with_solid);
+    h.state_mut()
+        .run_action(crate::keymap::Action::CommandPalette);
+    let mut h2 = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui_state(
+            |ui, ws: &mut Workspace| {
+                let ctx = ui.ctx().clone();
+                ws.begin_frame(&ctx);
+                ws.dialogs_ui(&ctx);
+            },
+            std::mem::replace(
+                h.state_mut(),
+                Workspace::new(
+                    &egui::Context::default(),
+                    AppState::new(Project::new(ProjectSettings::default())),
+                ),
+            ),
+        );
+    h2.run_steps(2);
+    h2.event(Event::Text("lamina".into()));
+    h2.run_steps(2);
+    h2.event(Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    });
+    h2.run_steps(2);
+    assert!(h2.state().palette.is_none());
+    assert_eq!(h2.state().st.tool, Tool::Blade);
+}
+
 mod whole_app {
     use std::time::Duration;
 

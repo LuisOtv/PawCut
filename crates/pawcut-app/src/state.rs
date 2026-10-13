@@ -9,6 +9,8 @@ use pawcut_core::*;
 pub enum Tool {
     Selection,
     Blade,
+    /// Trim (T no Resolve): borda = ripple, no corte = roll, no meio do clipe = slip.
+    Trim,
 }
 
 /// Geradores da Toolbox (aba Effects).
@@ -161,6 +163,98 @@ impl AppState {
     pub fn undo(&mut self) {
         if self.editor.undo() {
             self.prune_selection();
+        }
+    }
+
+    /// Volta ou avança o histórico até ter `done` edições aplicadas.
+    pub fn jump_history(&mut self, done: usize) {
+        self.editor.jump_to(done);
+        self.prune_selection();
+    }
+
+    /// D: liga/desliga os clipes selecionados (se algum está ligado, desliga todos).
+    pub fn toggle_enabled(&mut self) {
+        let ids = self.expanded(&self.selection.clone());
+        let p = self.project();
+        let any_on = ids.iter().filter_map(|c| p.clip(*c)).any(|c| c.enabled);
+        if ids.is_empty() {
+            return;
+        }
+        for id in ids {
+            let _ = self.editor.apply_coalescing(
+                Edit::SetClip {
+                    clip: id,
+                    change: ClipChange::Enabled(!any_on),
+                },
+                "toggle-enabled",
+            );
+        }
+        self.editor.end_coalescing();
+    }
+
+    /// Freeze frame (Shift+R): os clipes de vídeo selecionados mostram só o frame do cursor;
+    /// de novo, voltam a tocar.
+    pub fn freeze_frame(&mut self) {
+        let p = self.project().clone();
+        let ph = self.playhead;
+        let clips: Vec<&Clip> = self
+            .selection
+            .iter()
+            .filter_map(|c| p.clip(*c))
+            .filter(|c| {
+                p.locate(c.id)
+                    .and_then(|(t, _)| p.track(t))
+                    .is_some_and(|t| t.kind == TrackKind::Video)
+                    && matches!(c.source, ClipSource::Media(_))
+            })
+            .collect();
+        if clips.is_empty() {
+            self.warn("Selecione um clipe de vídeo para congelar");
+            return;
+        }
+        let unfreeze = clips.iter().all(|c| c.freeze.is_some());
+        for c in clips {
+            let at = c.source_time_at(ph.clamp(c.start, c.end() - 1));
+            let _ = self.editor.apply_coalescing(
+                Edit::SetClip {
+                    clip: c.id,
+                    change: ClipChange::Freeze(if unfreeze { None } else { Some(at) }),
+                },
+                "freeze",
+            );
+        }
+        self.editor.end_coalescing();
+    }
+
+    /// Alt+arrastar: cópias dos clipes deslocadas no tempo e nas faixas (do mesmo tipo).
+    pub fn duplicate(&mut self, clips: &[ClipId], delta: Frame, kind: TrackKind, rows: i32) {
+        let p = self.project().clone();
+        let mut items = Vec::new();
+        for id in clips {
+            let (Some((tid, _)), Some(c)) = (p.locate(*id), p.clip(*id)) else {
+                continue;
+            };
+            let Some(t) = p.track(tid) else { continue };
+            let index = p
+                .tracks(t.kind)
+                .iter()
+                .position(|x| x.id == tid)
+                .unwrap_or(0);
+            let index = if t.kind == kind {
+                (index as i32 + rows).max(0) as usize
+            } else {
+                index
+            };
+            let track = self.ensure_track(t.kind, index);
+            let mut copy = c.clone();
+            copy.start = (c.start + delta).max(0);
+            items.push((track, copy));
+        }
+        if let Some(o) = self.apply(Edit::Paste {
+            at: 0,
+            clips: items,
+        }) {
+            self.selection = o.clips;
         }
     }
 
@@ -968,6 +1062,11 @@ impl AppState {
         self.saved_revision = self.editor.revision();
     }
 
+    /// Marca como "não salvo" (ex.: abriu uma versão anterior que ainda não foi salva).
+    pub fn mark_unsaved(&mut self) {
+        self.saved_revision = u64::MAX;
+    }
+
     pub fn save_to(&mut self, path: &Path) -> Result<(), ProjectFileError> {
         save_project(self.project(), path)?;
         self.mark_saved(path.to_path_buf());
@@ -1295,5 +1394,35 @@ mod tests {
         s.set_playhead(200);
         s.place_media(media, None);
         assert_eq!(spans(&s, TrackKind::Video, 0), vec![(0, 60), (200, 260)]);
+    }
+
+    #[test]
+    fn disable_freeze_duplicate_and_jump_history() {
+        let mut s = state();
+        let media = add_video(&mut s, 120, false);
+        s.drop_media(media, TrackKind::Video, 0, 0);
+        let c = s.project().video_tracks[0].clips[0].id;
+        s.select(c, false);
+        s.toggle_enabled();
+        assert!(!s.project().clip(c).unwrap().enabled);
+        s.toggle_enabled();
+        assert!(s.project().clip(c).unwrap().enabled);
+        s.set_playhead(40);
+        s.freeze_frame();
+        assert_eq!(s.project().clip(c).unwrap().freeze, Some(40.0));
+        s.freeze_frame();
+        assert_eq!(s.project().clip(c).unwrap().freeze, None);
+        // Duplicar: cópia 200 frames depois, uma faixa acima (cria V2).
+        s.duplicate(&[c], 200, TrackKind::Video, 1);
+        assert_eq!(spans(&s, TrackKind::Video, 0), vec![(0, 120)]);
+        assert_eq!(spans(&s, TrackKind::Video, 1), vec![(200, 320)]);
+        // Histórico: volta ao começo e avança de novo.
+        let (done, _) = s.editor.history();
+        let n = done.len();
+        s.jump_history(1);
+        assert_eq!(s.editor.history().0.len(), 1);
+        assert_eq!(s.editor.history().1.len(), n - 1);
+        s.jump_history(n);
+        assert_eq!(spans(&s, TrackKind::Video, 1), vec![(200, 320)]);
     }
 }

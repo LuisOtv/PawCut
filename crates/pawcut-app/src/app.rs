@@ -46,6 +46,9 @@ impl TabViewer for Workspace {
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Panel) {
         // Uma aba anterior pode ter editado o projeto neste mesmo frame.
         self.refresh_project_arc();
+        if ui.rect_contains_pointer(ui.max_rect()) {
+            self.hovered_panel = Some(*tab);
+        }
         match tab {
             Panel::MediaPool => self.media_pool_ui(ui),
             Panel::Effects => self.effects_ui(ui),
@@ -92,7 +95,7 @@ impl PawCutApp {
     }
 
     fn save_layout(&self) {
-        if let Ok(text) = serde_json::to_string(&self.layout.dock) {
+        if let Ok(text) = serde_json::to_string(self.layout.persistent()) {
             let _ = std::fs::create_dir_all(config::config_dir());
             let _ = std::fs::write(config::layout_path(), text);
         }
@@ -122,6 +125,17 @@ impl PawCutApp {
                 self.item(ui, "Abrir…", Action::Open);
                 self.item(ui, "Salvar", Action::Save);
                 self.item(ui, "Salvar como…", Action::SaveAs);
+                if ui
+                    .add_enabled(
+                        self.ws.st.path.is_some(),
+                        egui::Button::new("Versões anteriores…"),
+                    )
+                    .on_disabled_hover_text("Salve o projeto primeiro")
+                    .clicked()
+                {
+                    ui.close();
+                    self.ws.backups_open = true;
+                }
                 ui.menu_button("Recentes", |ui| {
                     let recent = config::recent_projects();
                     if recent.is_empty() {
@@ -190,6 +204,11 @@ impl PawCutApp {
                 ui.separator();
                 self.item(ui, "Selecionar tudo", Action::SelectAll);
                 self.item(ui, "Selecionar daqui para frente", Action::SelectForward);
+                ui.separator();
+                self.item(ui, "Ligar/desligar clipe", Action::ToggleClipEnabled);
+                self.item(ui, "Congelar frame", Action::FreezeFrame);
+                self.item(ui, "Histórico de ações…", Action::History);
+                self.item(ui, "Paleta de comandos…", Action::CommandPalette);
                 self.item(ui, "Tirar seleção", Action::Deselect);
                 ui.separator();
                 if ui.button("Preferences — atalhos de teclado…").clicked() {
@@ -200,6 +219,7 @@ impl PawCutApp {
             ui.menu_button("Timeline", |ui| {
                 self.item(ui, "Ferramenta de seleção", Action::SelectionTool);
                 self.item(ui, "Ferramenta lâmina", Action::BladeTool);
+                self.item(ui, "Ferramenta Trim", Action::TrimTool);
                 self.item(ui, "Snapping", Action::ToggleSnapping);
                 self.item(ui, "Seleção ligada", Action::ToggleLinkedSelection);
                 self.item(ui, "Skimming (prévia sob o mouse)", Action::ToggleSkimming);
@@ -241,6 +261,7 @@ impl PawCutApp {
                     }
                 }
                 ui.separator();
+                self.item(ui, "Maximizar painel sob o mouse", Action::MaximizePanel);
                 if ui.button("Reset UI Layout").clicked() {
                     ui.close();
                     self.layout.reset();
@@ -500,6 +521,15 @@ impl eframe::App for PawCutApp {
         if self.ws.reveal_in_pool {
             self.layout.reveal(Panel::MediaPool);
         }
+        if std::mem::take(&mut self.ws.maximize_request) {
+            let panel = if self.layout.before_maximize.is_some() {
+                Panel::Timeline
+            } else {
+                self.ws.hovered_panel.unwrap_or(Panel::TimelineViewer)
+            };
+            self.layout.toggle_maximize(panel);
+        }
+        self.ws.hovered_panel = None;
         let bar = |fill| {
             egui::Frame::new()
                 .fill(fill)

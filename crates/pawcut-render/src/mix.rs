@@ -48,6 +48,9 @@ pub(crate) fn mix(
             let ClipSource::Media(id) = &clip.source else {
                 continue;
             };
+            if !clip.enabled {
+                continue;
+            }
             let Some(m) = project.media(*id) else {
                 continue;
             };

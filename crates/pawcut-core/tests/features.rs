@@ -324,3 +324,131 @@ fn delete_range_leaves_a_gap() {
     .unwrap();
     assert_eq!(spans(&ed, v1), vec![(0, 30), (50, 100)]);
 }
+
+#[test]
+fn ripple_trim_moves_the_rest_of_the_track() {
+    let mut ed = new_editor();
+    let m = add_video(&mut ed, 300, false);
+    let v1 = v(&ed, 0);
+    let first = place(&mut ed, v1, ClipSource::Media(m), 0, 0.0, 100);
+    place(&mut ed, v1, solid(), 100, 0.0, 50);
+    // Fim: estica 20 e empurra o resto.
+    ed.apply(Edit::RippleTrim {
+        clips: vec![first],
+        edge: Edge::End,
+        delta: 20,
+    })
+    .unwrap();
+    assert_eq!(spans(&ed, v1), vec![(0, 120), (120, 170)]);
+    // Início: o clipe fica no lugar, o conteúdo encurta e o resto puxa.
+    ed.apply(Edit::RippleTrim {
+        clips: vec![first],
+        edge: Edge::Start,
+        delta: 30,
+    })
+    .unwrap();
+    assert_eq!(spans(&ed, v1), vec![(0, 90), (90, 140)]);
+    assert_eq!(clip(&ed, first).source_start, 30.0);
+    // Não passa do fim da fonte (300 frames).
+    ed.apply(Edit::RippleTrim {
+        clips: vec![first],
+        edge: Edge::End,
+        delta: 1000,
+    })
+    .unwrap();
+    assert_eq!(clip(&ed, first).duration, 270);
+}
+
+#[test]
+fn roll_moves_the_cut_and_slip_changes_the_content() {
+    let mut ed = new_editor();
+    let m = add_video(&mut ed, 300, false);
+    let v1 = v(&ed, 0);
+    let left = place(&mut ed, v1, ClipSource::Media(m), 0, 50.0, 100);
+    let right = place(&mut ed, v1, ClipSource::Media(m), 100, 100.0, 100);
+    ed.apply(Edit::Roll {
+        cuts: vec![(left, right)],
+        delta: -20,
+    })
+    .unwrap();
+    assert_eq!(spans(&ed, v1), vec![(0, 80), (80, 200)]);
+    assert_eq!(clip(&ed, right).source_start, 80.0);
+    // O direito fica com pelo menos 1 frame.
+    ed.apply(Edit::Roll {
+        cuts: vec![(left, right)],
+        delta: 500,
+    })
+    .unwrap();
+    assert_eq!(spans(&ed, v1), vec![(0, 199), (199, 200)]);
+    // Slip: mesma posição e duração, outro trecho.
+    ed.apply(Edit::Slip {
+        clips: vec![left],
+        delta: 10,
+    })
+    .unwrap();
+    assert_eq!(clip(&ed, left).source_start, 60.0);
+    ed.apply(Edit::Slip {
+        clips: vec![left],
+        delta: -1000,
+    })
+    .unwrap();
+    assert_eq!(clip(&ed, left).source_start, 0.0);
+}
+
+#[test]
+fn clips_can_be_disabled_frozen_and_eased() {
+    let mut ed = new_editor();
+    let m = add_video(&mut ed, 300, false);
+    let v1 = v(&ed, 0);
+    let c = place(&mut ed, v1, ClipSource::Media(m), 0, 10.0, 100);
+    ed.apply(Edit::SetClip {
+        clip: c,
+        change: ClipChange::Enabled(false),
+    })
+    .unwrap();
+    assert!(!clip(&ed, c).enabled);
+    ed.apply(Edit::SetClip {
+        clip: c,
+        change: ClipChange::Freeze(Some(42.0)),
+    })
+    .unwrap();
+    assert_eq!(clip(&ed, c).source_time_at(0), 42.0);
+    assert_eq!(clip(&ed, c).source_time_at(99), 42.0);
+    // Ease num keyframe.
+    for (at, value) in [(10.0, 0.0), (110.0, 90.0)] {
+        ed.apply(Edit::SetKeyframe {
+            clip: c,
+            param: Param::Rotation,
+            at,
+            value: Some(value),
+        })
+        .unwrap();
+    }
+    ed.apply(Edit::SetClip {
+        clip: c,
+        change: ClipChange::Freeze(None),
+    })
+    .unwrap();
+    ed.apply(Edit::SetKeyframeEase {
+        clip: c,
+        param: Param::Rotation,
+        at: 110.0,
+        ease: Ease::Linear,
+    })
+    .unwrap();
+    assert!((clip(&ed, c).param(Param::Rotation, 25) - 22.5).abs() < 1e-3);
+    ed.apply(Edit::SetKeyframeEase {
+        clip: c,
+        param: Param::Rotation,
+        at: 110.0,
+        ease: Ease::EaseIn,
+    })
+    .unwrap();
+    assert!(clip(&ed, c).param(Param::Rotation, 25) < 10.0);
+    // Projetos antigos abrem com o clipe ligado.
+    let json = to_json(ed.project())
+        .unwrap()
+        .replace("\"enabled\": false,", "");
+    let back = from_json(&json).unwrap();
+    assert!(back.video_tracks[0].clips[0].enabled);
+}
