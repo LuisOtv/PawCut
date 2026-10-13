@@ -461,6 +461,43 @@ fn command_palette_runs_an_action() {
     assert_eq!(h2.state().st.tool, Tool::Blade);
 }
 
+#[test]
+fn eyedropper_picks_the_color_under_the_key() {
+    let mut st = AppState::new(Project::new(ProjectSettings {
+        width: 320,
+        height: 180,
+        ..ProjectSettings::default()
+    }));
+    st.drop_generator(Generator::SolidColor, 0, 0);
+    let id = st.project().video_tracks[0].clips[0].id;
+    let green = Rgba::new(10, 200, 30, 255);
+    st.apply(Edit::SetClip {
+        clip: id,
+        change: ClipChange::Source(ClipSource::SolidColor(green)),
+    });
+    st.apply(Edit::SetClip {
+        clip: id,
+        change: ClipChange::Chroma(Some(ChromaKey {
+            color: Rgba::new(0, 0, 255, 255),
+            ..ChromaKey::default()
+        })),
+    });
+    let ctx = egui::Context::default();
+    let mut ws = Workspace::new(&ctx, st);
+    ws.recovery.clear();
+    ws.pick_chroma_color(&[id], 0.5, 0.5);
+    let key = ws.st.project().clip(id).unwrap().chroma.unwrap();
+    assert_eq!(
+        key.color, green,
+        "pegou a cor de baixo, não o preto do key aplicado"
+    );
+    assert_eq!(
+        key.tolerance,
+        ChromaKey::default().tolerance,
+        "o resto do ajuste fica"
+    );
+}
+
 mod whole_app {
     use std::time::Duration;
 

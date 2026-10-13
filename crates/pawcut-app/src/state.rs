@@ -524,6 +524,7 @@ impl AppState {
                     size: 52.0,
                     bold: true,
                     outline: 4.0,
+                    caption: true,
                     ..TextStyle::default()
                 }),
                 Some(Transform {
@@ -795,6 +796,7 @@ impl AppState {
             .map(|c| {
                 let mut clip = template.clone();
                 clip.source = ClipSource::Text(TextStyle {
+                    caption: true,
                     text: c.text.clone(),
                     size: 52.0,
                     bold: true,
@@ -811,8 +813,9 @@ impl AppState {
         n
     }
 
-    /// Todas as legendas/títulos (clipes de texto ligados) da timeline, em ordem.
-    pub fn subtitle_cues(&self) -> Vec<Cue> {
+    /// Textos ligados da timeline, em ordem: só as legendas (`captions_only`) ou todos
+    /// (títulos e lower thirds também).
+    pub fn subtitle_cues(&self, captions_only: bool) -> Vec<Cue> {
         let mut cues: Vec<Cue> = self
             .project()
             .video_tracks
@@ -821,11 +824,15 @@ impl AppState {
             .flat_map(|t| t.clips.iter())
             .filter(|c| c.enabled)
             .filter_map(|c| match &c.source {
-                ClipSource::Text(s) if !s.text.trim().is_empty() => Some(Cue {
-                    start: c.start,
-                    end: c.end(),
-                    text: s.text.clone(),
-                }),
+                ClipSource::Text(s)
+                    if !s.text.trim().is_empty() && (s.caption || !captions_only) =>
+                {
+                    Some(Cue {
+                        start: c.start,
+                        end: c.end(),
+                        text: s.text.clone(),
+                    })
+                }
                 _ => None,
             })
             .collect();
@@ -1637,11 +1644,16 @@ mod tests {
         assert_eq!(s.import_subtitles(&cues), 2);
         let top = s.project().video_tracks.last().unwrap();
         assert_eq!(top.clips.len(), 2);
-        assert_eq!(s.subtitle_cues(), cues);
+        assert_eq!(s.subtitle_cues(true), cues);
+        // Um título comum não vai para o SRT de legendas, só no "todos os textos".
+        s.drop_generator(Generator::Text, 0, 0);
+        assert_eq!(s.subtitle_cues(true).len(), 2);
+        assert_eq!(s.subtitle_cues(false).len(), 3);
+        s.undo();
         // Um passo de desfazer tira tudo.
         s.undo();
         s.undo();
-        assert!(s.subtitle_cues().is_empty());
+        assert!(s.subtitle_cues(false).is_empty());
     }
 
     #[test]

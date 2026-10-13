@@ -104,6 +104,9 @@ pub struct TextStyle {
     pub background: bool,
     #[serde(default = "translucent_black")]
     pub background_color: Rgba,
+    /// É uma legenda (vai para o SRT ao exportar legendas), não um título.
+    #[serde(default)]
+    pub caption: bool,
 }
 
 impl Default for TextStyle {
@@ -120,6 +123,7 @@ impl Default for TextStyle {
             shadow: false,
             background: false,
             background_color: translucent_black(),
+            caption: false,
         }
     }
 }

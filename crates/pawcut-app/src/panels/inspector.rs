@@ -414,6 +414,20 @@ impl Workspace {
                         if ui.small_button("Azul").clicked() {
                             key.color = Rgba::new(0, 71, 187, 255);
                         }
+                        let picking = self.eyedropper.is_some();
+                        if ui
+                            .selectable_label(picking, "Conta-gotas")
+                            .on_hover_text(
+                                "Clique na cor do fundo no Timeline Viewer (Esc cancela)",
+                            )
+                            .clicked()
+                        {
+                            self.eyedropper = if picking {
+                                None
+                            } else {
+                                Some(clips.iter().map(|c| c.id).collect())
+                            };
+                        }
                     },
                     |_| {},
                 );
@@ -1217,6 +1231,19 @@ impl Workspace {
                 |ui| {
                     changed |= ui.checkbox(&mut s.background, "").changed();
                     changed |= color_button(ui, &mut s.background_color);
+                },
+                |_| {},
+            );
+            row(
+                ui,
+                "Legenda",
+                |ui| {
+                    changed |= ui
+                        .checkbox(&mut s.caption, "É legenda")
+                        .on_hover_text(
+                            "Vai para o SRT em Arquivo → Exportar legendas → Só as legendas",
+                        )
+                        .changed();
                 },
                 |_| {},
             );
