@@ -391,6 +391,7 @@ impl Workspace {
         }
         let id = m.id;
         let can_proxy = m.info.kind != MediaKind::Image && m.info.kind != MediaKind::Audio;
+        let offline_count = self.st.offline.len();
         resp.context_menu(|ui| {
             if ui.button("Abrir no viewer (Source)").clicked() {
                 actions.open_source = Some(id);
@@ -402,6 +403,14 @@ impl Workspace {
             }
             if ui.button("Reconectar arquivo (Relink)…").clicked() {
                 actions.relink = Some(id);
+                ui.close();
+            }
+            if offline_count > 1
+                && ui
+                    .button(format!("Reconectar as {offline_count} offline numa pasta…"))
+                    .clicked()
+            {
+                actions.relink_folder = true;
                 ui.close();
             }
             if ui.button("Remover do Media Pool").clicked() {
@@ -439,6 +448,9 @@ impl Workspace {
                     .collect()
             });
         }
+        if a.relink_folder {
+            self.relink_folder_dialog();
+        }
         if let Some(id) = a.remove {
             let removed = self.st.apply(pawcut_core::Edit::RemoveMedia(id)).is_some();
             if removed && self.st.source.media == Some(id) {
@@ -451,7 +463,19 @@ impl Workspace {
         ui.add_space(theme::PAD);
         ui.indent("toolbox", |ui| {
             ui.label(egui::RichText::new("Transições").color(theme::TEXT_DIM).small());
-            self.toolbox_entry(ui, "Cross Dissolve", Color32::from_rgb(0x8a, 0x8a, 0x95), DragPayload::Dissolve);
+            self.toolbox_entry(ui, "Cross Dissolve", Color32::from_rgb(0x8a, 0x8a, 0x95), DragPayload::Dissolve(None));
+            self.toolbox_entry(
+                ui,
+                "Dip to Black",
+                Color32::from_rgb(0x10, 0x10, 0x10),
+                DragPayload::Dissolve(Some(pawcut_core::Rgba::new(0, 0, 0, 255))),
+            );
+            self.toolbox_entry(
+                ui,
+                "Dip to White",
+                Color32::from_rgb(0xf0, 0xf0, 0xf0),
+                DragPayload::Dissolve(Some(pawcut_core::Rgba::new(255, 255, 255, 255))),
+            );
             ui.add_space(6.0);
             ui.label(egui::RichText::new("Títulos").color(theme::TEXT_DIM).small());
             self.toolbox_item(ui, "Título", theme::CLIP_TITLE, Generator::Text);
@@ -495,8 +519,10 @@ impl Workspace {
             theme::TEXT,
         );
         resp.dnd_set_drag_payload(payload);
-        if resp.double_clicked() && payload == DragPayload::Dissolve {
-            self.st.add_dissolve();
+        if resp.double_clicked()
+            && let DragPayload::Dissolve(color) = payload
+        {
+            self.st.add_transition(color);
         }
         resp
     }
@@ -524,4 +550,5 @@ struct PoolActions {
     make_proxy: Option<pawcut_core::MediaId>,
     relink: Option<pawcut_core::MediaId>,
     remove: Option<pawcut_core::MediaId>,
+    relink_folder: bool,
 }

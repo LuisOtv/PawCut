@@ -1049,9 +1049,9 @@ impl Workspace {
                 DragPayload::Generator(_) => {
                     self.st.say("Títulos e geradores vão nas faixas de vídeo")
                 }
-                DragPayload::Dissolve => {
+                DragPayload::Dissolve(color) => {
                     self.st.set_playhead(at);
-                    self.st.add_dissolve();
+                    self.st.add_transition(color);
                 }
             }
         }
@@ -1733,6 +1733,17 @@ impl Workspace {
                     v.collapsed = false;
                     ui.close();
                 }
+                if track.kind == TrackKind::Audio
+                    && (track.volume_db != 0.0 || track.pan != 0.0)
+                    && ui.button("Volume 0 dB e pan no centro").clicked()
+                {
+                    self.st.apply(Edit::SetTrackMix {
+                        track: track.id,
+                        volume_db: 0.0,
+                        pan: 0.0,
+                    });
+                    ui.close();
+                }
                 if ui.button("Esconder faixa").clicked() {
                     self.track_views.entry(track.id).or_default().hidden = true;
                     ui.close();
@@ -1797,7 +1808,63 @@ impl Workspace {
                     theme::TEXT_DIM
                 },
             );
-            if !view.collapsed && h.height() >= 44.0 {
+            if !view.collapsed && h.height() >= 44.0 && row.kind == TrackKind::Audio {
+                // Mixer da faixa: volume (dB) e pan, como no Resolve.
+                let (mut vol, mut pan) = (track.volume_db, track.pan);
+                let y = cy + 17.0;
+                let vol_r =
+                    Rect::from_min_size(pos2(badge.right() + 8.0, y - 9.0), vec2(62.0, 18.0));
+                let pan_r =
+                    Rect::from_min_size(pos2(vol_r.right() + 4.0, y - 9.0), vec2(44.0, 18.0));
+                let v = ui
+                    .put(
+                        vol_r,
+                        egui::DragValue::new(&mut vol)
+                            .range(-60.0..=12.0)
+                            .speed(0.2)
+                            .fixed_decimals(1)
+                            .suffix(" dB"),
+                    )
+                    .on_hover_text("Volume da faixa inteira");
+                let pn = ui
+                    .put(
+                        pan_r,
+                        egui::DragValue::new(&mut pan)
+                            .range(-1.0..=1.0)
+                            .speed(0.01)
+                            .custom_formatter(|v, _| match (v * 100.0).round() as i64 {
+                                0 => "C".into(),
+                                n if n < 0 => format!("E{}", -n),
+                                n => format!("D{n}"),
+                            })
+                            .custom_parser(|t| {
+                                let t = t.trim().to_uppercase();
+                                if t == "C" {
+                                    return Some(0.0);
+                                }
+                                let (sign, num) = match t.chars().next()? {
+                                    'E' | 'L' => (-1.0, &t[1..]),
+                                    'D' | 'R' => (1.0, &t[1..]),
+                                    _ => (1.0, t.as_str()),
+                                };
+                                num.parse::<f64>().ok().map(|n| sign * n / 100.0)
+                            }),
+                    )
+                    .on_hover_text("Pan (E = esquerda, D = direita, C = centro)");
+                if v.changed() || pn.changed() {
+                    self.st.apply_coalescing(
+                        Edit::SetTrackMix {
+                            track: track.id,
+                            volume_db: vol,
+                            pan,
+                        },
+                        &format!("track-mix-{:?}", track.id),
+                    );
+                }
+                if v.drag_stopped() || pn.drag_stopped() || v.lost_focus() || pn.lost_focus() {
+                    self.st.editor.end_coalescing();
+                }
+            } else if !view.collapsed && h.height() >= 44.0 {
                 let count = track.clips.len();
                 painter.text(
                     pos2(badge.right() + 8.0, cy + 18.0),
@@ -2517,7 +2584,7 @@ impl Workspace {
         match payload {
             DragPayload::Media(m) => p.media(m).and_then(|m| m.info.duration).unwrap_or(still),
             DragPayload::Generator(_) => still,
-            DragPayload::Dissolve => p.settings.fps.nominal(),
+            DragPayload::Dissolve(_) => p.settings.fps.nominal(),
         }
     }
 }

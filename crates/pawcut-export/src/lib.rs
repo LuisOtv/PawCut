@@ -30,6 +30,8 @@ pub struct ExportSettings {
     pub speed: EncoderSpeed,
     /// Bitrate do áudio em kbps; `None` = arquivo sem áudio.
     pub audio_kbps: Option<u32>,
+    /// Com outra proporção, as sobras viram um fundo desfocado em vez de barras pretas.
+    pub blur_bars: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -92,6 +94,7 @@ impl Default for ExportSettings {
             bitrate_kbps: None,
             speed: EncoderSpeed::Medium,
             audio_kbps: Some(192),
+            blur_bars: false,
         }
     }
 }
@@ -309,7 +312,12 @@ fn spawn_ffmpeg(
 ) -> Result<Child, ExportError> {
     let s = &project.settings;
     let (w, h) = output_size(project, settings);
-    let (pw, ph) = picture_size(project, settings);
+    // Com fundo desfocado o quadro já vai inteiro; senão o ffmpeg põe as barras pretas.
+    let (pw, ph) = if settings.blur_bars {
+        (w, h)
+    } else {
+        picture_size(project, settings)
+    };
     let fps = settings.fps.unwrap_or(s.fps);
     let crf = settings.crf.to_string();
     let preset = settings.speed.preset();
@@ -452,6 +460,8 @@ fn feed_frames(
     on_progress: &mut impl FnMut(Progress),
 ) -> Result<(), ExportError> {
     let (w, h) = picture_size(project, settings);
+    let out = output_size(project, settings);
+    let blur = settings.blur_bars && (w, h) != out;
     let count = frame_count(project, settings);
     // Com mais fps na saída que no projeto o mesmo frame se repete: reaproveita a imagem.
     let mut last: Option<(Frame, Vec<u8>)> = None;
@@ -468,7 +478,12 @@ fn feed_frames(
                     path: media_path(project, clip),
                 });
             }
-            last = Some((frame, rendered.image.into_raw()));
+            let image = if blur {
+                pawcut_render::letterbox_blur(&rendered.image, out.0, out.1)
+            } else {
+                rendered.image
+            };
+            last = Some((frame, image.into_raw()));
         }
         if let Some((_, bytes)) = &last {
             stdin.write_all(bytes)?;

@@ -19,6 +19,10 @@ pub enum Purpose {
     },
     Relink(MediaId),
     ExportTo,
+    /// Pasta onde procurar as mídias offline pelo nome.
+    RelinkFolder,
+    ImportSubtitles,
+    ExportSubtitles,
 }
 
 pub struct OpenDialog {

@@ -118,6 +118,8 @@ pub struct Workspace {
     pub maximize_request: bool,
     /// Painel sob o mouse no último frame (para maximizar).
     pub hovered_panel: Option<crate::panels::Panel>,
+    /// Alvo da normalização por loudness (LUFS).
+    pub lufs_target: f32,
     /// Reprodução em loop (In/Out ou a timeline inteira).
     pub looping: bool,
     /// Zoom do Timeline Viewer (0 = ajustar à janela) e deslocamento ao arrastar com o botão do meio.
@@ -213,6 +215,7 @@ impl Workspace {
             maximize_request: false,
             hovered_panel: None,
             looping: false,
+            lufs_target: -14.0,
             viewer_zoom: 0.0,
             viewer_pan: egui::Vec2::ZERO,
             safe_guides: false,
@@ -845,6 +848,46 @@ impl Workspace {
                     d.output = first.display().to_string();
                 }
             }
+            Purpose::RelinkFolder => {
+                let offline: Vec<MediaId> = self.st.offline.iter().copied().collect();
+                for id in &offline {
+                    self.forget_media(*id);
+                }
+                self.st.relink_folder(&first);
+                for id in offline {
+                    self.forget_media(id);
+                }
+            }
+            Purpose::ImportSubtitles => {
+                let fps = self.st.project().settings.fps;
+                let parsed = std::fs::read(&first)
+                    .map_err(|e| e.to_string())
+                    .and_then(|b| pawcut_core::parse_subtitles(&String::from_utf8_lossy(&b), fps));
+                match parsed {
+                    Ok(cues) => {
+                        let n = self.st.import_subtitles(&cues);
+                        self.st
+                            .say(format!("{n} legenda(s) importada(s) numa faixa nova"));
+                    }
+                    Err(e) => self.st.warn(format!("Não deu para ler as legendas: {e}")),
+                }
+            }
+            Purpose::ExportSubtitles => {
+                let mut path = first;
+                if path.extension().is_none() {
+                    path.set_extension("srt");
+                }
+                let cues = self.st.subtitle_cues();
+                let text = pawcut_core::write_srt(&cues, self.st.project().settings.fps);
+                match std::fs::write(&path, text) {
+                    Ok(()) => self.st.say(format!(
+                        "{} legenda(s) salvas em {}",
+                        cues.len(),
+                        path.display()
+                    )),
+                    Err(e) => self.st.warn(e.to_string()),
+                }
+            }
         }
     }
 
@@ -886,6 +929,43 @@ impl Workspace {
                 "Não foi possível gerar a mídia otimizada"
             });
         }
+    }
+
+    pub fn relink_folder_dialog(&mut self) {
+        self.ask_file(crate::file_dialog::Purpose::RelinkFolder, || {
+            rfd::FileDialog::new()
+                .set_title("Pasta onde estão as mídias")
+                .pick_folder()
+                .into_iter()
+                .collect()
+        });
+    }
+
+    pub fn import_subtitles_dialog(&mut self) {
+        self.ask_file(crate::file_dialog::Purpose::ImportSubtitles, || {
+            rfd::FileDialog::new()
+                .set_title("Importar legendas")
+                .add_filter("Legendas", &["srt", "vtt"])
+                .pick_file()
+                .into_iter()
+                .collect()
+        });
+    }
+
+    pub fn export_subtitles_dialog(&mut self) {
+        if self.st.subtitle_cues().is_empty() {
+            self.st.warn("Não há legendas nem títulos na timeline");
+            return;
+        }
+        self.ask_file(crate::file_dialog::Purpose::ExportSubtitles, || {
+            rfd::FileDialog::new()
+                .set_title("Exportar legendas")
+                .add_filter("SRT", &["srt"])
+                .set_file_name("legendas.srt")
+                .save_file()
+                .into_iter()
+                .collect()
+        });
     }
 
     pub fn import_dialog(&mut self) {

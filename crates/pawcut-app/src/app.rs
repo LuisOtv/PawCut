@@ -125,6 +125,27 @@ impl PawCutApp {
                 self.item(ui, "Abrir…", Action::Open);
                 self.item(ui, "Salvar", Action::Save);
                 self.item(ui, "Salvar como…", Action::SaveAs);
+                ui.separator();
+                if ui.button("Importar legendas (SRT/VTT)…").clicked() {
+                    ui.close();
+                    self.ws.import_subtitles_dialog();
+                }
+                if ui.button("Exportar legendas (SRT)…").clicked() {
+                    ui.close();
+                    self.ws.export_subtitles_dialog();
+                }
+                if ui
+                    .add_enabled(
+                        !self.ws.st.offline.is_empty(),
+                        egui::Button::new("Reconectar mídia offline (pasta)…"),
+                    )
+                    .on_disabled_hover_text("Nenhuma mídia offline")
+                    .clicked()
+                {
+                    ui.close();
+                    self.ws.relink_folder_dialog();
+                }
+                ui.separator();
                 if ui
                     .add_enabled(
                         self.ws.st.path.is_some(),
@@ -572,7 +593,13 @@ impl eframe::App for PawCutApp {
                     })
                     .unwrap_or_default(),
                 DragPayload::Generator(g) => format!("{g:?}"),
-                DragPayload::Dissolve => "Cross Dissolve".to_string(),
+                DragPayload::Dissolve(None) => "Cross Dissolve".to_string(),
+                DragPayload::Dissolve(Some(c)) => if c.r > 128 {
+                    "Dip to White"
+                } else {
+                    "Dip to Black"
+                }
+                .to_string(),
             };
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Tooltip,

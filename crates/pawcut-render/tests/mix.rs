@@ -223,3 +223,30 @@ fn volume_keyframes_ramp_the_level() {
     assert!(out[0] < 0.001);
     assert!((out[2 * 40_000] - 0.5).abs() < 1e-4);
 }
+
+#[test]
+fn track_volume_and_pan() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ed = editor();
+    audio_clip(
+        &mut ed,
+        &kit::dc_audio(dir.path(), "a.wav", 0.5, 1.0),
+        0,
+        0,
+        30,
+    );
+    let a1 = ed.project().audio_tracks[0].id;
+    ed.apply(Edit::SetTrackMix {
+        track: a1,
+        volume_db: -6.0206,
+        pan: 1.0,
+    })
+    .unwrap();
+    let out = mix(&ed, 0, 1000);
+    assert!(out[200].abs() < 1e-6, "esquerda muda");
+    assert!(
+        (out[201] - 0.25).abs() < 1e-3,
+        "direita −6 dB: {}",
+        out[201]
+    );
+}

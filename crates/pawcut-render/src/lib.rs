@@ -2,6 +2,7 @@
 //! É o mesmo código para o preview e para a exportação, então o MP4 sai igual ao que se vê.
 
 mod compose;
+pub use compose::{blurred, letterbox_blur};
 mod layout;
 mod mix;
 mod text;
@@ -56,6 +57,41 @@ impl Renderer {
             // dá exatamente sai·(1−α) + entra·α.
             let layers = track.layers_at(frame);
             let dissolving = layers.len() == 2;
+            // Dip to color: a primeira metade escurece para a cor, a segunda revela o novo clipe.
+            let dip = dissolving
+                .then(|| layers[1].0.dissolve_color.map(|c| (c, layers[1].1)))
+                .flatten();
+            if let Some((color, t)) = dip {
+                let full = Rect {
+                    x0: 0.0,
+                    y0: 0.0,
+                    w: width as f32,
+                    h: height as f32,
+                };
+                let (clip, w) = if t < 0.5 {
+                    (layers[0].0, 1.0)
+                } else {
+                    (layers[1].0, (t - 0.5) * 2.0)
+                };
+                if t >= 0.5 {
+                    compose::fill_rect(&mut image, full, color, 1.0, None);
+                }
+                if clip.enabled {
+                    self.draw_clip(
+                        &mut image,
+                        project,
+                        clip,
+                        frame,
+                        w,
+                        (width, height),
+                        &mut offline,
+                    );
+                }
+                if t < 0.5 {
+                    compose::fill_rect(&mut image, full, color, t * 2.0, None);
+                }
+                continue;
+            }
             for (i, (clip, weight)) in layers.into_iter().enumerate() {
                 if !clip.enabled {
                     continue;
@@ -107,6 +143,7 @@ impl Renderer {
             flip_v: t.flip_v,
             color,
             angle: t.rotation.to_radians(),
+            key: clip.chroma,
         };
         let cropped = |r: Rect| Rect {
             x0: r.x0 + r.w * k.left,
@@ -151,13 +188,26 @@ impl Renderer {
                 );
             }
             ClipSource::Media(_) => match self.media_layer(project, clip, frame) {
-                Some((img, base)) => compose::draw_image(
-                    image,
-                    &img,
-                    cropped(dest_rect(base, &t, pj, out)),
-                    opacity,
-                    &opts,
-                ),
+                Some((img, base)) => {
+                    if clip.blur_fill {
+                        // Fundo: a própria imagem desfocada cobrindo o quadro todo.
+                        let aspect = img.width() as f32 / img.height().max(1) as f32;
+                        compose::draw_image(
+                            image,
+                            &compose::blurred(&img),
+                            compose::cover_rect(aspect, out),
+                            opacity,
+                            &DrawOpts::default(),
+                        );
+                    }
+                    compose::draw_image(
+                        image,
+                        &img,
+                        cropped(dest_rect(base, &t, pj, out)),
+                        opacity,
+                        &opts,
+                    )
+                }
                 None => {
                     offline.push(clip.id);
                     let r = dest_rect(base_size(Fit::Fill, pj, pj), &t, pj, out);

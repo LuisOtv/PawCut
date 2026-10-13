@@ -391,3 +391,27 @@ fn exports_prores_mov_and_files_without_audio() {
     let streams = kit::ffprobe(&mute)["streams"].as_array().unwrap().clone();
     assert_eq!(streams.len(), 1, "sem trilha de áudio");
 }
+
+#[test]
+fn vertical_output_can_use_a_blurred_background() {
+    let dir = tempfile::tempdir().unwrap();
+    let ed = two_second_project(dir.path());
+    let out = dir.path().join("vertical-blur.mp4");
+    run_with(
+        &ed,
+        ExportSettings {
+            output: out.clone(),
+            size: Some((180, 320)),
+            blur_bars: true,
+            speed: pawcut_export::EncoderSpeed::Ultrafast,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let img = kit::grab_frame(&out, 0.5, 180, 320);
+    let top = kit::pixel(&img, 180, 90, 10);
+    assert!(
+        top[0] > 100 && top[1] < 60,
+        "em cima, vermelho desfocado: {top:?}"
+    );
+}
