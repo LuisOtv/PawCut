@@ -73,6 +73,8 @@ pub struct PanelLayout {
     pub dock: DockState<Panel>,
     /// Último layout usado com cada combinação de painéis visíveis.
     saved: HashMap<BTreeSet<Panel>, DockState<Panel>>,
+    /// Layout de antes de maximizar um painel (` volta para ele).
+    pub before_maximize: Option<DockState<Panel>>,
 }
 
 impl PanelLayout {
@@ -80,6 +82,7 @@ impl PanelLayout {
         Self {
             dock,
             saved: HashMap::new(),
+            before_maximize: None,
         }
     }
 
@@ -107,7 +110,26 @@ impl PanelLayout {
 
     /// Esconde ou mostra `panel`. Se essa combinação de painéis já foi usada, volta exatamente
     /// como estava; senão monta no lugar do Resolve.
+    /// Maximiza `panel` (só ele na janela) ou volta ao layout de antes.
+    pub fn toggle_maximize(&mut self, panel: Panel) {
+        match self.before_maximize.take() {
+            Some(d) => self.dock = d,
+            None => {
+                self.before_maximize = Some(self.dock.clone());
+                self.dock = DockState::new(vec![panel]);
+            }
+        }
+    }
+
+    /// O layout "de verdade" (o de antes de maximizar, se estiver maximizado).
+    pub fn persistent(&self) -> &DockState<Panel> {
+        self.before_maximize.as_ref().unwrap_or(&self.dock)
+    }
+
     pub fn toggle(&mut self, panel: Panel) {
+        if let Some(d) = self.before_maximize.take() {
+            self.dock = d;
+        }
         let now = self.visible();
         let mut next = now.clone();
         if !next.remove(&panel) {
@@ -135,6 +157,7 @@ impl PanelLayout {
 
     pub fn reset(&mut self) {
         self.saved.clear();
+        self.before_maximize = None;
         self.dock = Self::default_layout();
     }
 }
@@ -200,5 +223,17 @@ mod tests {
         let mut l = PanelLayout::new(resolve_layout(&[Panel::Timeline].into_iter().collect()));
         l.toggle(Panel::Timeline);
         assert!(l.is_visible(Panel::Timeline));
+    }
+
+    #[test]
+    fn maximize_shows_one_panel_and_restores() {
+        let mut l = PanelLayout::new(PanelLayout::default_layout());
+        let before = l.visible();
+        l.toggle_maximize(Panel::Timeline);
+        assert_eq!(l.visible().len(), 1);
+        assert!(l.is_visible(Panel::Timeline));
+        assert_eq!(l.persistent().iter_all_tabs().count(), before.len());
+        l.toggle_maximize(Panel::Timeline);
+        assert_eq!(l.visible(), before);
     }
 }

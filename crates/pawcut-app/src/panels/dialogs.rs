@@ -15,6 +15,9 @@ use crate::workspace::{Pending, Workspace};
 pub struct DeliverDialog {
     pub output: String,
     pub opts: DeliverOptions,
+    /// Espaço livre na pasta de saída (pasta consultada, bytes), para não perguntar ao
+    /// sistema a cada frame.
+    pub free: Option<(PathBuf, Option<u64>)>,
     pub only_in_out: bool,
     pub job: Option<ExportJob>,
     pub message: Option<Result<String, String>>,
@@ -200,6 +203,48 @@ impl DeliverOptions {
     }
 }
 
+/// Estado da paleta de comandos (Ctrl+K).
+#[derive(Debug, Default)]
+pub struct Palette {
+    pub query: String,
+    pub selected: usize,
+}
+
+/// Minúsculas e sem acento, para a busca achar "historico" em "Histórico".
+fn fold(s: &str) -> String {
+    s.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'á' | 'à' | 'ã' | 'â' => 'a',
+            'é' | 'ê' => 'e',
+            'í' => 'i',
+            'ó' | 'ô' | 'õ' => 'o',
+            'ú' => 'u',
+            'ç' => 'c',
+            c => c,
+        })
+        .collect()
+}
+
+/// Ações cujo nome contém todas as palavras da busca (as que começam com a busca primeiro).
+pub fn palette_matches(query: &str) -> Vec<Action> {
+    let q = fold(query);
+    let words: Vec<&str> = q.split_whitespace().collect();
+    let mut hits: Vec<(bool, Action)> = Action::ALL
+        .into_iter()
+        .filter(|a| *a != Action::CommandPalette)
+        .filter_map(|a| {
+            let name = fold(a.label());
+            words
+                .iter()
+                .all(|w| name.contains(w))
+                .then(|| (!name.starts_with(q.trim()), a))
+        })
+        .collect();
+    hits.sort_by_key(|(later, _)| *later);
+    hits.into_iter().map(|(_, a)| a).collect()
+}
+
 pub struct NewProjectDialog {
     pub preset: usize,
     pub width: u32,
@@ -253,6 +298,7 @@ impl Workspace {
             self.deliver = Some(DeliverDialog {
                 output: dir.join(format!("{stem}.mp4")).display().to_string(),
                 opts: DeliverOptions::default(),
+                free: None,
                 only_in_out: false,
                 job: None,
                 message: None,
@@ -261,6 +307,9 @@ impl Workspace {
     }
 
     pub fn dialogs_ui(&mut self, ctx: &egui::Context) {
+        self.palette_ui(ctx);
+        self.history_ui(ctx);
+        self.backups_ui(ctx);
         self.deliver_ui(ctx);
         self.prefs_ui(ctx);
         self.new_project_ui(ctx);
@@ -413,6 +462,240 @@ impl Workspace {
         }
     }
 
+    /// Ctrl+K: busca qualquer ação pelo nome e executa (Enter), com o atalho ao lado.
+    fn palette_ui(&mut self, ctx: &egui::Context) {
+        let Some(pal) = &mut self.palette else { return };
+        let hits = palette_matches(&pal.query);
+        let (up, down, enter, esc) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+            )
+        });
+        if down {
+            pal.selected = (pal.selected + 1).min(hits.len().saturating_sub(1));
+        }
+        if up {
+            pal.selected = pal.selected.saturating_sub(1);
+        }
+        pal.selected = pal.selected.min(hits.len().saturating_sub(1));
+        let mut run = enter.then(|| hits.get(pal.selected).copied()).flatten();
+        let screen = ctx.content_rect();
+        let keymap = &self.keymap;
+        egui::Area::new(egui::Id::new("palette"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(screen.center().x - 260.0, screen.top() + 90.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.set_width(520.0);
+                        let edit = ui.add(
+                            egui::TextEdit::singleline(&mut pal.query)
+                                .hint_text("Digite um comando… (Esc fecha)")
+                                .desired_width(f32::INFINITY)
+                                .font(egui::TextStyle::Body),
+                        );
+                        edit.request_focus();
+                        if edit.changed() {
+                            pal.selected = 0;
+                        }
+                        ui.add_space(4.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(360.0)
+                            .show(ui, |ui| {
+                                for (i, a) in hits.iter().enumerate() {
+                                    let on = i == pal.selected;
+                                    let shortcut = keymap
+                                        .chords(*a)
+                                        .first()
+                                        .map(|c| c.display())
+                                        .unwrap_or_default();
+                                    let (rect, resp) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), 26.0),
+                                        egui::Sense::click(),
+                                    );
+                                    resp.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::WidgetType::Button,
+                                            true,
+                                            a.label(),
+                                        )
+                                    });
+                                    if on || resp.hovered() {
+                                        ui.painter().rect_filled(
+                                            rect,
+                                            3.0,
+                                            if on {
+                                                crate::theme::ACCENT.gamma_multiply(0.3)
+                                            } else {
+                                                crate::theme::BAR_LIGHT
+                                            },
+                                        );
+                                    }
+                                    if on {
+                                        resp.scroll_to_me(None);
+                                    }
+                                    ui.painter().text(
+                                        rect.left_center() + egui::vec2(8.0, 0.0),
+                                        egui::Align2::LEFT_CENTER,
+                                        a.label(),
+                                        crate::theme::text(13.0),
+                                        egui::Color32::WHITE,
+                                    );
+                                    ui.painter().text(
+                                        rect.right_center() - egui::vec2(8.0, 0.0),
+                                        egui::Align2::RIGHT_CENTER,
+                                        shortcut,
+                                        crate::theme::mono(11.0),
+                                        crate::theme::TEXT_DIM,
+                                    );
+                                    if resp.clicked() {
+                                        run = Some(*a);
+                                    }
+                                }
+                                if hits.is_empty() {
+                                    ui.label(RichText::new("Nenhum comando encontrado").weak());
+                                }
+                            });
+                    });
+            });
+        if esc || run.is_some() {
+            self.palette = None;
+        }
+        if let Some(a) = run {
+            self.run_action(a);
+        }
+    }
+
+    /// Ctrl+H: lista do que foi feito; clicar volta (ou avança) até aquele ponto.
+    fn history_ui(&mut self, ctx: &egui::Context) {
+        if !self.history_open {
+            return;
+        }
+        let (done, todo) = self.st.editor.history();
+        let mut open = true;
+        let mut jump = None;
+        Window::new("Histórico")
+            .open(&mut open)
+            .default_size([300.0, 420.0])
+            .default_pos(ctx.content_rect().right_top() + egui::vec2(-340.0, 80.0))
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "Clique numa ação para voltar até ela. As cinzas podem ser refeitas.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        if ui
+                            .selectable_label(done.is_empty(), "Início (projeto aberto)")
+                            .clicked()
+                        {
+                            jump = Some(0);
+                        }
+                        for (i, label) in done.iter().enumerate() {
+                            let current = i + 1 == done.len();
+                            if ui
+                                .selectable_label(current, format!("{}. {label}", i + 1))
+                                .clicked()
+                            {
+                                jump = Some(i + 1);
+                            }
+                        }
+                        for (k, label) in todo.iter().enumerate() {
+                            let n = done.len() + k + 1;
+                            if ui
+                                .selectable_label(
+                                    false,
+                                    RichText::new(format!("{n}. {label}"))
+                                        .color(crate::theme::TEXT_DIM),
+                                )
+                                .clicked()
+                            {
+                                jump = Some(n);
+                            }
+                        }
+                    });
+            });
+        if let Some(n) = jump {
+            self.stop();
+            self.st.jump_history(n);
+        }
+        if !open {
+            self.history_open = false;
+        }
+    }
+
+    /// Versões anteriores do projeto (um backup a cada vez que salva).
+    fn backups_ui(&mut self, ctx: &egui::Context) {
+        if !self.backups_open {
+            return;
+        }
+        let Some(project) = self.st.path.clone() else {
+            self.backups_open = false;
+            return;
+        };
+        let dir = config::backups_dir_in(&self.backups_root, &project);
+        let list = config::list_backups(&dir);
+        let mut open = true;
+        let mut restore = None;
+        Window::new("Versões anteriores")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "A cada vez que salva, a versão anterior de “{}” fica guardada (as {} últimas).",
+                        project.file_name().map_or("".into(), |n| n.to_string_lossy()),
+                        config::BACKUPS_KEPT
+                    ))
+                    .weak(),
+                );
+                ui.separator();
+                if list.is_empty() {
+                    ui.label("Ainda não há versões anteriores. Elas aparecem depois de salvar de novo.");
+                }
+                egui::Grid::new("backups").striped(true).num_columns(3).show(ui, |ui| {
+                    for b in &list {
+                        let when = config::backup_time(b).map(config::ago).unwrap_or_default();
+                        let size = std::fs::metadata(b).map_or(0, |m| m.len());
+                        ui.label(when);
+                        ui.label(RichText::new(format!("{:.0} KB", size as f64 / 1024.0)).weak());
+                        if ui.button("Abrir esta versão").clicked() {
+                            restore = Some(b.clone());
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
+        if let Some(b) = restore {
+            match crate::state::AppState::open(&b) {
+                Ok(mut st) => {
+                    // Abre como o projeto original, mas sem salvar: só vira definitivo com Ctrl+S.
+                    st.mark_saved(project.clone());
+                    st.mark_unsaved();
+                    self.replace_state(st);
+                    self.backups_open = false;
+                    self.st
+                        .say("Versão anterior aberta. Salve (Ctrl+S) para ficar com ela.");
+                }
+                Err(e) => self.st.warn(e.to_string()),
+            }
+        }
+        if !open {
+            self.backups_open = false;
+        }
+    }
+
     fn deliver_ui(&mut self, ctx: &egui::Context) {
         let Some(d) = &mut self.deliver else { return };
         let mut open = true;
@@ -423,6 +706,7 @@ impl Workspace {
             _ => None,
         };
         let mut start = false;
+        let mut blocked = false;
         let mut pick_output = false;
         let mut still = false;
         let before = d.opts.clone();
@@ -616,7 +900,6 @@ impl Workspace {
                 } else {
                     (0, project.duration())
                 };
-                let secs = s.fps.frames_to_seconds(to - from);
                 let summary = if audio_only {
                     format!(
                         "{} · duração {}",
@@ -631,20 +914,39 @@ impl Workspace {
                         fps_text(fps),
                         format_timecode(to - from, s.fps)
                     );
-                    if d.opts.use_bitrate && d.opts.codec != VideoCodec::ProRes {
-                        let kbps = d.opts.bitrate_mbps as f64 * 1000.0
-                            + if d.opts.audio {
-                                d.opts.audio_kbps as f64
-                            } else {
-                                0.0
-                            };
-                        t.push_str(&format!(" · ~{:.0} MB", kbps * secs / 8000.0));
-                    }
+                    let range = if d.only_in_out { marks } else { None };
+                    let est = estimated_bytes(
+                        &project,
+                        &d.opts.export_settings(&project, PathBuf::new(), range),
+                    );
+                    let approx = if d.opts.use_bitrate { "" } else { "estimado " };
+                    t.push_str(&format!(" · {approx}~{:.0} MB", est as f64 / 1e6));
                     t
                 };
                 ui.add_space(6.0);
                 ui.separator();
                 ui.label(RichText::new(summary).weak());
+                // Conferências antes de exportar: o que impede (vermelho) e o que só avisa.
+                let dir = PathBuf::from(d.output.trim())
+                    .parent()
+                    .map(PathBuf::from)
+                    .unwrap_or_default();
+                if d.free.as_ref().is_none_or(|(p, _)| *p != dir) {
+                    d.free = Some((dir.clone(), free_space(&dir)));
+                }
+                let free = d.free.as_ref().and_then(|(_, f)| *f);
+                let range = if d.only_in_out { marks } else { None };
+                let settings = d.opts.export_settings(&project, PathBuf::new(), range);
+                let checks = deliver_checks(&project, &settings, &self.st.offline, free);
+                blocked = checks.iter().any(|(fatal, _)| *fatal);
+                for (fatal, text) in &checks {
+                    let color = if *fatal {
+                        egui::Color32::from_rgb(240, 110, 110)
+                    } else {
+                        egui::Color32::from_rgb(240, 190, 90)
+                    };
+                    ui.colored_label(color, format!("{} {text}", if *fatal { "✖" } else { "⚠" }));
+                }
                 ui.add_space(4.0);
                 match &d.job {
                     Some(job) => {
@@ -669,7 +971,7 @@ impl Workspace {
                     }
                     None => {
                         ui.horizontal(|ui| {
-                            let ok = to > from && !d.output.trim().is_empty();
+                            let ok = to > from && !d.output.trim().is_empty() && !blocked;
                             if ui
                                 .add_enabled(
                                     ok,
@@ -1022,6 +1324,164 @@ impl Workspace {
     }
 }
 
+/// Espaço livre (bytes) no disco da pasta, pelo `df`; `None` se não deu para saber.
+fn free_space(dir: &std::path::Path) -> Option<u64> {
+    let dir = if dir.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        dir
+    };
+    let out = std::process::Command::new("df")
+        .args(["-B1", "--output=avail"])
+        .arg(dir)
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .nth(1)?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Tamanho aproximado do arquivo, em bytes (bitrate, ou uma média por pixel para CRF/ProRes).
+pub fn estimated_bytes(project: &pawcut_core::Project, s: &ExportSettings) -> u64 {
+    let total = pawcut_export::frame_count(project, s);
+    let fps = s.fps.unwrap_or(project.settings.fps).as_f64();
+    let secs = total as f64 / fps;
+    let audio_bps = match s.audio_only {
+        Some(AudioFormat::Wav) => return (secs * 48_000.0 * 4.0) as u64,
+        Some(AudioFormat::Mp3) => {
+            return (secs * s.audio_kbps.unwrap_or(256) as f64 * 125.0) as u64;
+        }
+        None => s.audio_kbps.map_or(0.0, |k| k as f64 * 1000.0),
+    };
+    let (w, h) = s
+        .size
+        .unwrap_or((project.settings.width, project.settings.height));
+    let pixels = w as f64 * h as f64 * fps;
+    let video_bps = match (s.codec, s.bitrate_kbps) {
+        (VideoCodec::ProRes, _) => pixels * 3.5,
+        (_, Some(k)) => k as f64 * 1000.0,
+        (codec, None) => {
+            let bpp = 0.12 * 2f64.powf((18.0 - s.crf as f64) / 6.0);
+            pixels * bpp * if codec == VideoCodec::H265 { 0.6 } else { 1.0 }
+        }
+    };
+    ((video_bps + audio_bps) * secs / 8.0) as u64
+}
+
+/// Problemas antes de exportar: `(impede?, texto)`.
+pub fn deliver_checks(
+    project: &pawcut_core::Project,
+    s: &ExportSettings,
+    offline: &std::collections::HashSet<pawcut_core::MediaId>,
+    free: Option<u64>,
+) -> Vec<(bool, String)> {
+    use pawcut_core::ClipSource;
+    let mut out = Vec::new();
+    let (from, to) = s.range.unwrap_or((0, project.duration()));
+    let in_range = |c: &pawcut_core::Clip| c.enabled && c.start < to && c.end() > from;
+    // Mídia offline usada no trecho.
+    let mut missing: Vec<String> = project
+        .all_tracks()
+        .flat_map(|t| t.clips.iter())
+        .filter(|c| in_range(c))
+        .filter_map(|c| match &c.source {
+            ClipSource::Media(m) if offline.contains(m) => project.media(*m).map(|m| {
+                m.info
+                    .path
+                    .file_name()
+                    .map_or("?".into(), |n| n.to_string_lossy().into_owned())
+            }),
+            _ => None,
+        })
+        .collect();
+    missing.sort();
+    missing.dedup();
+    if !missing.is_empty() {
+        out.push((
+            true,
+            format!(
+                "Mídia offline: {} (use Relink no Media Pool)",
+                missing.join(", ")
+            ),
+        ));
+    }
+    // Trechos sem nenhum vídeo (sai preto).
+    if s.audio_only.is_none() && to > from {
+        let mut spans: Vec<(i64, i64)> = project
+            .video_tracks
+            .iter()
+            .filter(|t| t.enabled)
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| in_range(c))
+            .map(|c| (c.start.max(from), c.end().min(to)))
+            .collect();
+        spans.sort();
+        let (mut covered, mut cur) = (0i64, from);
+        for (a, b) in spans {
+            let a = a.max(cur);
+            if b > a {
+                covered += b - a;
+                cur = b;
+            }
+        }
+        let black = (to - from) - covered;
+        if black > 0 {
+            out.push((
+                false,
+                format!(
+                    "{:.1} s de tela preta (sem vídeo) no trecho",
+                    project.settings.fps.frames_to_seconds(black)
+                ),
+            ));
+        }
+    }
+    // Nada audível.
+    let wants_audio = s.audio_only.is_some() || s.audio_kbps.is_some();
+    if wants_audio {
+        let any_solo = project.audio_tracks.iter().any(|t| t.solo);
+        let audible = project
+            .audio_tracks
+            .iter()
+            .filter(|t| if any_solo { t.solo } else { !t.muted })
+            .flat_map(|t| t.clips.iter())
+            .any(|c| in_range(c) && matches!(c.source, ClipSource::Media(_)));
+        if !audible {
+            out.push((
+                false,
+                "Nenhum áudio audível no trecho: o arquivo vai sair mudo".into(),
+            ));
+        }
+    }
+    // Espaço em disco.
+    if let Some(free) = free {
+        let need = estimated_bytes(project, s);
+        let gb = |b: u64| b as f64 / 1e9;
+        if need > free {
+            out.push((
+                true,
+                format!(
+                    "Espaço insuficiente: precisa de ~{:.1} GB e há {:.1} GB livres",
+                    gb(need),
+                    gb(free)
+                ),
+            ));
+        } else if need as f64 > free as f64 * 0.8 {
+            out.push((
+                false,
+                format!(
+                    "O disco vai ficar quase cheio (~{:.1} GB de {:.1} GB livres)",
+                    gb(need),
+                    gb(free)
+                ),
+            ));
+        }
+    }
+    out
+}
+
 /// "29,97" / "30" — fps com vírgula, sem casas à toa.
 fn fps_text(f: FrameRate) -> String {
     let v = f.as_f64();
@@ -1045,6 +1505,57 @@ pub fn deliver_size(w: u32, h: u32, target: Option<u32>) -> (u32, u32) {
 mod tests {
     use super::*;
     use pawcut_core::{Project, ProjectSettings};
+
+    #[test]
+    fn deliver_checks_find_offline_black_silence_and_disk() {
+        use pawcut_core::{Edit, MediaInfo, MediaKind, TrackKind};
+        let mut st = crate::state::AppState::new(Project::new(ProjectSettings::default()));
+        st.apply(Edit::AddMedia(MediaInfo {
+            path: "/sumiu/x.mp4".into(),
+            kind: MediaKind::Video { has_audio: false },
+            duration: Some(60),
+            width: 1920,
+            height: 1080,
+        }));
+        let m = st.project().media[0].id;
+        st.drop_media(m, TrackKind::Video, 0, 30);
+        let p = st.project().clone();
+        let s = DeliverOptions::default().export_settings(&p, "a.mp4".into(), None);
+        let offline = [m].into_iter().collect();
+        let checks = deliver_checks(&p, &s, &offline, Some(10));
+        let text: Vec<&str> = checks.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(
+            checks.iter().any(|(f, t)| *f && t.contains("offline")),
+            "{text:?}"
+        );
+        assert!(text.iter().any(|t| t.contains("tela preta")), "{text:?}");
+        assert!(text.iter().any(|t| t.contains("mudo")), "{text:?}");
+        assert!(
+            checks.iter().any(|(f, t)| *f && t.contains("Espaço")),
+            "{text:?}"
+        );
+        let fine = deliver_checks(&p, &s, &Default::default(), Some(u64::MAX));
+        assert!(fine.iter().all(|(f, _)| !f));
+        // Estimativa: bitrate fixo dá o tamanho certo.
+        let br = DeliverOptions {
+            use_bitrate: true,
+            bitrate_mbps: 8.0,
+            audio: false,
+            ..DeliverOptions::default()
+        }
+        .export_settings(&p, "a.mp4".into(), None);
+        assert_eq!(estimated_bytes(&p, &br), 3_000_000, "8 Mb/s × 3 s");
+    }
+
+    #[test]
+    fn palette_search_ignores_case_and_accents() {
+        let hits = palette_matches("historico");
+        assert_eq!(hits.first(), Some(&Action::History));
+        assert!(palette_matches("CONGELAR").contains(&Action::FreezeFrame));
+        assert!(palette_matches("zoom caber").contains(&Action::ZoomToFit));
+        assert!(!palette_matches("").contains(&Action::CommandPalette));
+        assert!(palette_matches("xyzzy").is_empty());
+    }
 
     #[test]
     fn deliver_options_build_export_settings() {

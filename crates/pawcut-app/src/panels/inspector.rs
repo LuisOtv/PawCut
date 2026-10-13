@@ -83,6 +83,34 @@ fn reset(ui: &mut egui::Ui, changed_from_default: bool) -> bool {
     changed_from_default && resp.on_hover_text("Voltar ao padrão").clicked()
 }
 
+fn ease_label(e: pawcut_core::Ease) -> &'static str {
+    match e {
+        pawcut_core::Ease::Linear => "Linear",
+        pawcut_core::Ease::Smooth => "Suave (entrada e saída)",
+        pawcut_core::Ease::EaseIn => "Suave na entrada (acelera)",
+        pawcut_core::Ease::EaseOut => "Suave na saída (desacelera)",
+    }
+}
+
+/// Escalas que ajustam (cabe inteiro) e preenchem (cobre o quadro) a mídia no projeto.
+fn fit_fill_scales(p: &Project, clip: &Clip) -> Option<(f32, f32)> {
+    let ClipSource::Media(m) = &clip.source else {
+        return None;
+    };
+    let m = p.media(*m)?;
+    let (pw, ph) = (p.settings.width as f32, p.settings.height as f32);
+    let (w, h) = (m.info.width.max(1) as f32, m.info.height.max(1) as f32);
+    // Mesmo tamanho-base do renderizador: vídeo cabe inteiro; imagem só diminui.
+    let contain = (pw / w).min(ph / h);
+    let s = if m.info.kind == MediaKind::Image {
+        contain.min(1.0)
+    } else {
+        contain
+    };
+    let (bw, bh) = (w * s, h * s);
+    Some(((pw / bw).min(ph / bh), (pw / bw).max(ph / bh)))
+}
+
 fn default_of(param: Param) -> f32 {
     match param {
         Param::Scale | Param::Opacity => 1.0,
@@ -119,6 +147,7 @@ fn static_change(clip: &Clip, param: Param, value: f32) -> ClipChange {
         Param::Hue => c.hue = value,
         Param::Saturation => c.saturation = value,
         Param::Lightness => c.lightness = value,
+        Param::Rotation => t.rotation = value,
     }
     match param {
         Param::Hue | Param::Saturation | Param::Lightness => ClipChange::Color(c),
@@ -232,6 +261,11 @@ impl Workspace {
         let mut changed = false;
         let mut toggle_key = false;
         let mut do_reset = false;
+        let mut pick_ease: Option<pawcut_core::Ease> = None;
+        let ease_here = keys
+            .iter()
+            .find(|k| (k.at - at).abs() < 0.5)
+            .map(|k| k.ease);
         row(
             ui,
             label,
@@ -249,11 +283,39 @@ impl Workspace {
                 }
             },
             |ui| {
-                toggle_key = diamond(ui, animated, here).clicked();
+                let d = diamond(ui, animated, here);
+                toggle_key = d.clicked();
+                // Botão direito no ◆: curva de chegada deste keyframe.
+                if let Some(current) = ease_here {
+                    d.context_menu(|ui| {
+                        ui.label(RichText::new("Curva até este keyframe").weak());
+                        for e in pawcut_core::Ease::ALL {
+                            if ui.radio(current == e, ease_label(e)).clicked() {
+                                pick_ease = Some(e);
+                                ui.close();
+                            }
+                        }
+                    });
+                }
                 do_reset = reset(ui, animated || (current - default_of(param)).abs() > 1e-4);
             },
         );
         let key = format!("insp-{param:?}");
+        if let Some(ease) = pick_ease {
+            for c in clips {
+                let at = c.source_time_at(frame_of(c));
+                self.st.apply_coalescing(
+                    Edit::SetKeyframeEase {
+                        clip: c.id,
+                        param,
+                        at,
+                        ease,
+                    },
+                    &format!("{key}-ease"),
+                );
+            }
+            self.st.editor.end_coalescing();
+        }
         if toggle_key {
             for c in clips {
                 let at = c.source_time_at(frame_of(c));
@@ -469,6 +531,53 @@ impl Workspace {
                             0.0..=100.0,
                             " %",
                         );
+                        self.param_row(
+                            ui,
+                            &clips,
+                            Param::Rotation,
+                            "Rotação",
+                            1.0,
+                            -3600.0..=3600.0,
+                            "°",
+                        );
+                        if fit_fill_scales(&project, &first).is_some() {
+                            row(
+                                ui,
+                                "Enquadrar",
+                                |ui| {
+                                    let fit = ui
+                                        .button("Ajustar")
+                                        .on_hover_text("Imagem inteira no quadro, centralizada");
+                                    let fill = ui
+                                        .button("Preencher")
+                                        .on_hover_text("Cobre o quadro todo (corta as sobras)");
+                                    let pick = if fit.clicked() {
+                                        Some(false)
+                                    } else if fill.clicked() {
+                                        Some(true)
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(fill) = pick {
+                                        let p = project.clone();
+                                        self.apply_all(&clips, "insp-fit", |c| {
+                                            let (fit, cover) = fit_fill_scales(&p, c)?;
+                                            Some(Edit::SetClip {
+                                                clip: c.id,
+                                                change: ClipChange::Transform(Transform {
+                                                    x: 0.0,
+                                                    y: 0.0,
+                                                    scale: if fill { cover } else { fit },
+                                                    ..c.transform
+                                                }),
+                                            })
+                                        });
+                                        self.st.editor.end_coalescing();
+                                    }
+                                },
+                                |_| {},
+                            );
+                        }
                         let mut t = first.transform;
                         row(
                             ui,
@@ -615,6 +724,33 @@ impl Workspace {
                                 edge: Edge::End,
                                 delta,
                             });
+                        }
+                        if !still && kind == TrackKind::Video {
+                            let frozen = first.freeze.is_some();
+                            let mut toggle = false;
+                            row(
+                                ui,
+                                "Congelar",
+                                |ui| {
+                                    toggle = ui
+                                        .selectable_label(
+                                            frozen,
+                                            if frozen {
+                                                "Congelado (clique para soltar)"
+                                            } else {
+                                                "Congelar no cursor"
+                                            },
+                                        )
+                                        .on_hover_text(
+                                            "Freeze frame: o clipe inteiro mostra o frame do cursor",
+                                        )
+                                        .clicked();
+                                },
+                                |_| {},
+                            );
+                            if toggle {
+                                self.st.freeze_frame();
+                            }
                         }
                         if !still {
                             let mut pct = first.speed * 100.0;

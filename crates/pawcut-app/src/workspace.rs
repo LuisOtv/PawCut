@@ -107,6 +107,19 @@ pub struct Workspace {
     pub track_views: HashMap<pawcut_core::TrackId, crate::panels::timeline::TrackView>,
     /// Aba escolhida no Inspector (fica a mesma ao trocar de clipe, quando existe).
     pub inspector_tab: crate::panels::inspector::InspectorTab,
+    /// Paleta de comandos aberta (Ctrl+K).
+    pub palette: Option<crate::panels::dialogs::Palette>,
+    pub history_open: bool,
+    /// Janela de versões anteriores (backups) aberta.
+    pub backups_open: bool,
+    /// Pasta onde ficam os backups versionados (vazia = não guarda; usado nos testes).
+    pub backups_root: PathBuf,
+    /// Pedido para o app maximizar/restaurar o painel sob o mouse.
+    pub maximize_request: bool,
+    /// Painel sob o mouse no último frame (para maximizar).
+    pub hovered_panel: Option<crate::panels::Panel>,
+    /// Reprodução em loop (In/Out ou a timeline inteira).
+    pub looping: bool,
     /// Zoom do Timeline Viewer (0 = ajustar à janela) e deslocamento ao arrastar com o botão do meio.
     pub viewer_zoom: f32,
     pub viewer_pan: egui::Vec2,
@@ -193,6 +206,13 @@ impl Workspace {
             proxy_jobs: Vec::new(),
             track_views: HashMap::new(),
             inspector_tab: Default::default(),
+            palette: None,
+            history_open: false,
+            backups_open: false,
+            backups_root: config::data_dir().join("backups"),
+            maximize_request: false,
+            hovered_panel: None,
+            looping: false,
             viewer_zoom: 0.0,
             viewer_pan: egui::Vec2::ZERO,
             safe_guides: false,
@@ -339,7 +359,11 @@ impl Workspace {
                 } else {
                     origin + (since.elapsed().as_secs_f64() * fps.as_f64() * rate) as Frame
                 };
-                if rate > 0.0 && frame >= total {
+                let (loop_a, loop_b) = self.loop_range(total);
+                if self.looping && rate > 0.0 && frame >= loop_b {
+                    self.st.playhead = loop_a;
+                    self.play(rate);
+                } else if rate > 0.0 && frame >= total {
                     self.st.playhead = total;
                     self.stop();
                 } else if rate < 0.0 && frame <= 0 {
@@ -379,6 +403,10 @@ impl Workspace {
                 if rate > 0.0 && self.st.playhead >= total {
                     self.st.playhead = 0;
                 }
+                let (loop_a, loop_b) = self.loop_range(total);
+                if self.looping && rate > 0.0 && !(loop_a..loop_b).contains(&self.st.playhead) {
+                    self.st.playhead = loop_a;
+                }
                 let audio = (rate - 1.0).abs() < 1e-9;
                 if audio {
                     let s = &self.project_arc.settings;
@@ -408,6 +436,17 @@ impl Workspace {
                 };
             }
         }
+    }
+
+    /// Trecho que o loop repete: In/Out se marcados, senão a timeline inteira.
+    fn loop_range(&self, total: Frame) -> (Frame, Frame) {
+        let a = self.st.mark_in.unwrap_or(0).clamp(0, total);
+        let b = self
+            .st
+            .mark_out
+            .unwrap_or(total)
+            .clamp(a + 1, total.max(a + 1));
+        (a, b)
     }
 
     pub fn stop(&mut self) {
@@ -657,6 +696,23 @@ impl Workspace {
             Action::NudgeRight10 => st.nudge(10),
             Action::SelectForward => st.select_forward(),
             Action::PasteAttributes => st.paste_attributes(),
+            Action::TrimTool => st.tool = Tool::Trim,
+            Action::ToggleClipEnabled => st.toggle_enabled(),
+            Action::FreezeFrame => st.freeze_frame(),
+            Action::CommandPalette => {
+                self.palette = Some(crate::panels::dialogs::Palette::default());
+            }
+            Action::History => self.history_open = !self.history_open,
+            Action::MaximizePanel => self.maximize_request = true,
+            Action::ToggleLoop => {
+                self.looping = !self.looping;
+                let on = self.looping;
+                self.st.say(if on {
+                    "Loop ligado: repete o trecho In/Out (ou a timeline inteira)"
+                } else {
+                    "Loop desligado"
+                });
+            }
             Action::ToggleSkimming => {
                 self.skimming = !self.skimming;
                 let on = self.skimming;
@@ -957,6 +1013,17 @@ impl Workspace {
     }
 
     fn save_to(&mut self, path: &Path) -> bool {
+        // Guarda a versão que vai ser sobrescrita (as 10 últimas por projeto).
+        if !self.backups_root.as_os_str().is_empty()
+            && let Err(e) = config::backup_existing(
+                path,
+                &config::backups_dir_in(&self.backups_root, path),
+                config::BACKUPS_KEPT,
+            )
+        {
+            self.st
+                .warn(format!("Não foi possível guardar o backup: {e}"));
+        }
         match self.st.save_to(path) {
             Ok(()) => {
                 self.last_saved = Some(Instant::now());

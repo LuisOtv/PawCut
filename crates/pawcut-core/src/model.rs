@@ -160,6 +160,9 @@ pub struct Transform {
     pub flip_h: bool,
     #[serde(default)]
     pub flip_v: bool,
+    /// Rotação em graus (positivo = anti-horário, como no Resolve).
+    #[serde(default)]
+    pub rotation: f32,
 }
 
 impl Default for Transform {
@@ -172,6 +175,7 @@ impl Default for Transform {
             crop: Crop::default(),
             flip_h: false,
             flip_v: false,
+            rotation: 0.0,
         }
     }
 }
@@ -202,10 +206,11 @@ pub enum Param {
     Hue,
     Saturation,
     Lightness,
+    Rotation,
 }
 
 impl Param {
-    pub const ALL: [Param; 8] = [
+    pub const ALL: [Param; 9] = [
         Param::X,
         Param::Y,
         Param::Scale,
@@ -214,6 +219,7 @@ impl Param {
         Param::Hue,
         Param::Saturation,
         Param::Lightness,
+        Param::Rotation,
     ];
 }
 
@@ -223,6 +229,24 @@ pub enum Ease {
     /// Acelera e desacelera (ease in/out).
     #[default]
     Smooth,
+    /// Começa devagar e acelera.
+    EaseIn,
+    /// Começa rápido e desacelera.
+    EaseOut,
+}
+
+impl Ease {
+    pub const ALL: [Ease; 4] = [Ease::Linear, Ease::Smooth, Ease::EaseIn, Ease::EaseOut];
+
+    /// Curva de 0..1 para 0..1.
+    pub fn apply(self, t: f32) -> f32 {
+        match self {
+            Ease::Linear => t,
+            Ease::Smooth => t * t * (3.0 - 2.0 * t),
+            Ease::EaseIn => t * t,
+            Ease::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
+        }
+    }
 }
 
 /// Um keyframe. `at` é o tempo da fonte (em frames do projeto a 1x), assim mover, aparar,
@@ -266,6 +290,16 @@ pub struct Clip {
     pub color: ColorAdjust,
     #[serde(default)]
     pub keyframes: BTreeMap<Param, Vec<Keyframe>>,
+    /// Desligado: continua na timeline mas não aparece nem toca (D no Resolve).
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Congelado num tempo da fonte (freeze frame): todos os frames mostram esse.
+    #[serde(default)]
+    pub freeze: Option<f64>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Clip {
@@ -279,7 +313,10 @@ impl Clip {
 
     /// Tempo da fonte mostrado no frame `frame` da timeline.
     pub fn source_time_at(&self, frame: Frame) -> f64 {
-        self.source_start + (frame - self.start) as f64 * self.speed
+        match self.freeze {
+            Some(at) => at,
+            None => self.source_start + (frame - self.start) as f64 * self.speed,
+        }
     }
 
     /// Valor fixo do parâmetro (o que vale quando não há keyframes).
@@ -294,6 +331,7 @@ impl Clip {
             Param::Hue => self.color.hue,
             Param::Saturation => self.color.saturation,
             Param::Lightness => self.color.lightness,
+            Param::Rotation => t.rotation,
         }
     }
 
@@ -310,11 +348,8 @@ impl Clip {
             return keys[i - 1].value;
         }
         let (a, b) = (keys[i - 1], keys[i]);
-        let mut t = ((s - a.at) / (b.at - a.at)).clamp(0.0, 1.0) as f32;
-        if b.ease == Ease::Smooth {
-            t = t * t * (3.0 - 2.0 * t);
-        }
-        a.value + (b.value - a.value) * t
+        let t = ((s - a.at) / (b.at - a.at)).clamp(0.0, 1.0) as f32;
+        a.value + (b.value - a.value) * b.ease.apply(t)
     }
 
     /// Valor do parâmetro no frame `frame` da timeline.
@@ -329,6 +364,7 @@ impl Clip {
             y: self.param(Param::Y, frame),
             scale: self.param(Param::Scale, frame).max(0.001),
             opacity: self.param(Param::Opacity, frame).clamp(0.0, 1.0),
+            rotation: self.param(Param::Rotation, frame),
             ..self.transform
         }
     }
@@ -607,6 +643,8 @@ mod tests {
             dissolve_in: 0,
             color: Default::default(),
             keyframes: Default::default(),
+            enabled: true,
+            freeze: None,
         }
     }
 

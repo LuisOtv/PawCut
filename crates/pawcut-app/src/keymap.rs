@@ -63,10 +63,17 @@ pub enum Action {
     ToggleSkimming,
     ShowInPool,
     PasteAttributes,
+    CommandPalette,
+    History,
+    TrimTool,
+    ToggleClipEnabled,
+    MaximizePanel,
+    ToggleLoop,
+    FreezeFrame,
 }
 
 impl Action {
-    pub const ALL: [Action; 55] = [
+    pub const ALL: [Action; 62] = [
         Action::PlayPause,
         Action::PlayForward,
         Action::Stop,
@@ -122,6 +129,13 @@ impl Action {
         Action::ToggleSkimming,
         Action::ShowInPool,
         Action::PasteAttributes,
+        Action::CommandPalette,
+        Action::History,
+        Action::TrimTool,
+        Action::ToggleClipEnabled,
+        Action::MaximizePanel,
+        Action::ToggleLoop,
+        Action::FreezeFrame,
     ];
 
     pub fn label(self) -> &'static str {
@@ -181,6 +195,13 @@ impl Action {
             Action::ToggleSkimming => "Prévia passando o mouse (skimming)",
             Action::ShowInPool => "Mostrar no Media Pool",
             Action::PasteAttributes => "Colar atributos",
+            Action::CommandPalette => "Paleta de comandos",
+            Action::History => "Histórico de ações",
+            Action::TrimTool => "Ferramenta Trim (ripple / roll / slip)",
+            Action::ToggleClipEnabled => "Ligar/desligar clipe",
+            Action::MaximizePanel => "Maximizar painel sob o mouse",
+            Action::ToggleLoop => "Repetir (loop) a reprodução",
+            Action::FreezeFrame => "Congelar frame",
         }
     }
 }
@@ -340,6 +361,13 @@ impl Keymap {
             (A::SelectForward, vec![K::new(Key::Y)]),
             (A::ToggleSkimming, vec![K::new(Key::S)]),
             (A::ShowInPool, vec![K::shift(Key::F)]),
+            (A::CommandPalette, vec![K::ctrl(Key::K)]),
+            (A::History, vec![K::ctrl(Key::H)]),
+            (A::TrimTool, vec![K::new(Key::T)]),
+            (A::ToggleClipEnabled, vec![K::new(Key::D)]),
+            (A::MaximizePanel, vec![K::new(Key::Backtick)]),
+            (A::ToggleLoop, vec![K::ctrl(Key::Slash)]),
+            (A::FreezeFrame, vec![K::shift(Key::R)]),
             (
                 A::PasteAttributes,
                 vec![KeyChord {

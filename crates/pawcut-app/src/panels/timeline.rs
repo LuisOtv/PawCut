@@ -86,6 +86,15 @@ pub fn gap_at(track: &Track, at: Frame) -> Option<(Frame, Frame)> {
     Some((start, end))
 }
 
+/// O que a ferramenta Trim pega sob o mouse.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TrimHit {
+    Ripple(ClipId, Edge),
+    /// Corte entre (esquerdo, direito) encostados.
+    Roll(ClipId, ClipId),
+    Slip(ClipId),
+}
+
 #[derive(Debug, Clone)]
 enum TlDrag {
     Scrub,
@@ -109,6 +118,23 @@ enum TlDrag {
         anchor: ClipId,
         clips: Vec<ClipId>,
         edge: Edge,
+        grab: Frame,
+    },
+    /// Ferramenta Trim: borda com ripple (empurra o resto da faixa).
+    Ripple {
+        anchor: ClipId,
+        clips: Vec<ClipId>,
+        edge: Edge,
+        grab: Frame,
+    },
+    /// Ferramenta Trim no corte entre dois clipes: move o corte (roll).
+    Roll {
+        cuts: Vec<(ClipId, ClipId)>,
+        grab: Frame,
+    },
+    /// Ferramenta Trim no meio do clipe: troca o trecho da fonte (slip).
+    Slip {
+        clips: Vec<ClipId>,
         grab: Frame,
     },
     /// Linha de volume do clipe de áudio, arrastada para cima/baixo.
@@ -501,6 +527,7 @@ impl Workspace {
         let hovered_clip = pointer.and_then(|pos| self.hit_clip(&p, &layout, pos));
 
         let fade_hit = pointer.and_then(|pos| self.hit_fade(&p, &layout, pos));
+        let mut trim_hover: Option<TrimHit> = None;
         let vol_hit = pointer
             .filter(|_| self.st.tool == Tool::Selection && fade_hit.is_none())
             .and_then(|pos| self.hit_volume(&p, &layout, pos));
@@ -513,6 +540,16 @@ impl Workspace {
             ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
         } else if self.tl.vol_hover.is_some() {
             ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
+        } else if self.st.tool == Tool::Trim
+            && self.tl.drag.is_none()
+            && let Some(hit) = pointer.and_then(|pos| self.trim_hit(&p, &layout, pos))
+        {
+            ui.ctx().set_cursor_icon(match hit {
+                TrimHit::Roll(..) => CursorIcon::ResizeColumn,
+                TrimHit::Ripple(..) => CursorIcon::ResizeHorizontal,
+                TrimHit::Slip(_) => CursorIcon::Move,
+            });
+            trim_hover = Some(hit);
         } else if let Some((_, edge)) = hovered_clip.filter(|_| self.tl.drag.is_none()) {
             let icon = match (self.st.tool, edge) {
                 (Tool::Blade, _) => CursorIcon::Crosshair,
@@ -576,6 +613,29 @@ impl Workspace {
                             }
                         }
                     }
+                    (Tool::Trim, Some(_)) => match self.trim_hit(&p, &layout, pos) {
+                        Some(TrimHit::Ripple(clip, edge)) => {
+                            self.tl.drag = Some(TlDrag::Ripple {
+                                anchor: clip,
+                                clips: self.st.expanded(&[clip]),
+                                edge,
+                                grab,
+                            });
+                        }
+                        Some(TrimHit::Roll(left, right)) => {
+                            self.tl.drag = Some(TlDrag::Roll {
+                                cuts: self.linked_cuts(&p, left, right),
+                                grab,
+                            });
+                        }
+                        Some(TrimHit::Slip(clip)) => {
+                            self.tl.drag = Some(TlDrag::Slip {
+                                clips: self.st.expanded(&[clip]),
+                                grab,
+                            });
+                        }
+                        None => {}
+                    },
                     (_, None) => {
                         self.stop();
                         let (alt, additive) =
@@ -602,9 +662,13 @@ impl Workspace {
             self.selected_gap = None;
         }
         let mut snap_line: Option<Frame> = None;
+        let mut lanes_painter_line: Option<f32> = None;
         let mut ghosts: Vec<(Rect, bool)> = Vec::new();
         let mut marquee: Option<Rect> = None;
         let mut vol_label: Option<(Pos2, f32)> = None;
+        // Balão com a mudança e a duração enquanto apara.
+        let mut info: Option<(Pos2, String)> = None;
+        let alt_held = ui.input(|i| i.modifiers.alt);
         if let Some(pos) = lanes_resp
             .interact_pointer_pos()
             .filter(|_| lanes_resp.dragged())
@@ -636,6 +700,69 @@ impl Workspace {
                         }
                     }
                     self.st.selection = sel;
+                }
+                Some(TlDrag::Ripple {
+                    anchor, edge, grab, ..
+                }) => {
+                    if let (Some(c), Some(rect)) = (
+                        p.clip(anchor),
+                        row_of(&p, anchor).and_then(|r| layout.rect_of(r)),
+                    ) {
+                        let d = now - grab;
+                        let dur = match edge {
+                            Edge::End => c.duration + d,
+                            Edge::Start => c.duration - d,
+                        }
+                        .max(1);
+                        let x0 = self.x_of(c.start as f32, layout.left);
+                        let x1 = self.x_of((c.start + dur) as f32, layout.left);
+                        ghosts.push((
+                            Rect::from_min_max(
+                                pos2(x0, rect.top() + 2.0),
+                                pos2(x1, rect.bottom() - 2.0),
+                            ),
+                            false,
+                        ));
+                        info = Some((
+                            pos,
+                            format!(
+                                "Ripple {:+} · duração {}",
+                                dur - c.duration,
+                                format_timecode(dur, fps)
+                            ),
+                        ));
+                    }
+                }
+                Some(TlDrag::Roll { cuts, grab }) => {
+                    if let Some(&(left, right)) = cuts.first()
+                        && let (Some(a), Some(b)) = (p.clip(left), p.clip(right))
+                    {
+                        let d = (now - grab).clamp(1 - a.duration, b.duration - 1);
+                        let x = self.x_of((a.end() + d) as f32, layout.left);
+                        snap_line = None;
+                        lanes_painter_line = Some(x);
+                        info = Some((
+                            pos,
+                            format!(
+                                "Roll {d:+} · {} | {}",
+                                format_timecode(a.duration + d, fps),
+                                format_timecode(b.duration - d, fps)
+                            ),
+                        ));
+                    }
+                }
+                Some(TlDrag::Slip { clips, grab }) => {
+                    let d = -(now - grab);
+                    if let Some(c) = clips.first().and_then(|c| p.clip(*c)) {
+                        let from = (c.source_start / c.speed).round() as Frame + d;
+                        info = Some((
+                            pos,
+                            format!(
+                                "Slip {d:+} · começa em {}",
+                                format_timecode(from.max(0), fps)
+                            ),
+                        ));
+                    }
                 }
                 Some(TlDrag::Volume {
                     clip,
@@ -698,6 +825,13 @@ impl Workspace {
                         .filter(|r| r.kind == origin.kind)
                         .map_or(0, |r| r.index as i64 - origin.index as i64);
                     ghosts = self.move_ghosts(&p, &layout, &clips, origin.kind, delta, rows);
+                    if alt_held {
+                        // Alt: vai soltar uma cópia (o original fica).
+                        for g in &mut ghosts {
+                            g.1 = true;
+                        }
+                        info = Some((pos, "Duplicar (Alt)".into()));
+                    }
                 }
                 Some(TlDrag::Trim {
                     anchor,
@@ -715,6 +849,19 @@ impl Workspace {
                         if target != edge_frame + (now - grab) {
                             snap_line = Some(target);
                         }
+                        let dur = match edge {
+                            Edge::Start => c.end() - target,
+                            Edge::End => target - c.start,
+                        }
+                        .max(1);
+                        info = Some((
+                            pos,
+                            format!(
+                                "{:+} · duração {}",
+                                dur - c.duration,
+                                format_timecode(dur, fps)
+                            ),
+                        ));
                         ghosts.extend(
                             self.trim_ghost(&p, &layout, anchor, edge, target)
                                 .map(|r| (r, false)),
@@ -734,6 +881,27 @@ impl Workspace {
                 match drag {
                     TlDrag::Scrub | TlDrag::Fade { .. } | TlDrag::Marquee { .. } => {}
                     TlDrag::Volume { .. } => self.st.editor.end_coalescing(),
+                    TlDrag::Ripple {
+                        clips, edge, grab, ..
+                    } => {
+                        self.st.apply(Edit::RippleTrim {
+                            clips,
+                            edge,
+                            delta: now - grab,
+                        });
+                    }
+                    TlDrag::Roll { cuts, grab } => {
+                        self.st.apply(Edit::Roll {
+                            cuts,
+                            delta: now - grab,
+                        });
+                    }
+                    TlDrag::Slip { clips, grab } => {
+                        self.st.apply(Edit::Slip {
+                            clips,
+                            delta: -(now - grab),
+                        });
+                    }
                     TlDrag::Move {
                         anchor,
                         clips,
@@ -761,12 +929,17 @@ impl Workspace {
                         } else {
                             (0, row_delta)
                         };
-                        self.st.apply(Edit::Move {
-                            clips,
-                            delta,
-                            video_track_delta: vtd,
-                            audio_track_delta: atd,
-                        });
+                        if ui.input(|i| i.modifiers.alt) {
+                            // Alt+arrastar: solta uma cópia e o original fica.
+                            self.st.duplicate(&clips, delta, origin.kind, row_delta);
+                        } else {
+                            self.st.apply(Edit::Move {
+                                clips,
+                                delta,
+                                video_track_delta: vtd,
+                                audio_track_delta: atd,
+                            });
+                        }
                     }
                     TlDrag::Trim {
                         anchor,
@@ -809,7 +982,7 @@ impl Workspace {
                     let at = self.st.snap(raw, &[], tolerance);
                     self.st.blade_clip(clip, at);
                 }
-                (Tool::Selection, Some((clip, _))) => self.st.select(clip, additive),
+                (Tool::Selection | Tool::Trim, Some((clip, _))) => self.st.select(clip, additive),
                 (_, None) => {
                     self.stop();
                     self.st.selection.clear();
@@ -924,7 +1097,7 @@ impl Workspace {
                     &p,
                     clip,
                     row.kind,
-                    track.enabled && !track.muted,
+                    track.enabled && !track.muted && clip.enabled,
                     r,
                     Some(clip.id) == hovered_id,
                 );
@@ -943,6 +1116,30 @@ impl Workspace {
             && let (Some(c), Some(pos)) = (vol_hit.and_then(|c| p.clip(c)), pointer)
         {
             vol_label = Some((pos, c.volume_db));
+        }
+        if let Some(x) = lanes_painter_line {
+            lanes_painter.line_segment(
+                [pos2(x, layout.lanes.top()), pos2(x, area.bottom())],
+                Stroke::new(2.0, Color32::from_rgb(250, 220, 80)),
+            );
+        }
+        if let Some(hit) = trim_hover {
+            self.paint_trim_hover(&lanes_painter, &p, &layout, hit);
+        }
+        if let Some((pos, text)) = info {
+            let galley = painter.layout_no_wrap(text, theme::mono(11.0), Color32::WHITE);
+            let bubble = Rect::from_min_size(
+                pos + vec2(14.0, -galley.size().y - 12.0),
+                galley.size() + vec2(10.0, 6.0),
+            );
+            lanes_painter.rect_filled(bubble, 3.0, Color32::from_rgb(0x30, 0x30, 0x36));
+            lanes_painter.rect_stroke(
+                bubble,
+                3.0,
+                Stroke::new(1.0, theme::BORDER),
+                StrokeKind::Inside,
+            );
+            lanes_painter.galley(bubble.min + vec2(5.0, 3.0), galley, Color32::WHITE);
         }
         if let Some((pos, db)) = vol_label {
             let text = if db <= -59.9 {
@@ -1306,11 +1503,14 @@ impl Workspace {
             Stroke::new(1.0, Color32::from_black_alpha(160))
         };
         painter.rect_stroke(r, 2.0, stroke, StrokeKind::Inside);
-        let name = if offline {
+        let mut name = if offline {
             format!("MEDIA OFFLINE — {}", clip_name(p, clip))
         } else {
             clip_name(p, clip)
         };
+        if !clip.enabled {
+            name.push_str("  (desligado)");
+        }
         let text_painter =
             painter.with_clip_rect(label.shrink2(vec2(3.0, 0.0)).intersect(painter.clip_rect()));
         text_painter.text(
@@ -1320,7 +1520,15 @@ impl Workspace {
             theme::text(11.0),
             Color32::from_gray(240),
         );
-        if clip.speed != 1.0 {
+        if clip.freeze.is_some() {
+            text_painter.text(
+                label.right_center() - vec2(5.0, 0.0),
+                Align2::RIGHT_CENTER,
+                "congelado",
+                theme::text(10.5),
+                Color32::from_rgb(150, 210, 255),
+            );
+        } else if clip.speed != 1.0 {
             text_painter.text(
                 label.right_center() - vec2(5.0, 0.0),
                 Align2::RIGHT_CENTER,
@@ -1742,6 +1950,10 @@ impl Workspace {
             self.tip("Zoom para caber", Action::ZoomToFit),
             self.tip("Mais zoom", Action::ZoomIn),
             self.tip("Menos zoom", Action::ZoomOut),
+            self.tip(
+                "Trim: borda = ripple, no corte = roll, meio do clipe = slip",
+                Action::TrimTool,
+            ),
         ];
         theme::toolbar(ui, |ui| {
             let sz = theme::ICON;
@@ -1758,6 +1970,9 @@ impl Workspace {
             }
             if icons::button(ui, Icon::Blade, sz, self.st.tool == Tool::Blade, &tips[1]).clicked() {
                 self.st.tool = Tool::Blade;
+            }
+            if icons::button(ui, Icon::Trim, sz, self.st.tool == Tool::Trim, &tips[11]).clicked() {
+                self.st.tool = Tool::Trim;
             }
             toolbar_sep(ui);
             if icons::button(ui, Icon::Insert, sz, false, &tips[2]).clicked() {
@@ -1851,6 +2066,109 @@ impl Workspace {
             let at = self.st.playhead;
             self.match_frame(&p, c, at);
             ui.close();
+        }
+    }
+
+    /// Ferramenta Trim: no corte entre dois clipes encostados = roll; perto de uma borda =
+    /// ripple; no meio de um clipe de mídia = slip.
+    fn trim_hit(&self, p: &Project, layout: &Layout, pos: Pos2) -> Option<TrimHit> {
+        let (clip, edge) = self.hit_clip(p, layout, pos)?;
+        let row = layout.row_at(pos.y)?;
+        let track = p.tracks(row.kind).get(row.index)?;
+        if track.locked {
+            return None;
+        }
+        let i = track.clips.iter().position(|c| c.id == clip)?;
+        let c = &track.clips[i];
+        const CUT: f32 = 4.0;
+        match edge {
+            Some(Edge::End) => {
+                let x = self.x_of(c.end() as f32, layout.left);
+                match track.clips.get(i + 1) {
+                    Some(n) if n.start == c.end() && (pos.x - x).abs() <= CUT => {
+                        Some(TrimHit::Roll(c.id, n.id))
+                    }
+                    _ => Some(TrimHit::Ripple(c.id, Edge::End)),
+                }
+            }
+            Some(Edge::Start) => {
+                let x = self.x_of(c.start as f32, layout.left);
+                match i.checked_sub(1).map(|k| &track.clips[k]) {
+                    Some(prev) if prev.end() == c.start && (pos.x - x).abs() <= CUT => {
+                        Some(TrimHit::Roll(prev.id, c.id))
+                    }
+                    _ => Some(TrimHit::Ripple(c.id, Edge::Start)),
+                }
+            }
+            None => matches!(c.source, ClipSource::Media(_)).then_some(TrimHit::Slip(c.id)),
+        }
+    }
+
+    /// O corte (esquerdo, direito) mais os cortes iguais nos clipes ligados (áudio junto).
+    fn linked_cuts(&self, p: &Project, left: ClipId, right: ClipId) -> Vec<(ClipId, ClipId)> {
+        let mut cuts = vec![(left, right)];
+        if !self.st.linked_selection {
+            return cuts;
+        }
+        let rights = p.expand_linked(&[right]);
+        for l in p.expand_linked(&[left]).into_iter().filter(|l| *l != left) {
+            let Some(lc) = p.clip(l) else { continue };
+            let lt = p.locate(l).map(|(t, _)| t);
+            if let Some(r) = rights.iter().copied().find(|r| {
+                *r != right
+                    && p.locate(*r).map(|(t, _)| t) == lt
+                    && p.clip(*r).is_some_and(|rc| rc.start == lc.end())
+            }) {
+                cuts.push((l, r));
+            }
+        }
+        cuts
+    }
+
+    /// Destaca a borda (ripple), o corte (roll) ou as duas bordas (slip) que a Trim vai pegar.
+    fn paint_trim_hover(
+        &self,
+        painter: &egui::Painter,
+        p: &Project,
+        layout: &Layout,
+        hit: TrimHit,
+    ) {
+        let yellow = Color32::from_rgb(250, 220, 80);
+        let green = Color32::from_rgb(110, 220, 120);
+        let bar = |clip: ClipId, frame: Frame, color: Color32| {
+            if let Some(rect) = row_of(p, clip).and_then(|r| layout.rect_of(r)) {
+                let x = self.x_of(frame as f32, layout.left);
+                painter.line_segment(
+                    [pos2(x, rect.top() + 1.0), pos2(x, rect.bottom() - 1.0)],
+                    Stroke::new(3.0, color),
+                );
+            }
+        };
+        match hit {
+            TrimHit::Ripple(c, edge) => {
+                if let Some(cl) = p.clip(c) {
+                    bar(
+                        c,
+                        if edge == Edge::Start {
+                            cl.start
+                        } else {
+                            cl.end()
+                        },
+                        yellow,
+                    );
+                }
+            }
+            TrimHit::Roll(a, _) => {
+                if let Some(cl) = p.clip(a) {
+                    bar(a, cl.end(), green);
+                }
+            }
+            TrimHit::Slip(c) => {
+                if let Some(cl) = p.clip(c) {
+                    bar(c, cl.start, yellow);
+                    bar(c, cl.end(), yellow);
+                }
+            }
         }
     }
 

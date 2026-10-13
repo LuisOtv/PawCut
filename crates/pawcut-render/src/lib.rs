@@ -57,6 +57,9 @@ impl Renderer {
             let layers = track.layers_at(frame);
             let dissolving = layers.len() == 2;
             for (i, (clip, weight)) in layers.into_iter().enumerate() {
+                if !clip.enabled {
+                    continue;
+                }
                 let weight = if dissolving && i == 0 { 1.0 } else { weight };
                 self.draw_clip(
                     &mut image,
@@ -103,6 +106,7 @@ impl Renderer {
             flip_h: t.flip_h,
             flip_v: t.flip_v,
             color,
+            angle: t.rotation.to_radians(),
         };
         let cropped = |r: Rect| Rect {
             x0: r.x0 + r.w * k.left,
@@ -113,7 +117,20 @@ impl Renderer {
         match &clip.source {
             ClipSource::SolidColor(c) => {
                 let r = cropped(dest_rect(base_size(Fit::Fill, pj, pj), &t, pj, out));
-                compose::fill_rect(image, r, *c, opacity, color.as_ref());
+                if t.rotation == 0.0 {
+                    compose::fill_rect(image, r, *c, opacity, color.as_ref());
+                } else {
+                    // Girada: uma imagem de 1 pixel esticada no retângulo.
+                    let px = RgbaImage::from_pixel(1, 1, image::Rgba([c.r, c.g, c.b, c.a]));
+                    let solid = DrawOpts {
+                        u0: 0.0,
+                        u1: 1.0,
+                        v0: 0.0,
+                        v1: 1.0,
+                        ..opts
+                    };
+                    compose::draw_image(image, &px, r, opacity, &solid);
+                }
             }
             ClipSource::Text(style) => {
                 // Escala quantizada: zoom animado não rasteriza o texto de novo a cada frame.

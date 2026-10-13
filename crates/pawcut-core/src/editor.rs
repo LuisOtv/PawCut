@@ -114,6 +114,21 @@ impl Editor {
         self.redo.last().map(|(_, l)| *l)
     }
 
+    /// Histórico: o que já foi feito (do mais antigo ao mais novo) e o que dá para refazer
+    /// (na ordem em que seria refeito).
+    pub fn history(&self) -> (Vec<&'static str>, Vec<&'static str>) {
+        (
+            self.undo.iter().map(|(_, l)| *l).collect(),
+            self.redo.iter().rev().map(|(_, l)| *l).collect(),
+        )
+    }
+
+    /// Vai para o ponto do histórico com `done` edições aplicadas (0 = antes de todas).
+    pub fn jump_to(&mut self, done: usize) {
+        while self.undo.len() > done && self.undo() {}
+        while self.undo.len() < done && self.redo() {}
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }

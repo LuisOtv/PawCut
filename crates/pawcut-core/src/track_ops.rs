@@ -109,6 +109,8 @@ mod tests {
             dissolve_in: 0,
             color: Default::default(),
             keyframes: Default::default(),
+            enabled: true,
+            freeze: None,
         }
     }
 

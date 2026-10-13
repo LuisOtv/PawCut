@@ -652,7 +652,7 @@ impl Workspace {
     ) {
         ui.painter().rect_filled(r, 0.0, theme::BAR);
         let playing = self.playback.is_playing() && self.st.active_monitor == monitor;
-        let center = Rect::from_center_size(r.center(), vec2(7.0 * 26.0, r.height()));
+        let center = Rect::from_center_size(r.center(), vec2(8.0 * 26.0, r.height()));
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(center)
@@ -695,6 +695,13 @@ impl Workspace {
                 if act(ui, Icon::ToEnd, false, "Fim (End)") {
                     self.st.active_monitor = monitor;
                     self.go_to_end();
+                }
+                let tip = self.tip(
+                    "Loop: repete o trecho In/Out (ou tudo)",
+                    crate::keymap::Action::ToggleLoop,
+                );
+                if act(ui, Icon::Loop, self.looping, &tip) {
+                    self.looping = !self.looping;
                 }
             },
         );
