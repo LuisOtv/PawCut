@@ -1,8 +1,8 @@
 //! Monta um projeto de demonstração: vídeo em V1 cortado, logo em V2, título em V3 e música em A2.
 //! Uso: cargo run -p pawcut-export --example demo_project -- video.mp4 logo.png musica.mp3 demo.pawcut
 
+use paw_media::probe;
 use pawcut_core::*;
-use pawcut_media::probe;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();

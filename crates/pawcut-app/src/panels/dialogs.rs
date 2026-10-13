@@ -1059,7 +1059,7 @@ impl Workspace {
             out.set_extension("png");
             let frame = self.st.playhead.min((project.duration() - 1).max(0));
             let s = &project.settings;
-            let mut renderer = pawcut_render::Renderer::new(pawcut_media::MediaLibrary::new(
+            let mut renderer = pawcut_render::Renderer::new(paw_media::MediaLibrary::new(
                 (s.width, s.height),
                 s.sample_rate,
                 None,

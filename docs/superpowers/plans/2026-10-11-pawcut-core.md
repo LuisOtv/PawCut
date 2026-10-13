@@ -12,7 +12,7 @@
 
 **Roteiro dos planos:**
 1. **Este plano:** `pawcut-core`.
-2. `pawcut-media` + `pawcut-render` + `pawcut-export`: um projeto vira MP4 por um binário de teste.
+2. `paw-media` + `pawcut-render` + `pawcut-export`: um projeto vira MP4 por um binário de teste.
 3. `pawcut-app` básico: egui_dock, Media Pool, Timeline, Timeline Viewer, reprodução.
 4. `pawcut-app` completo: Source Viewer, Inspector, geradores, keymap editável, Deliver, autosave, Relink.
 

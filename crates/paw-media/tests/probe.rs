@@ -1,6 +1,6 @@
+use paw_media::{MediaError, probe};
+use paw_testkit as kit;
 use pawcut_core::{FrameRate, MediaKind};
-use pawcut_media::{MediaError, probe};
-use pawcut_testkit as kit;
 
 const FPS: FrameRate = FrameRate::new(30, 1);
 

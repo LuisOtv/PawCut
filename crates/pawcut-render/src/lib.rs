@@ -9,8 +9,8 @@ mod text;
 
 use std::sync::Arc;
 
+use paw_media::{MediaLibrary, RgbaImage};
 use pawcut_core::{Clip, ClipId, ClipSource, Frame, MediaKind, Project, Rgba};
-use pawcut_media::{MediaLibrary, RgbaImage};
 
 use crate::compose::DrawOpts;
 use crate::layout::{Fit, Rect, base_size, dest_rect, fade_factor};

@@ -5,15 +5,15 @@ mod app;
 mod config;
 mod engine;
 mod file_dialog;
-mod icons;
 mod keymap;
 mod layout;
 mod panels;
 mod state;
-mod theme;
 #[cfg(test)]
 mod ui_tests;
 mod workspace;
+
+use paw_ui::{icons, theme};
 
 use std::path::PathBuf;
 

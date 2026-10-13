@@ -1,10 +1,10 @@
 use std::sync::atomic::AtomicBool;
 
+use paw_media::{MediaLibrary, probe};
+use paw_testkit as kit;
 use pawcut_core::*;
 use pawcut_export::{ExportError, ExportSettings, export};
-use pawcut_media::{MediaLibrary, probe};
 use pawcut_render::Renderer;
-use pawcut_testkit as kit;
 
 const W: u32 = 320;
 const H: u32 = 180;

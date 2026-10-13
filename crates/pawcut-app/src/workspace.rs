@@ -138,7 +138,7 @@ pub struct Workspace {
     /// Pedido de mostrar/rolar até `pool_highlight` no Media Pool.
     pub reveal_in_pool: bool,
     /// Avisos na tela: texto, erro?, quando apareceu.
-    pub toasts: Vec<(String, bool, Instant)>,
+    pub toasts: paw_ui::toasts::Toasts,
     /// Último salvamento (manual ou autosave), para a barra de baixo.
     pub last_saved: Option<Instant>,
     /// Media Pool: tamanho dos blocos, modo lista e busca.
@@ -227,7 +227,7 @@ impl Workspace {
             skim_next: None,
             selected_gap: None,
             reveal_in_pool: false,
-            toasts: Vec::new(),
+            toasts: Default::default(),
             last_saved: None,
             pool_tile: 132.0,
             pool_list: false,
@@ -268,19 +268,9 @@ impl Workspace {
         self.hover_preview = self.hover_preview_next.take();
         self.skim_frame = self.skim_next.take();
         for (text, error) in self.st.notices.drain(..) {
-            self.toasts.retain(|t| t.0 != text);
-            self.toasts.push((text, error, Instant::now()));
+            self.toasts.push(text, error);
         }
-        let now = Instant::now();
-        self.toasts.retain(|(_, error, born)| {
-            now.duration_since(*born) < Duration::from_secs(if *error { 8 } else { 4 })
-        });
-        if self.toasts.len() > 4 {
-            self.toasts.drain(..self.toasts.len() - 4);
-        }
-        if !self.toasts.is_empty() {
-            ctx.request_repaint_after(Duration::from_millis(100));
-        }
+        self.toasts.tick(ctx);
         while let Ok(r) = self.preview.results.try_recv() {
             let size = [r.image.width() as usize, r.image.height() as usize];
             let img = egui::ColorImage::from_rgba_unmultiplied(size, r.image.as_raw());
@@ -586,10 +576,10 @@ impl Workspace {
         let s = &p.settings;
         let w = 480u32;
         let h = ((w as f32 * s.height as f32 / s.width.max(1) as f32).round() as u32).max(2);
-        let mut renderer = pawcut_render::Renderer::new(pawcut_media::MediaLibrary::new(
+        let mut renderer = pawcut_render::Renderer::new(paw_media::MediaLibrary::new(
             (w, h),
             s.sample_rate,
-            pawcut_media::default_cache_dir(),
+            paw_media::default_cache_dir(),
         ));
         let img = renderer.render_frame(&p, self.st.playhead, w, h).image;
         // Média 5×5 em volta do ponto (menos sensível a ruído).
@@ -825,7 +815,7 @@ impl Workspace {
         self.thumbs
             .entry(id)
             .or_insert_with(|| {
-                let img = pawcut_media::thumbnail(path, (160, 90)).ok()?;
+                let img = paw_media::thumbnail(path, (160, 90)).ok()?;
                 let size = [img.width() as usize, img.height() as usize];
                 let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
                 Some(
@@ -981,7 +971,7 @@ impl Workspace {
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (p, d, ctx) = (path.clone(), done.clone(), self.ctx.clone());
         std::thread::spawn(move || {
-            let _ = pawcut_media::make_proxy(&p);
+            let _ = paw_media::make_proxy(&p);
             d.store(true, std::sync::atomic::Ordering::SeqCst);
             ctx.request_repaint();
         });
@@ -999,7 +989,7 @@ impl Workspace {
         self.proxy_jobs
             .retain(|(_, _, d)| !d.load(std::sync::atomic::Ordering::SeqCst));
         for path in finished {
-            let ok = pawcut_media::has_proxy(&path);
+            let ok = paw_media::has_proxy(&path);
             self.forget_path(&path);
             self.st.say(if ok {
                 "Mídia otimizada pronta: o preview vai rodar mais leve"

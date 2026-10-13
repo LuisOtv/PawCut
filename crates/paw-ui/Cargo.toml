@@ -1,0 +1,11 @@
+[package]
+name = "paw-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+egui = "0.36"
+egui_dock = "0.21"
+
+[dev-dependencies]
+tempfile.workspace = true

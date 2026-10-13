@@ -1,8 +1,8 @@
 mod common;
 
 use common::*;
+use paw_testkit as kit;
 use pawcut_core::*;
-use pawcut_testkit as kit;
 
 fn audio_clip(
     ed: &mut Editor,

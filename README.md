@@ -97,7 +97,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Os crates são:
 - `pawcut-core`: modelo, edições, desfazer/refazer e arquivo `.pawcut`.
-- `pawcut-media`: lê arquivos com ffmpeg.
+- `paw-media`: lê arquivos com ffmpeg.
 - `pawcut-render`: compositor e mixer.
 - `pawcut-export`: MP4.
 - `pawcut-app`: a interface.

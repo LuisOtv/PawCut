@@ -274,7 +274,7 @@ impl Workspace {
         if generating
             || (m.info.kind != MediaKind::Image
                 && m.info.kind != MediaKind::Audio
-                && pawcut_media::has_proxy(&m.info.path))
+                && paw_media::has_proxy(&m.info.path))
         {
             let label = if generating { "gerando…" } else { "PROXY" };
             let galley =

@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
+use paw_media::{MediaLibrary, RgbaImage, probe};
 use pawcut_core::*;
-use pawcut_media::{MediaLibrary, RgbaImage, probe};
 use pawcut_render::Renderer;
 
 pub const W: u32 = 320;

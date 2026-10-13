@@ -503,8 +503,8 @@ mod whole_app {
 
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
+    use paw_testkit as kit;
     use pawcut_core::*;
-    use pawcut_testkit as kit;
 
     use crate::app::PawCutApp;
     use crate::state::{AppState, Generator};

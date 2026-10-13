@@ -1,5 +1,5 @@
 [package]
-name = "pawcut-testkit"
+name = "paw-testkit"
 version.workspace = true
 edition.workspace = true
 publish = false
