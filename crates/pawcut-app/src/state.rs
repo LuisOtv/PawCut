@@ -1,6 +1,6 @@
 //! Estado do editor e as operações que a interface dispara. Sem nada de egui: tudo testável.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use pawcut_core::*;
@@ -524,6 +524,7 @@ impl AppState {
                     size: 52.0,
                     bold: true,
                     outline: 4.0,
+                    caption: true,
                     ..TextStyle::default()
                 }),
                 Some(Transform {
@@ -671,6 +672,12 @@ impl AppState {
 
     /// Ctrl+T: cross dissolve de 1 segundo no corte mais perto do cursor (vídeo e áudio).
     pub fn add_dissolve(&mut self) {
+        self.add_transition(None);
+    }
+
+    /// Dissolve no corte mais perto do cursor; com cor, vira dip to color (no vídeo; o áudio
+    /// sempre faz crossfade).
+    pub fn add_transition(&mut self, color: Option<Rgba>) {
         let Some(cut) = self.nearest_cut() else {
             self.say("Nenhum corte perto do cursor");
             return;
@@ -687,13 +694,212 @@ impl AppState {
                     .map(|w| w[1].id)
             })
             .collect();
+        let p = self.project().clone();
         for id in targets {
             self.apply_coalescing(
                 Edit::SetDissolve { clip: id, frames },
                 &format!("dissolve-{cut}"),
             );
+            let video = p
+                .locate(id)
+                .and_then(|(t, _)| p.track(t))
+                .is_some_and(|t| t.kind == TrackKind::Video);
+            if video {
+                self.apply_coalescing(
+                    Edit::SetClip {
+                        clip: id,
+                        change: ClipChange::DissolveColor(color),
+                    },
+                    &format!("dissolve-{cut}"),
+                );
+            }
         }
         self.editor.end_coalescing();
+    }
+
+    /// Ajusta o volume dos clipes de áudio selecionados para `target` LUFS (sem passar de
+    /// −1 dBFS de pico).
+    pub fn normalize_loudness(&mut self, target: f32) {
+        let p = self.project().clone();
+        let mut done = Vec::new();
+        for id in self.expanded(&self.selection.clone()) {
+            let audio = p
+                .locate(id)
+                .and_then(|(t, _)| p.track(t))
+                .is_some_and(|t| t.kind == TrackKind::Audio);
+            let Some(clip) = p.clip(id).filter(|_| audio) else {
+                continue;
+            };
+            if let Some((lufs, peak)) = crate::analysis::clip_loudness(&p, clip) {
+                let gain = crate::analysis::loudness_gain(lufs, peak, target);
+                let db = (clip.volume_db + gain).clamp(-96.0, 24.0);
+                self.apply_coalescing(
+                    Edit::SetClip {
+                        clip: id,
+                        change: ClipChange::VolumeDb(db),
+                    },
+                    "loudness",
+                );
+                done.push(lufs);
+            }
+        }
+        self.editor.end_coalescing();
+        match done.as_slice() {
+            [] => self.warn("Selecione clipes de áudio (com som)"),
+            [l] => self.say(format!(
+                "Estava em {l:.1} LUFS → ajustado para {target:.0} LUFS"
+            )),
+            v => self.say(format!(
+                "{} clipe(s) ajustado(s) para {target:.0} LUFS",
+                v.len()
+            )),
+        }
+    }
+
+    /// Cria uma faixa de vídeo nova em cima com uma legenda (estilo "Legenda") por fala.
+    pub fn import_subtitles(&mut self, cues: &[Cue]) -> usize {
+        if cues.is_empty() {
+            return 0;
+        }
+        let h = self.project().settings.height as f32;
+        self.apply(Edit::AddTrack(TrackKind::Video));
+        let Some(track) = self.project().video_tracks.last().map(|t| t.id) else {
+            return 0;
+        };
+        let template = Clip {
+            id: ClipId(0),
+            source: ClipSource::Text(TextStyle::default()),
+            start: 0,
+            duration: 1,
+            source_start: 0.0,
+            speed: 1.0,
+            volume_db: 0.0,
+            fade_in: 0,
+            fade_out: 0,
+            transform: Transform {
+                y: -h * 0.38,
+                ..Transform::default()
+            },
+            link: None,
+            dissolve_in: 0,
+            color: ColorAdjust::default(),
+            keyframes: Default::default(),
+            enabled: true,
+            freeze: None,
+            fade_curve: Ease::Linear,
+            dissolve_color: None,
+            blur_fill: false,
+            chroma: None,
+        };
+        let clips: Vec<(TrackId, Clip)> = cues
+            .iter()
+            .map(|c| {
+                let mut clip = template.clone();
+                clip.source = ClipSource::Text(TextStyle {
+                    caption: true,
+                    text: c.text.clone(),
+                    size: 52.0,
+                    bold: true,
+                    outline: 4.0,
+                    ..TextStyle::default()
+                });
+                clip.start = c.start.max(0);
+                clip.duration = (c.end - c.start).max(1);
+                (track, clip)
+            })
+            .collect();
+        let n = clips.len();
+        self.apply(Edit::Paste { at: 0, clips });
+        n
+    }
+
+    /// Textos ligados da timeline, em ordem: só as legendas (`captions_only`) ou todos
+    /// (títulos e lower thirds também).
+    pub fn subtitle_cues(&self, captions_only: bool) -> Vec<Cue> {
+        let mut cues: Vec<Cue> = self
+            .project()
+            .video_tracks
+            .iter()
+            .filter(|t| t.enabled)
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.enabled)
+            .filter_map(|c| match &c.source {
+                ClipSource::Text(s)
+                    if !s.text.trim().is_empty() && (s.caption || !captions_only) =>
+                {
+                    Some(Cue {
+                        start: c.start,
+                        end: c.end(),
+                        text: s.text.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        cues.sort_by_key(|c| c.start);
+        cues
+    }
+
+    /// Reconecta as mídias offline procurando arquivos com o mesmo nome dentro de `dir`
+    /// (e subpastas). Devolve quantas achou.
+    pub fn relink_folder(&mut self, dir: &Path) -> usize {
+        let wanted: HashMap<std::ffi::OsString, MediaId> = self
+            .project()
+            .media
+            .iter()
+            .filter(|m| self.offline.contains(&m.id))
+            .filter_map(|m| Some((m.info.path.file_name()?.to_os_string(), m.id)))
+            .collect();
+        if wanted.is_empty() {
+            self.say("Nenhuma mídia offline");
+            return 0;
+        }
+        let mut found: Vec<(MediaId, PathBuf)> = Vec::new();
+        let mut stack = vec![(dir.to_path_buf(), 0)];
+        let mut seen = 0;
+        while let Some((d, depth)) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in rd.flatten() {
+                seen += 1;
+                if seen > 50_000 {
+                    break;
+                }
+                let path = e.path();
+                if path.is_dir() {
+                    if depth < 8 {
+                        stack.push((path, depth + 1));
+                    }
+                } else if let Some(id) = path.file_name().and_then(|n| wanted.get(n))
+                    && !found.iter().any(|(m, _)| m == id)
+                {
+                    found.push((*id, path));
+                }
+            }
+        }
+        let fps = self.project().settings.fps;
+        let mut n = 0;
+        for (media, path) in &found {
+            if let Ok(info) = pawcut_media::probe(path, fps)
+                && self
+                    .apply(Edit::RelinkMedia {
+                        media: *media,
+                        info,
+                    })
+                    .is_some()
+            {
+                n += 1;
+            }
+        }
+        self.refresh_offline();
+        let left = self.offline.len();
+        if left == 0 {
+            self.say(format!("{n} mídia(s) reconectada(s)"));
+        } else {
+            self.warn(format!("{n} reconectada(s); ainda faltam {left}"));
+        }
+        n
     }
 
     /// Ajusta o volume dos clipes de áudio selecionados para o pico ficar em −1 dBFS.
@@ -1424,5 +1630,95 @@ mod tests {
         assert_eq!(s.editor.history().1.len(), n - 1);
         s.jump_history(n);
         assert_eq!(spans(&s, TrackKind::Video, 1), vec![(200, 320)]);
+    }
+
+    #[test]
+    fn subtitles_round_trip_through_text_clips() {
+        let mut s = state();
+        let fps = s.project().settings.fps;
+        let cues = pawcut_core::parse_subtitles(
+            "1\n00:00:01,000 --> 00:00:02,000\nOi\n\n2\n00:00:03,000 --> 00:00:04,000\nTchau\n",
+            fps,
+        )
+        .unwrap();
+        assert_eq!(s.import_subtitles(&cues), 2);
+        let top = s.project().video_tracks.last().unwrap();
+        assert_eq!(top.clips.len(), 2);
+        assert_eq!(s.subtitle_cues(true), cues);
+        // Um título comum não vai para o SRT de legendas, só no "todos os textos".
+        s.drop_generator(Generator::Text, 0, 0);
+        assert_eq!(s.subtitle_cues(true).len(), 2);
+        assert_eq!(s.subtitle_cues(false).len(), 3);
+        s.undo();
+        // Um passo de desfazer tira tudo.
+        s.undo();
+        s.undo();
+        assert!(s.subtitle_cues(false).is_empty());
+    }
+
+    #[test]
+    fn dip_transition_colors_only_the_video_cut() {
+        let mut s = state();
+        let media = add_video(&mut s, 60, true);
+        s.drop_media(media, TrackKind::Video, 0, 0);
+        s.drop_media(media, TrackKind::Video, 0, 60);
+        s.set_playhead(60);
+        let black = Rgba::new(0, 0, 0, 255);
+        s.add_transition(Some(black));
+        let v = &s.project().video_tracks[0].clips[1];
+        let a = &s.project().audio_tracks[0].clips[1];
+        assert!(
+            v.dissolve_in > 0 && a.dissolve_in > 0,
+            "vídeo e áudio com transição"
+        );
+        assert_eq!(v.dissolve_color, Some(black));
+        assert_eq!(a.dissolve_color, None, "áudio faz crossfade normal");
+    }
+
+    #[test]
+    fn loudness_normalization_and_folder_relink_use_real_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("fala.wav");
+        let ok = std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:duration=2",
+                "-af",
+                "volume=-26dB",
+                "-ac",
+                "2",
+            ])
+            .arg(&wav)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let mut s = state();
+        let fps = s.project().settings.fps;
+        let info = pawcut_media::probe(&wav, fps).unwrap();
+        let m = s.apply(Edit::AddMedia(info)).unwrap().media.unwrap();
+        s.drop_media(m, TrackKind::Audio, 0, 0);
+        let c = s.project().audio_tracks[0].clips[0].id;
+        s.select(c, false);
+        s.normalize_loudness(-14.0);
+        let db = s.project().clip(c).unwrap().volume_db;
+        let (lufs, _) =
+            crate::analysis::clip_loudness(s.project(), s.project().clip(c).unwrap()).unwrap();
+        assert!(db > 5.0, "subiu o volume: {db}");
+        let _ = lufs;
+        // Relink em lote: o arquivo "sumiu" e reapareceu numa subpasta.
+        let moved = dir.path().join("sub").join("fala.wav");
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::rename(&wav, &moved).unwrap();
+        s.refresh_offline();
+        assert!(s.offline.contains(&m));
+        assert_eq!(s.relink_folder(dir.path()), 1);
+        assert!(s.offline.is_empty());
+        assert_eq!(s.project().media(m).unwrap().info.path, moved);
     }
 }

@@ -44,6 +44,6 @@ impl Panel {
 pub enum DragPayload {
     Media(pawcut_core::MediaId),
     Generator(crate::state::Generator),
-    /// Cross dissolve: soltar perto de um corte.
-    Dissolve,
+    /// Transição: soltar perto de um corte. Com cor = dip to color.
+    Dissolve(Option<pawcut_core::Rgba>),
 }

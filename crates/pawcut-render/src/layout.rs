@@ -65,7 +65,7 @@ pub(crate) fn fade_factor(clip: &Clip, frame: Frame) -> f32 {
     if clip.fade_out > 0 {
         a = a.min((clip.end() - 1 - frame) as f32 / clip.fade_out as f32);
     }
-    a.clamp(0.0, 1.0)
+    clip.fade_curve.apply(a.clamp(0.0, 1.0))
 }
 
 #[cfg(test)]

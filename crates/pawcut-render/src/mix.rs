@@ -39,6 +39,13 @@ pub(crate) fn mix(
         if (any_solo && !track.solo) || (!any_solo && track.muted) {
             continue;
         }
+        // Volume e pan da faixa (pan por balanço: o lado oposto abaixa, o centro fica igual).
+        let track_gain = 10f32.powf(track.volume_db / 20.0);
+        let pan = track.pan.clamp(-1.0, 1.0);
+        let (gl, gr) = (
+            track_gain * (1.0 - pan).min(1.0),
+            track_gain * (1.0 + pan).min(1.0),
+        );
         for (i, clip) in track.clips.iter().enumerate() {
             let (f0, f1, into, out_of) = audible(&track.clips, i);
             let (a, b) = (to_sample(f0).max(start), to_sample(f1).min(end));
@@ -80,10 +87,14 @@ pub(crate) fn mix(
                     fixed_gain
                 };
                 if fade_in > 0 {
-                    g *= ((n - s0) as f32 / fade_in as f32).clamp(0.0, 1.0);
+                    g *= clip
+                        .fade_curve
+                        .apply(((n - s0) as f32 / fade_in as f32).clamp(0.0, 1.0));
                 }
                 if fade_out > 0 {
-                    g *= ((s1 - 1 - n) as f32 / fade_out as f32).clamp(0.0, 1.0);
+                    g *= clip
+                        .fade_curve
+                        .apply(((s1 - 1 - n) as f32 / fade_out as f32).clamp(0.0, 1.0));
                 }
                 // Crossfade de potência constante nos dissolves.
                 if let Some((x, y)) = into
@@ -100,8 +111,8 @@ pub(crate) fn mix(
                 }
                 let [l, r] = pcm.frame(src0 + (n - s0));
                 let o = ((n - start) * 2) as usize;
-                out[o] += l * g;
-                out[o + 1] += r * g;
+                out[o] += l * g * gl;
+                out[o + 1] += r * g * gr;
             }
         }
     }

@@ -147,6 +147,8 @@ pub struct DeliverOptions {
     pub speed: EncoderSpeed,
     pub audio: bool,
     pub audio_kbps: u32,
+    /// Sobras de outra proporção com fundo desfocado (senão, barras pretas).
+    pub blur_bars: bool,
 }
 
 impl Default for DeliverOptions {
@@ -163,6 +165,7 @@ impl Default for DeliverOptions {
             speed: EncoderSpeed::Medium,
             audio: true,
             audio_kbps: 192,
+            blur_bars: false,
         }
     }
 }
@@ -199,6 +202,7 @@ impl DeliverOptions {
                 .then_some((self.bitrate_mbps * 1000.0).round() as u32),
             speed: self.speed,
             audio_kbps: self.audio.then_some(self.audio_kbps),
+            blur_bars: self.blur_bars,
         }
     }
 }
@@ -802,6 +806,26 @@ impl Workspace {
                                 }
                             });
                             ui.end_row();
+                            let (ow, oh) = d.opts.size(s.width, s.height);
+                            let other_aspect = (ow as f32 / oh as f32
+                                - s.width as f32 / s.height as f32)
+                                .abs()
+                                > 0.01;
+                            if other_aspect {
+                                label(ui, "Sobras");
+                                ui.horizontal(|ui| {
+                                    ui.radio_value(&mut d.opts.blur_bars, false, "Barras pretas");
+                                    ui.radio_value(
+                                        &mut d.opts.blur_bars,
+                                        true,
+                                        "Fundo desfocado",
+                                    )
+                                    .on_hover_text(
+                                        "Preenche as sobras com o próprio vídeo desfocado (bom para Reels/TikTok)",
+                                    );
+                                });
+                                ui.end_row();
+                            }
                             label(ui, "Frame rate");
                             ui.horizontal(|ui| {
                                 egui::ComboBox::from_id_salt("deliver-fps")

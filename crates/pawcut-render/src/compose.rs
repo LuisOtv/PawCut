@@ -1,7 +1,7 @@
 //! Operações de pixel no quadro de saída (sempre opaco).
 
 use image::RgbaImage;
-use pawcut_core::{ColorAdjust, Rgba};
+use pawcut_core::{ChromaKey, ColorAdjust, Rgba};
 use rayon::prelude::*;
 
 use crate::layout::Rect;
@@ -148,6 +148,91 @@ pub(crate) struct DrawOpts {
     pub color: Option<ColorAdjust>,
     /// Rotação em radianos em volta do centro do retângulo (positivo = anti-horário).
     pub angle: f32,
+    pub key: Option<ChromaKey>,
+}
+
+/// Chroma key de um pixel (0..255): devolve a cor sem o reflexo e o multiplicador de alfa.
+fn chroma(rgb: [f32; 3], k: &ChromaKey) -> ([f32; 3], f32) {
+    let cbcr = |c: [f32; 3]| {
+        (
+            (-0.169 * c[0] - 0.331 * c[1] + 0.5 * c[2]) / 255.0,
+            (0.5 * c[0] - 0.419 * c[1] - 0.081 * c[2]) / 255.0,
+        )
+    };
+    let key = [k.color.r as f32, k.color.g as f32, k.color.b as f32];
+    let (a, b) = (cbcr(rgb), cbcr(key));
+    let dist = ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt() / 0.7;
+    let lo = k.tolerance;
+    let hi = lo + k.softness.max(1e-3);
+    let t = ((dist - lo) / (hi - lo)).clamp(0.0, 1.0);
+    let alpha = t * t * (3.0 - 2.0 * t);
+    // Spill: o canal dominante da cor-chave não passa dos outros dois.
+    let main = (0..3)
+        .max_by(|i, j| key[*i].total_cmp(&key[*j]))
+        .unwrap_or(1);
+    let mut out = rgb;
+    let others = (0..3)
+        .filter(|i| *i != main)
+        .map(|i| rgb[i])
+        .fold(0.0f32, f32::max);
+    if out[main] > others {
+        out[main] -= (out[main] - others) * k.spill;
+    }
+    (out, alpha)
+}
+
+/// Cópia pequena e desfocada da imagem (para preencher as sobras do quadro).
+pub fn blurred(img: &RgbaImage) -> RgbaImage {
+    let (w, h) = img.dimensions();
+    let tw = 48u32;
+    let th = ((h as f32 / w.max(1) as f32) * tw as f32).round().max(1.0) as u32;
+    let small = image::imageops::thumbnail(img, tw, th);
+    let mut b = image::imageops::blur(&small, 2.5);
+    for p in b.pixels_mut() {
+        for c in 0..3 {
+            p.0[c] = (p.0[c] as f32 * 0.75) as u8;
+        }
+        p.0[3] = 255;
+    }
+    b
+}
+
+/// Retângulo que cobre `out` inteiro com a proporção `aspect`, centralizado.
+pub(crate) fn cover_rect(aspect: f32, out: (f32, f32)) -> Rect {
+    let (w, h) = if aspect > out.0 / out.1 {
+        (out.1 * aspect, out.1)
+    } else {
+        (out.0, out.0 / aspect)
+    };
+    Rect {
+        x0: (out.0 - w) / 2.0,
+        y0: (out.1 - h) / 2.0,
+        w,
+        h,
+    }
+}
+
+/// Coloca `pic` no centro de um quadro `w`×`h` com o fundo desfocado (sem barras pretas).
+pub fn letterbox_blur(pic: &RgbaImage, w: u32, h: u32) -> RgbaImage {
+    let mut canvas = RgbaImage::from_pixel(w, h, image::Rgba([0, 0, 0, 255]));
+    let (pw, ph) = (pic.width().max(1) as f32, pic.height().max(1) as f32);
+    let out = (w as f32, h as f32);
+    draw_image(
+        &mut canvas,
+        &blurred(pic),
+        cover_rect(pw / ph, out),
+        1.0,
+        &DrawOpts::default(),
+    );
+    let k = (out.0 / pw).min(out.1 / ph);
+    let r = Rect {
+        x0: (out.0 - pw * k) / 2.0,
+        y0: (out.1 - ph * k) / 2.0,
+        w: pw * k,
+        h: ph * k,
+    };
+    draw_image(&mut canvas, pic, r, 1.0, &DrawOpts::default());
+    canvas
 }
 
 impl Default for DrawOpts {
@@ -161,6 +246,7 @@ impl Default for DrawOpts {
             flip_v: false,
             color: None,
             angle: 0.0,
+            key: None,
         }
     }
 }
@@ -222,10 +308,19 @@ pub(crate) fn draw_image(
                 let u = (opts.u0 + (opts.u1 - opts.u0) * fx) * sw - 0.5;
                 let p = sample(src, u, v);
                 let mut rgb = [p[0], p[1], p[2]];
+                let mut alpha = p[3] / 255.0;
+                if let Some(k) = &opts.key {
+                    let (keyed, a) = chroma(rgb, k);
+                    rgb = keyed;
+                    alpha *= a;
+                    if alpha <= 0.0 {
+                        continue;
+                    }
+                }
                 if let Some(c) = &opts.color {
                     rgb = adjust_color(rgb, c);
                 }
-                blend(&mut row[x * 4..x * 4 + 4], rgb, p[3] / 255.0 * opacity);
+                blend(&mut row[x * 4..x * 4 + 4], rgb, alpha * opacity);
             }
         });
 }

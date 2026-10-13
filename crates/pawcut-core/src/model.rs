@@ -104,6 +104,9 @@ pub struct TextStyle {
     pub background: bool,
     #[serde(default = "translucent_black")]
     pub background_color: Rgba,
+    /// É uma legenda (vai para o SRT ao exportar legendas), não um título.
+    #[serde(default)]
+    pub caption: bool,
 }
 
 impl Default for TextStyle {
@@ -120,6 +123,7 @@ impl Default for TextStyle {
             shadow: false,
             background: false,
             background_color: translucent_black(),
+            caption: false,
         }
     }
 }
@@ -296,6 +300,42 @@ pub struct Clip {
     /// Congelado num tempo da fonte (freeze frame): todos os frames mostram esse.
     #[serde(default)]
     pub freeze: Option<f64>,
+    /// Curva dos fades de entrada e saída (imagem e som).
+    #[serde(default = "linear")]
+    pub fade_curve: Ease,
+    /// Dissolve passando por uma cor (dip to black/white) em vez de misturar os clipes.
+    #[serde(default)]
+    pub dissolve_color: Option<Rgba>,
+    /// Preenche as sobras do quadro com uma cópia desfocada da própria imagem.
+    #[serde(default)]
+    pub blur_fill: bool,
+    #[serde(default)]
+    pub chroma: Option<ChromaKey>,
+}
+
+fn linear() -> Ease {
+    Ease::Linear
+}
+
+/// Chroma key: some com a cor (verde/azul) dentro da tolerância.
+/// `tolerance` e `softness` vão de 0 a 1 (distância de cor); `spill` tira o reflexo da cor.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ChromaKey {
+    pub color: Rgba,
+    pub tolerance: f32,
+    pub softness: f32,
+    pub spill: f32,
+}
+
+impl Default for ChromaKey {
+    fn default() -> Self {
+        Self {
+            color: Rgba::new(0, 177, 64, 255),
+            tolerance: 0.25,
+            softness: 0.1,
+            spill: 0.5,
+        }
+    }
 }
 
 fn yes() -> bool {
@@ -404,6 +444,11 @@ pub struct Track {
     pub solo: bool,
     /// Ordenados por `start`, sem sobreposição.
     pub clips: Vec<Clip>,
+    /// Só áudio: volume da faixa inteira (dB) e pan (−1 esquerda … 1 direita).
+    #[serde(default)]
+    pub volume_db: f32,
+    #[serde(default)]
+    pub pan: f32,
 }
 
 impl Track {
@@ -416,6 +461,8 @@ impl Track {
             muted: false,
             solo: false,
             clips: Vec::new(),
+            volume_db: 0.0,
+            pan: 0.0,
         }
     }
 
@@ -645,6 +692,10 @@ mod tests {
             keyframes: Default::default(),
             enabled: true,
             freeze: None,
+            fade_curve: Ease::Linear,
+            dissolve_color: None,
+            blur_fill: false,
+            chroma: None,
         }
     }
 

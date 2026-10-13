@@ -125,6 +125,49 @@ impl PawCutApp {
                 self.item(ui, "Abrir…", Action::Open);
                 self.item(ui, "Salvar", Action::Save);
                 self.item(ui, "Salvar como…", Action::SaveAs);
+                ui.separator();
+                if ui.button("Importar legendas (SRT/VTT)…").clicked() {
+                    ui.close();
+                    self.ws.import_subtitles_dialog();
+                }
+                ui.menu_button("Exportar legendas (SRT)", |ui| {
+                    let captions = self.ws.st.subtitle_cues(true).len();
+                    let all = self.ws.st.subtitle_cues(false).len();
+                    if ui
+                        .add_enabled(
+                            captions > 0,
+                            egui::Button::new(format!("Só as legendas ({captions})…")),
+                        )
+                        .on_disabled_hover_text("Nenhum texto marcado como legenda")
+                        .clicked()
+                    {
+                        ui.close();
+                        self.ws.export_subtitles_dialog(true);
+                    }
+                    if ui
+                        .add_enabled(
+                            all > 0,
+                            egui::Button::new(format!("Todos os textos ({all})…")),
+                        )
+                        .on_hover_text("Inclui títulos e lower thirds")
+                        .clicked()
+                    {
+                        ui.close();
+                        self.ws.export_subtitles_dialog(false);
+                    }
+                });
+                if ui
+                    .add_enabled(
+                        !self.ws.st.offline.is_empty(),
+                        egui::Button::new("Reconectar mídia offline (pasta)…"),
+                    )
+                    .on_disabled_hover_text("Nenhuma mídia offline")
+                    .clicked()
+                {
+                    ui.close();
+                    self.ws.relink_folder_dialog();
+                }
+                ui.separator();
                 if ui
                     .add_enabled(
                         self.ws.st.path.is_some(),
@@ -572,7 +615,13 @@ impl eframe::App for PawCutApp {
                     })
                     .unwrap_or_default(),
                 DragPayload::Generator(g) => format!("{g:?}"),
-                DragPayload::Dissolve => "Cross Dissolve".to_string(),
+                DragPayload::Dissolve(None) => "Cross Dissolve".to_string(),
+                DragPayload::Dissolve(Some(c)) => if c.r > 128 {
+                    "Dip to White"
+                } else {
+                    "Dip to Black"
+                }
+                .to_string(),
             };
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Tooltip,

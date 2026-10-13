@@ -390,3 +390,93 @@ fn text_outline_draws_around_the_letters() {
         });
     assert!(reds.count() > 30, "sem contorno vermelho");
 }
+
+#[test]
+fn dip_to_color_passes_through_the_color() {
+    let mut ed = editor();
+    solid(&mut ed, 0, RED, 0, 30);
+    let b = solid(&mut ed, 0, BLUE, 30, 30);
+    ed.apply(Edit::SetDissolve {
+        clip: b,
+        frames: 10,
+    })
+    .unwrap();
+    set(&mut ed, b, ClipChange::DissolveColor(Some(WHITE)));
+    let mut r = renderer();
+    let at = |r: &mut pawcut_render::Renderer, f| {
+        px(&r.render_frame(ed.project(), f, W, H).image, 160, 90)
+    };
+    let start = at(&mut r, 25);
+    assert!(
+        start[0] > 200 && start[1] < 40,
+        "começo ainda vermelho: {start:?}"
+    );
+    let mid = at(&mut r, 29);
+    assert!(
+        mid[0] > 200 && mid[1] > 200 && mid[2] > 200,
+        "meio quase branco: {mid:?}"
+    );
+    let end = at(&mut r, 34);
+    assert!(end[2] > 200 && end[0] < 60, "fim azul: {end:?}");
+}
+
+#[test]
+fn blur_fill_covers_the_empty_sides() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ed = editor();
+    let m = media(&mut ed, &kit::png(dir.path(), "alta.png", "red", 90, 180));
+    let c = put(
+        &mut ed,
+        TrackKind::Video,
+        0,
+        ClipSource::Media(m),
+        0,
+        0.0,
+        30,
+    );
+    let mut r = renderer();
+    assert!(near(
+        px(&r.render_frame(ed.project(), 0, W, H).image, 5, 90),
+        [0, 0, 0],
+        0
+    ));
+    set(&mut ed, c, ClipChange::BlurFill(true));
+    let side = px(&r.render_frame(ed.project(), 0, W, H).image, 5, 90);
+    assert!(
+        side[0] > 120 && side[1] < 40,
+        "lado com vermelho desfocado: {side:?}"
+    );
+    assert!(near(
+        px(&r.render_frame(ed.project(), 0, W, H).image, 160, 90),
+        [255, 0, 0],
+        2
+    ));
+}
+
+#[test]
+fn chroma_key_removes_the_green() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ed = editor();
+    solid(&mut ed, 0, RED, 0, 30);
+    let m = media(
+        &mut ed,
+        &kit::png(dir.path(), "verde.png", "0x00B140", W, H),
+    );
+    let g = put(
+        &mut ed,
+        TrackKind::Video,
+        1,
+        ClipSource::Media(m),
+        0,
+        0.0,
+        30,
+    );
+    let mut r = renderer();
+    assert!(px(&r.render_frame(ed.project(), 0, W, H).image, 160, 90)[1] > 150);
+    set(&mut ed, g, ClipChange::Chroma(Some(ChromaKey::default())));
+    assert!(near(
+        px(&r.render_frame(ed.project(), 0, W, H).image, 160, 90),
+        [255, 0, 0],
+        2
+    ));
+}

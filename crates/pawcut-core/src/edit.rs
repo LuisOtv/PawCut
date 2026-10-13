@@ -4,8 +4,8 @@ use thiserror::Error;
 
 use crate::ids::{ClipId, LinkId, MediaId, TrackId};
 use crate::model::{
-    Clip, ClipSource, ColorAdjust, Ease, Keyframe, Marker, MediaInfo, MediaKind, MediaRef, Param,
-    Project, Track, TrackKind, Transform,
+    ChromaKey, Clip, ClipSource, ColorAdjust, Ease, Keyframe, Marker, MediaInfo, MediaKind,
+    MediaRef, Param, Project, Rgba, Track, TrackKind, Transform,
 };
 use crate::time::Frame;
 use crate::track_ops::{clear_range, insert_sorted, relink, ripple_open, split_clip};
@@ -59,6 +59,11 @@ pub enum ClipChange {
     Enabled(bool),
     /// Congela no tempo da fonte (`Some`) ou volta a tocar (`None`).
     Freeze(Option<f64>),
+    FadeCurve(Ease),
+    /// Cor do dip (dip to black/white) do dissolve de entrada; `None` = dissolve normal.
+    DissolveColor(Option<Rgba>),
+    BlurFill(bool),
+    Chroma(Option<ChromaKey>),
 }
 /// Uma alteração no projeto. Aplicada pelo `Editor`, que guarda o histórico.
 #[derive(Debug, Clone, PartialEq)]
@@ -190,6 +195,12 @@ pub enum Edit {
     ClearKeyframes {
         clip: ClipId,
         param: Param,
+    },
+    /// Volume (dB) e pan (−1..1) de uma faixa de áudio.
+    SetTrackMix {
+        track: TrackId,
+        volume_db: f32,
+        pan: f32,
     },
     /// Curva de chegada do keyframe em `at` (tempo da fonte).
     SetKeyframeEase {
@@ -412,6 +423,24 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
             })
         }
         Edit::RippleTrim { clips, edge, delta } => ripple_trim(p, clips, edge, delta),
+        Edit::SetTrackMix {
+            track,
+            volume_db,
+            pan,
+        } => {
+            if !(-60.0..=12.0).contains(&volume_db) || !(-1.0..=1.0).contains(&pan) {
+                return Err(EditError::InvalidValue(
+                    "volume de −60 a +12 dB e pan de −1 a 1",
+                ));
+            }
+            let t = p.track_mut(track).ok_or(EditError::TrackNotFound(track))?;
+            if t.kind != TrackKind::Audio {
+                return Err(EditError::WrongTrackKind);
+            }
+            t.volume_db = volume_db;
+            t.pan = pan;
+            Ok(Outcome::default())
+        }
         Edit::Roll { cuts, delta } => roll(p, cuts, delta),
         Edit::Slip { clips, delta } => slip(p, clips, delta),
         Edit::ClearKeyframes { clip, param } => {
@@ -552,6 +581,10 @@ fn place(p: &mut Project, at: Frame, items: Vec<Placement>) -> Result<Outcome, E
             keyframes: Default::default(),
             enabled: true,
             freeze: None,
+            fade_curve: crate::model::Ease::Linear,
+            dissolve_color: None,
+            blur_fill: false,
+            chroma: None,
         };
         let (track, ids) = p
             .track_and_ids(pl.track)
@@ -845,6 +878,18 @@ fn set_clip(p: &mut Project, id: ClipId, change: ClipChange) -> Result<Outcome, 
                 return Err(EditError::NoChange);
             }
             c.enabled = on;
+        }
+        ClipChange::FadeCurve(e) => c.fade_curve = e,
+        ClipChange::DissolveColor(color) => c.dissolve_color = color,
+        ClipChange::BlurFill(on) => c.blur_fill = on,
+        ClipChange::Chroma(k) => {
+            if let Some(k) = &k {
+                let ok = |v: f32| (0.0..=1.0).contains(&v);
+                if !(ok(k.tolerance) && ok(k.softness) && ok(k.spill)) {
+                    return Err(EditError::InvalidValue("chroma key fora da faixa"));
+                }
+            }
+            c.chroma = k;
         }
         ClipChange::Freeze(at) => {
             if at.is_some_and(|v| !v.is_finite() || v < 0.0) {
@@ -1290,6 +1335,10 @@ impl Edit {
                 ClipChange::Enabled(false) => "Desligar clipe",
                 ClipChange::Freeze(Some(_)) => "Congelar frame",
                 ClipChange::Freeze(None) => "Descongelar",
+                ClipChange::FadeCurve(_) => "Curva do fade",
+                ClipChange::DissolveColor(_) => "Transição",
+                ClipChange::BlurFill(_) => "Fundo desfocado",
+                ClipChange::Chroma(_) => "Chroma key",
             },
             Edit::SetSpeed { .. } => "Velocidade",
             Edit::Link { .. } => "Ligar clipes",
@@ -1304,6 +1353,7 @@ impl Edit {
             Edit::DeleteRange { .. } => "Apagar trecho",
             Edit::CloseGap { .. } => "Fechar buraco",
             Edit::SetKeyframeEase { .. } => "Curva do keyframe",
+            Edit::SetTrackMix { .. } => "Volume da faixa",
             Edit::RippleTrim { .. } => "Ripple trim",
             Edit::Roll { .. } => "Roll",
             Edit::Slip { .. } => "Slip",

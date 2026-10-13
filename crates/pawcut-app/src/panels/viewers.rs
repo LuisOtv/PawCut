@@ -216,11 +216,44 @@ impl Workspace {
             );
         }
 
-        if resp.clicked() || resp.drag_started() {
+        // Conta-gotas do chroma key: clicar pega a cor da imagem (sem o key aplicado).
+        if let Some(clips) = self.eyedropper.clone() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            let hint = ui.painter().layout_no_wrap(
+                "Clique na cor do fundo  ·  Esc cancela".into(),
+                theme::text(12.0),
+                Color32::WHITE,
+            );
+            let bar = Rect::from_min_size(
+                pos2(
+                    r.image.center().x - hint.size().x / 2.0 - 8.0,
+                    r.image.top() + 8.0,
+                ),
+                hint.size() + vec2(16.0, 8.0),
+            );
+            ui.painter()
+                .rect_filled(bar, 4.0, Color32::from_black_alpha(200));
+            ui.painter()
+                .galley(bar.min + vec2(8.0, 4.0), hint, Color32::WHITE);
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.eyedropper = None;
+            } else if resp.clicked()
+                && let Some(pos) = resp.interact_pointer_pos()
+            {
+                let u = (pos.x - pic.left()) / pic.width();
+                let v = (pos.y - pic.top()) / pic.height();
+                if (0.0..1.0).contains(&u) && (0.0..1.0).contains(&v) {
+                    self.pick_chroma_color(&clips, u, v);
+                }
+                self.eyedropper = None;
+            }
+        } else if resp.clicked() || resp.drag_started() {
             self.st.active_monitor = Monitor::Timeline;
         }
         // Arrastar a imagem move o clipe visual selecionado (posição do Inspector).
-        let target = self.visual_selection(self.st.playhead);
+        let target = self
+            .visual_selection(self.st.playhead)
+            .filter(|_| self.eyedropper.is_none());
         if let Some(clip) = target {
             if resp.dragged() {
                 let k = s.width as f32 / pic.width();

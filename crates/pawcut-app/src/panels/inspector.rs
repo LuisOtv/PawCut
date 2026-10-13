@@ -383,6 +383,104 @@ impl Workspace {
         }
     }
 
+    /// Chroma key (fundo verde/azul): liga, escolhe a cor e ajusta.
+    fn chroma_section(&mut self, ui: &mut egui::Ui, clips: &[Clip], first: &Clip) {
+        section(ui, "Chroma key", |ui| {
+            let mut k = first.chroma;
+            let mut on = k.is_some();
+            row(
+                ui,
+                "Ligado",
+                |ui| {
+                    ui.checkbox(&mut on, "Remover a cor do fundo");
+                },
+                |_| {},
+            );
+            if on && k.is_none() {
+                k = Some(pawcut_core::ChromaKey::default());
+            }
+            if !on {
+                k = None;
+            }
+            if let Some(key) = k.as_mut() {
+                row(
+                    ui,
+                    "Cor",
+                    |ui| {
+                        color_button(ui, &mut key.color);
+                        if ui.small_button("Verde").clicked() {
+                            key.color = Rgba::new(0, 177, 64, 255);
+                        }
+                        if ui.small_button("Azul").clicked() {
+                            key.color = Rgba::new(0, 71, 187, 255);
+                        }
+                        let picking = self.eyedropper.is_some();
+                        if ui
+                            .selectable_label(picking, "Conta-gotas")
+                            .on_hover_text(
+                                "Clique na cor do fundo no Timeline Viewer (Esc cancela)",
+                            )
+                            .clicked()
+                        {
+                            self.eyedropper = if picking {
+                                None
+                            } else {
+                                Some(clips.iter().map(|c| c.id).collect())
+                            };
+                        }
+                    },
+                    |_| {},
+                );
+                for (label, v, tip) in [
+                    (
+                        "Tolerância",
+                        &mut key.tolerance,
+                        "Quanto da cor some (mais = some mais)",
+                    ),
+                    (
+                        "Suavidade",
+                        &mut key.softness,
+                        "Borda gradual entre o que some e o que fica",
+                    ),
+                    (
+                        "Reflexo",
+                        &mut key.spill,
+                        "Tira o verde/azul refletido na pessoa",
+                    ),
+                ] {
+                    let mut pct = *v * 100.0;
+                    row(
+                        ui,
+                        label,
+                        |ui| {
+                            if ui
+                                .add(
+                                    DragValue::new(&mut pct)
+                                        .range(0.0..=100.0)
+                                        .speed(0.5)
+                                        .suffix(" %"),
+                                )
+                                .on_hover_text(tip)
+                                .changed()
+                            {
+                                *v = pct / 100.0;
+                            }
+                        },
+                        |_| {},
+                    );
+                }
+            }
+            if k != first.chroma {
+                self.apply_all(clips, "insp-chroma", |c| {
+                    matches!(c.source, ClipSource::Media(_)).then_some(Edit::SetClip {
+                        clip: c.id,
+                        change: ClipChange::Chroma(k),
+                    })
+                });
+            }
+        });
+    }
+
     pub fn inspector_ui(&mut self, ui: &mut egui::Ui) {
         let project = self.project_arc.clone();
         let selected: Vec<Clip> = self
@@ -578,6 +676,29 @@ impl Workspace {
                                 |_| {},
                             );
                         }
+                        if matches!(first.source, ClipSource::Media(_)) {
+                            let mut on = first.blur_fill;
+                            row(
+                                ui,
+                                "Sobras",
+                                |ui| {
+                                    ui.checkbox(&mut on, "Fundo desfocado")
+                                        .on_hover_text(
+                                            "Preenche o que sobra do quadro com a própria imagem desfocada",
+                                        );
+                                },
+                                |_| {},
+                            );
+                            if on != first.blur_fill {
+                                self.apply_all(&clips, "insp-blur", |c| {
+                                    matches!(c.source, ClipSource::Media(_)).then_some(Edit::SetClip {
+                                        clip: c.id,
+                                        change: ClipChange::BlurFill(on),
+                                    })
+                                });
+                                self.st.editor.end_coalescing();
+                            }
+                        }
                         let mut t = first.transform;
                         row(
                             ui,
@@ -683,6 +804,9 @@ impl Workspace {
                             });
                         }
                     });
+                    if matches!(first.source, ClipSource::Media(_)) {
+                        self.chroma_section(ui, &clips, &first);
+                    }
                 }
                 if tab == InspectorTab::Time {
                     section(ui, "Tempo", |ui| {
@@ -820,6 +944,33 @@ impl Workspace {
                                 |_| {},
                             );
                         }
+                        if first.fade_in > 0 || first.fade_out > 0 {
+                            let mut curve = first.fade_curve;
+                            row(
+                                ui,
+                                "Curva do fade",
+                                |ui| {
+                                    egui::ComboBox::from_id_salt(("fade-curve", id))
+                                        .width(theme::VALUE_W + 60.0)
+                                        .selected_text(ease_label(curve))
+                                        .show_ui(ui, |ui| {
+                                            for e in pawcut_core::Ease::ALL {
+                                                ui.selectable_value(&mut curve, e, ease_label(e));
+                                            }
+                                        });
+                                },
+                                |_| {},
+                            );
+                            if curve != first.fade_curve {
+                                self.apply_all(&clips, "insp-fade-curve", |c| {
+                                    Some(Edit::SetClip {
+                                        clip: c.id,
+                                        change: ClipChange::FadeCurve(curve),
+                                    })
+                                });
+                                self.st.editor.end_coalescing();
+                            }
+                        }
                         let joined = index > 0
                             && project
                                 .track(track_id)
@@ -852,6 +1003,27 @@ impl Workspace {
                                 },
                                 |_| {},
                             );
+                            if first.dissolve_in > 0 && kind == TrackKind::Video {
+                                let black = Rgba::new(0, 0, 0, 255);
+                                let white = Rgba::new(255, 255, 255, 255);
+                                let mut c = first.dissolve_color;
+                                row(
+                                    ui,
+                                    "Transição",
+                                    |ui| {
+                                        ui.selectable_value(&mut c, None, "Cruzada");
+                                        ui.selectable_value(&mut c, Some(black), "Preto");
+                                        ui.selectable_value(&mut c, Some(white), "Branco");
+                                    },
+                                    |_| {},
+                                );
+                                if c != first.dissolve_color {
+                                    self.st.apply(Edit::SetClip {
+                                        clip: id,
+                                        change: ClipChange::DissolveColor(c),
+                                    });
+                                }
+                            }
                         }
                     });
                 }
@@ -870,8 +1042,36 @@ impl Workspace {
                             ui,
                             "",
                             |ui| {
-                                if ui.button("Normalizar (−1 dB)").clicked() {
+                                if ui
+                                    .button("Pico −1 dB")
+                                    .on_hover_text("O ponto mais alto do clipe fica em −1 dBFS")
+                                    .clicked()
+                                {
                                     self.st.normalize_selection();
+                                }
+                            },
+                            |_| {},
+                        );
+                        row(
+                            ui,
+                            "Loudness",
+                            |ui| {
+                                ui.add(
+                                    DragValue::new(&mut self.lufs_target)
+                                        .range(-30.0..=-6.0)
+                                        .speed(0.2)
+                                        .suffix(" LUFS"),
+                                )
+                                .on_hover_text("−14 YouTube/Spotify · −16 podcast · −23 TV");
+                                if ui
+                                    .button("Normalizar")
+                                    .on_hover_text(
+                                        "Volume percebido igual em todos os clipes (EBU R128), sem passar de −1 dB de pico",
+                                    )
+                                    .clicked()
+                                {
+                                    let t = self.lufs_target;
+                                    self.st.normalize_loudness(t);
                                 }
                             },
                             |_| {},
@@ -1031,6 +1231,19 @@ impl Workspace {
                 |ui| {
                     changed |= ui.checkbox(&mut s.background, "").changed();
                     changed |= color_button(ui, &mut s.background_color);
+                },
+                |_| {},
+            );
+            row(
+                ui,
+                "Legenda",
+                |ui| {
+                    changed |= ui
+                        .checkbox(&mut s.caption, "É legenda")
+                        .on_hover_text(
+                            "Vai para o SRT em Arquivo → Exportar legendas → Só as legendas",
+                        )
+                        .changed();
                 },
                 |_| {},
             );

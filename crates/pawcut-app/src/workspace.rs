@@ -118,6 +118,10 @@ pub struct Workspace {
     pub maximize_request: bool,
     /// Painel sob o mouse no último frame (para maximizar).
     pub hovered_panel: Option<crate::panels::Panel>,
+    /// Conta-gotas do chroma key ligado: clicar no viewer pega a cor para esses clipes.
+    pub eyedropper: Option<Vec<pawcut_core::ClipId>>,
+    /// Alvo da normalização por loudness (LUFS).
+    pub lufs_target: f32,
     /// Reprodução em loop (In/Out ou a timeline inteira).
     pub looping: bool,
     /// Zoom do Timeline Viewer (0 = ajustar à janela) e deslocamento ao arrastar com o botão do meio.
@@ -213,6 +217,8 @@ impl Workspace {
             maximize_request: false,
             hovered_panel: None,
             looping: false,
+            lufs_target: -14.0,
+            eyedropper: None,
             viewer_zoom: 0.0,
             viewer_pan: egui::Vec2::ZERO,
             safe_guides: false,
@@ -563,6 +569,81 @@ impl Workspace {
         }
     }
 
+    /// Cor do quadro atual no ponto (`u`, `v` de 0 a 1), sem o chroma key dos `clips`
+    /// (senão a cor que vai sumir já teria sumido).
+    pub fn sample_frame_color(
+        &self,
+        clips: &[pawcut_core::ClipId],
+        u: f32,
+        v: f32,
+    ) -> Option<pawcut_core::Rgba> {
+        let mut p = self.st.project().clone();
+        for t in p.video_tracks.iter_mut() {
+            for c in t.clips.iter_mut().filter(|c| clips.contains(&c.id)) {
+                c.chroma = None;
+            }
+        }
+        let s = &p.settings;
+        let w = 480u32;
+        let h = ((w as f32 * s.height as f32 / s.width.max(1) as f32).round() as u32).max(2);
+        let mut renderer = pawcut_render::Renderer::new(pawcut_media::MediaLibrary::new(
+            (w, h),
+            s.sample_rate,
+            pawcut_media::default_cache_dir(),
+        ));
+        let img = renderer.render_frame(&p, self.st.playhead, w, h).image;
+        // Média 5×5 em volta do ponto (menos sensível a ruído).
+        let (cx, cy) = ((u * w as f32) as i64, (v * h as f32) as i64);
+        let mut sum = [0u32; 3];
+        let mut n = 0;
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                let (x, y) = (cx + dx, cy + dy);
+                if x >= 0 && y >= 0 && (x as u32) < w && (y as u32) < h {
+                    let px = img.get_pixel(x as u32, y as u32).0;
+                    for c in 0..3 {
+                        sum[c] += px[c] as u32;
+                    }
+                    n += 1;
+                }
+            }
+        }
+        (n > 0).then(|| {
+            pawcut_core::Rgba::new(
+                (sum[0] / n) as u8,
+                (sum[1] / n) as u8,
+                (sum[2] / n) as u8,
+                255,
+            )
+        })
+    }
+
+    /// Conta-gotas: usa a cor clicada no chroma key dos clipes.
+    pub fn pick_chroma_color(&mut self, clips: &[pawcut_core::ClipId], u: f32, v: f32) {
+        let Some(color) = self.sample_frame_color(clips, u, v) else {
+            return;
+        };
+        let p = self.st.project().clone();
+        for id in clips {
+            let key = p.clip(*id).and_then(|c| c.chroma).unwrap_or_default();
+            self.st.apply_coalescing(
+                pawcut_core::Edit::SetClip {
+                    clip: *id,
+                    change: pawcut_core::ClipChange::Chroma(Some(pawcut_core::ChromaKey {
+                        color,
+                        ..key
+                    })),
+                },
+                "chroma-pick",
+            );
+        }
+        self.st.editor.end_coalescing();
+        self.st.say(format!(
+            "Cor do chroma key: #{:02X}{:02X}{:02X}",
+            color.r, color.g, color.b
+        ));
+    }
+
     /// Shift+F: destaca no Media Pool a mídia do clipe selecionado.
     pub fn show_in_pool(&mut self) {
         let p = self.project_arc.clone();
@@ -845,6 +926,46 @@ impl Workspace {
                     d.output = first.display().to_string();
                 }
             }
+            Purpose::RelinkFolder => {
+                let offline: Vec<MediaId> = self.st.offline.iter().copied().collect();
+                for id in &offline {
+                    self.forget_media(*id);
+                }
+                self.st.relink_folder(&first);
+                for id in offline {
+                    self.forget_media(id);
+                }
+            }
+            Purpose::ImportSubtitles => {
+                let fps = self.st.project().settings.fps;
+                let parsed = std::fs::read(&first)
+                    .map_err(|e| e.to_string())
+                    .and_then(|b| pawcut_core::parse_subtitles(&String::from_utf8_lossy(&b), fps));
+                match parsed {
+                    Ok(cues) => {
+                        let n = self.st.import_subtitles(&cues);
+                        self.st
+                            .say(format!("{n} legenda(s) importada(s) numa faixa nova"));
+                    }
+                    Err(e) => self.st.warn(format!("Não deu para ler as legendas: {e}")),
+                }
+            }
+            Purpose::ExportSubtitles(captions_only) => {
+                let mut path = first;
+                if path.extension().is_none() {
+                    path.set_extension("srt");
+                }
+                let cues = self.st.subtitle_cues(captions_only);
+                let text = pawcut_core::write_srt(&cues, self.st.project().settings.fps);
+                match std::fs::write(&path, text) {
+                    Ok(()) => self.st.say(format!(
+                        "{} legenda(s) salvas em {}",
+                        cues.len(),
+                        path.display()
+                    )),
+                    Err(e) => self.st.warn(e.to_string()),
+                }
+            }
         }
     }
 
@@ -886,6 +1007,50 @@ impl Workspace {
                 "Não foi possível gerar a mídia otimizada"
             });
         }
+    }
+
+    pub fn relink_folder_dialog(&mut self) {
+        self.ask_file(crate::file_dialog::Purpose::RelinkFolder, || {
+            rfd::FileDialog::new()
+                .set_title("Pasta onde estão as mídias")
+                .pick_folder()
+                .into_iter()
+                .collect()
+        });
+    }
+
+    pub fn import_subtitles_dialog(&mut self) {
+        self.ask_file(crate::file_dialog::Purpose::ImportSubtitles, || {
+            rfd::FileDialog::new()
+                .set_title("Importar legendas")
+                .add_filter("Legendas", &["srt", "vtt"])
+                .pick_file()
+                .into_iter()
+                .collect()
+        });
+    }
+
+    pub fn export_subtitles_dialog(&mut self, captions_only: bool) {
+        if self.st.subtitle_cues(captions_only).is_empty() {
+            self.st.warn(if captions_only {
+                "Não há legendas na timeline (marque \"É legenda\" no Inspector de um texto)"
+            } else {
+                "Não há textos na timeline"
+            });
+            return;
+        }
+        self.ask_file(
+            crate::file_dialog::Purpose::ExportSubtitles(captions_only),
+            || {
+                rfd::FileDialog::new()
+                    .set_title("Exportar legendas")
+                    .add_filter("SRT", &["srt"])
+                    .set_file_name("legendas.srt")
+                    .save_file()
+                    .into_iter()
+                    .collect()
+            },
+        );
     }
 
     pub fn import_dialog(&mut self) {

@@ -111,6 +111,10 @@ mod tests {
             keyframes: Default::default(),
             enabled: true,
             freeze: None,
+            fade_curve: crate::model::Ease::Linear,
+            dissolve_color: None,
+            blur_fill: false,
+            chroma: None,
         }
     }
 
