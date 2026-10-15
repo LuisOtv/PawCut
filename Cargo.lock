@@ -2746,6 +2746,7 @@ dependencies = [
  "paw-media",
  "paw-ui",
  "pawvoice-core",
+ "pawwrite-core",
  "rfd",
  "rustfft",
  "serde",
@@ -2764,6 +2765,26 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
 ]
+
+[[package]]
+name = "pawwrite-app"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "image",
+ "paw-ui",
+ "pawwrite-core",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "winit",
+]
+
+[[package]]
+name = "pawwrite-core"
+version = "0.1.0"
 
 [[package]]
 name = "peniko"

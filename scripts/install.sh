@@ -11,6 +11,7 @@ cd "$(dirname "$0")/.."
 APPS=(
   "pawcut|pawcut-app|PawCut|Editor de vídeo simples|AudioVideo;Video;AudioVideoEditing;|video/mp4;video/quicktime;video/x-matroska;video/webm;"
   "pawvoice|pawvoice-app|PawVoice|Gravador e editor de voz|AudioVideo;Audio;Recorder;|audio/x-wav;audio/mpeg;audio/flac;"
+  "pawwrite|pawwrite-app|PawWrite|Editor de roteiros|Office;TextEditor;|text/markdown;text/plain;"
 )
 
 BIN_DIR="$HOME/.local/bin"

@@ -1004,7 +1004,8 @@ impl VoiceApp {
             }
             Purpose::Script => match std::fs::read_to_string(&first) {
                 Ok(text) => {
-                    self.ed.set_script(text);
+                    // Do roteiro do PawWrite vai só a fala (sem títulos, [notas] e // comentários).
+                    self.ed.set_script(pawwrite_core::spoken(&text));
                     self.show_script = true;
                     self.say("Roteiro carregado");
                 }
@@ -1035,7 +1036,8 @@ impl VoiceApp {
             },
             "txt" | "md" => {
                 if let Ok(text) = std::fs::read_to_string(path) {
-                    self.ed.set_script(text);
+                    // Do roteiro do PawWrite vai só a fala (sem títulos, [notas] e // comentários).
+                    self.ed.set_script(pawwrite_core::spoken(&text));
                     self.show_script = true;
                     self.say("Roteiro carregado");
                 }

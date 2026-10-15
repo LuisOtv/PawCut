@@ -8,12 +8,12 @@ bibliotecas:
 |---|---|---|
 | **PawCut** | editor de vídeo | pronto |
 | **PawVoice** | gravar e editar narração | primeira versão |
-| PawWrite | roteiros (no lugar do Word) | planejado |
+| **PawWrite** | roteiros (no lugar do Word) | primeira versão |
 | PawPaint | thumbnails (no lugar do Krita) | planejado |
 
 ```bash
 scripts/install.sh            # compila e instala todos (menu de aplicativos + ~/.local/bin)
-scripts/install.sh pawvoice   # só um
+scripts/install.sh pawvoice   # só um (pawcut, pawvoice, pawwrite)
 ```
 
 Bibliotecas compartilhadas em `crates/`:
@@ -58,6 +58,22 @@ Gravador e editor de voz com a interface e o jeito de usar do Audacity.
 - **Arquivos:**
   - o projeto fica em `nome.pawvoice`, com os áudios em `nome.pawvoice-audio/` (WAV, mono ou estéreo);
   - exporta a mixagem ou só a seleção em WAV/MP3, ou cada faixa separada.
+
+## PawWrite
+
+Editor de roteiros para vídeo: texto limpo e o tempo de fala sempre à vista.
+
+- **Escrever:**
+  - `# Título` abre uma seção (`##` para subseções) e aparece na **Estrutura**, à esquerda, com o tempo de cada parte;
+  - `[B-roll: mesa]` é nota de edição: fica em azul e **não conta** no tempo;
+  - `// lembrete` é comentário só seu;
+  - o resto é a fala. Embaixo: palavras, tempo de fala e o seu **ritmo** (palavras por minuto, ajustável).
+- **Editar:** Ctrl+F localiza (F3 próximo), Ctrl+H substitui, Ctrl++ / Ctrl+- mudam o tamanho da letra,
+  Ctrl+\ mostra ou esconde a estrutura. Clicar numa seção da estrutura leva o texto até ela.
+- **Arquivos:** roteiro em Markdown (`.md`) ou texto. Salvar guarda as 10 versões anteriores; se o app
+  fechar sem salvar, ele oferece recuperar o texto.
+- **Com o PawVoice:** Arquivo → *Abrir no PawVoice* manda o roteiro para o teleprompter. O PawVoice
+  mostra só a fala (sem títulos, notas e comentários). Também dá para exportar ou copiar só a fala.
 
 ---
 
