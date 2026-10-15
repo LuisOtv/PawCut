@@ -2735,6 +2735,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "pawpaint-app"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "image",
+ "paw-ui",
+ "pawpaint-core",
+ "pawpaint-render",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "winit",
+]
+
+[[package]]
+name = "pawpaint-core"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pawpaint-render"
+version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+ "image",
+ "pawpaint-core",
+]
+
+[[package]]
 name = "pawvoice-app"
 version = "0.1.0"
 dependencies = [

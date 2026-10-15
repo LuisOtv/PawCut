@@ -1,0 +1,23 @@
+[package]
+name = "pawpaint-app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "pawpaint"
+path = "src/main.rs"
+
+[dependencies]
+pawpaint-core.workspace = true
+pawpaint-render.workspace = true
+paw-ui.workspace = true
+eframe = "0.36"
+egui = "0.36"
+rfd = "0.17"
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+winit = { version = "0.30", default-features = false, features = ["x11"] }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -9,11 +9,11 @@ bibliotecas:
 | **PawCut** | editor de vídeo | pronto |
 | **PawVoice** | gravar e editar narração | primeira versão |
 | **PawWrite** | roteiros (no lugar do Word) | primeira versão |
-| PawPaint | thumbnails (no lugar do Krita) | planejado |
+| **PawPaint** | thumbnails (no lugar do Krita) | primeira versão |
 
 ```bash
 scripts/install.sh            # compila e instala todos (menu de aplicativos + ~/.local/bin)
-scripts/install.sh pawvoice   # só um (pawcut, pawvoice, pawwrite)
+scripts/install.sh pawvoice   # só um (pawcut, pawvoice, pawwrite, pawpaint)
 ```
 
 Bibliotecas compartilhadas em `crates/`:
@@ -74,6 +74,23 @@ Editor de roteiros para vídeo: texto limpo e o tempo de fala sempre à vista.
   fechar sem salvar, ele oferece recuperar o texto.
 - **Com o PawVoice:** Arquivo → *Abrir no PawVoice* manda o roteiro para o teleprompter. O PawVoice
   mostra só a fala (sem títulos, notas e comentários). Também dá para exportar ou copiar só a fala.
+
+## PawPaint
+
+Editor de thumbnails para YouTube: camadas, texto com contorno e exportação que cabe no limite do site.
+
+- **Tela:** 1280×720 por padrão (Arquivo → Nova também faz Shorts 1080×1920, quadrado ou o tamanho que quiser).
+- **Camadas:** imagem (Ctrl+I, arrastar arquivo para a janela ou Ctrl+V com um print), texto (T), retângulo e elipse.
+  - arrastar move (com ímã no centro; Shift desliga), os cantos escalam, a bolinha de cima gira (Shift = de 15 em 15°);
+  - setas movem 1 px (Shift: 10 px); `[` e `]` mudam a ordem; Ctrl+D duplica;
+  - olho esconde, cadeado trava, duplo clique renomeia.
+- **Efeitos em qualquer camada:** contorno de adesivo (o branco ou preto grosso das thumbnails), sombra,
+  brilho, contraste e saturação. Em imagens também dá para **tirar uma cor** (fundo verde ou branco).
+- **Texto:** qualquer fonte instalada, negrito, itálico, alinhamento e entrelinha; já nasce com contorno e sombra.
+- **Como vai aparecer:** a thumbnail em dois tamanhos pequenos, com o selo de duração do YouTube por cima.
+  A tecla G mostra o canto que o selo cobre e as linhas de terços.
+- **Exportar:** Ctrl+E gera um JPG com a melhor qualidade que cabe nos **2 MB** do YouTube; Ctrl+Shift+E gera PNG.
+- **Projeto:** `nome.pawpaint` com as imagens em `nome.pawpaint-assets/`; tudo desfaz com Ctrl+Z.
 
 ---
 

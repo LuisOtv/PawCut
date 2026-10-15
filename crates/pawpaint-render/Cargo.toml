@@ -1,0 +1,9 @@
+[package]
+name = "pawpaint-render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pawpaint-core.workspace = true
+image.workspace = true
+cosmic-text.workspace = true
