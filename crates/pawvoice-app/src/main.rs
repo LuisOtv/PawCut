@@ -2,6 +2,7 @@
 
 mod app;
 mod effects;
+mod input_watch;
 mod wave;
 
 use std::path::PathBuf;

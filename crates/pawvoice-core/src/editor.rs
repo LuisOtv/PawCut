@@ -354,9 +354,20 @@ impl Editor {
     }
 
     pub fn remove_track(&mut self, id: u64) -> Result<(), EditError> {
-        self.session.track(id).ok_or(EditError::NoTrack)?;
-        self.checkpoint("Apagar faixa");
-        self.session.tracks.retain(|t| t.id != id);
+        self.remove_tracks(&[id])
+    }
+
+    /// Apaga várias faixas num passo só de desfazer.
+    pub fn remove_tracks(&mut self, ids: &[u64]) -> Result<(), EditError> {
+        if !ids.iter().any(|id| self.session.track(*id).is_some()) {
+            return Err(EditError::NoTrack);
+        }
+        self.checkpoint(if ids.len() > 1 {
+            "Apagar faixas"
+        } else {
+            "Apagar faixa"
+        });
+        self.session.tracks.retain(|t| !ids.contains(&t.id));
         self.prune();
         Ok(())
     }
@@ -789,6 +800,20 @@ mod tests {
         e.redo();
         assert_eq!(mono(&e, t).len(), 7);
         assert!(e.delete(&[t], 5, 5).is_err());
+    }
+
+    #[test]
+    fn removing_several_tracks_is_one_undo_step() {
+        let (mut e, a) = editor_with(4);
+        let b = e.add_track(ramp(3), 0, None);
+        let c = e.add_track(ramp(2), 0, None);
+        e.remove_tracks(&[a, c]).unwrap();
+        let ids: Vec<u64> = e.session().tracks.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![b]);
+        assert_eq!(e.undo_label(), Some("Apagar faixas"));
+        e.undo();
+        assert_eq!(e.session().tracks.len(), 3);
+        assert!(e.remove_tracks(&[999]).is_err());
     }
 
     #[test]

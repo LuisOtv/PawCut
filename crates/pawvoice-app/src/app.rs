@@ -15,6 +15,8 @@ use egui::{
 use paw_audio::devices::{self, Device};
 use paw_audio::dsp::{self, NoiseProfile};
 use paw_audio::io::{Player, Recorder};
+
+use crate::input_watch::{self, InputWatch};
 use paw_ui::icons::{self, Icon};
 use paw_ui::theme;
 use paw_ui::toasts::Toasts;
@@ -151,6 +153,8 @@ pub struct VoiceApp {
     rec_since: Option<Instant>,
     rec_spill: Option<PathBuf>,
     rec_peaks: Vec<(f32, f32)>,
+    /// Pico segurado, estouro e silêncio do microfone.
+    watch: InputWatch,
     /// Toca as outras faixas enquanto grava (como no Audacity).
     pub overdub: bool,
     noise: Option<(NoiseProfile, f32)>,
@@ -306,6 +310,7 @@ impl VoiceApp {
             rec_since: None,
             rec_spill: None,
             rec_peaks: Vec::new(),
+            watch: InputWatch::default(),
             overdub: true,
             noise: None,
             toasts: Toasts::default(),
@@ -784,6 +789,7 @@ impl VoiceApp {
         self.rec_spill = Some(spill);
         self.rec_since = Some(Instant::now());
         self.rec_peaks.clear();
+        self.watch.start_take();
         self.sel = None;
         // Overdub: as outras faixas tocam enquanto grava.
         let len = self.ed.session().len();
@@ -805,6 +811,9 @@ impl VoiceApp {
         if len < RATE as usize / 10 {
             self.warn("Gravação curta demais (nada foi guardado)");
         } else if let Some(t) = target {
+            if input_watch::clipped_samples(&planar) > 0 {
+                self.warn("A gravação estourou (passou de 0 dB). Abaixe o ganho do microfone.");
+            }
             let into = t
                 .track
                 .filter(|id| self.ed.write_at(*id, t.at, planar.clone()).is_ok());
@@ -1482,11 +1491,7 @@ impl VoiceApp {
                     !self.selected.is_empty(),
                 ) {
                     ui.close();
-                    self.stop();
-                    for id in self.selected.clone() {
-                        let _ = self.ed.remove_track(id);
-                    }
-                    self.selected.clear();
+                    self.remove_tracks(self.selected.clone());
                 }
                 if item(
                     ui,
@@ -1806,8 +1811,12 @@ impl VoiceApp {
         let monitoring = self.recorder.is_monitoring() || self.recorder.is_recording();
         let label_w = 50.0;
         let bar_left = rect.left() + label_w;
-        let bar_w = rect.right() - bar_left;
+        // À direita das barras do mic fica a luz de estouro.
+        let led_w = 10.0;
+        let bar_w = rect.right() - bar_left - led_w - 3.0;
         let bar_h = 7.0;
+        let db_frac = |level: f32| ((20.0 * level.max(1e-5).log10() + 60.0) / 60.0).clamp(0.0, 1.0);
+        let mut led_resp = None;
         let groups = [
             (
                 "Mic",
@@ -1817,7 +1826,7 @@ impl VoiceApp {
             ),
             ("Saída", play, Color32::from_rgb(80, 200, 110), 20.0),
         ];
-        for (label, levels, color, top) in groups {
+        for (g, (label, levels, color, top)) in groups.into_iter().enumerate() {
             let y0 = rect.top() + top;
             p.text(
                 pos2(rect.left(), y0 + bar_h + 1.0),
@@ -1831,7 +1840,7 @@ impl VoiceApp {
                 let bar = Rect::from_min_size(pos2(bar_left, y), vec2(bar_w, bar_h));
                 p.rect_filled(bar, 1.0, theme::BG_DARK);
                 let db = 20.0 * level.max(1e-5).log10();
-                let frac = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+                let frac = db_frac(*level);
                 let col = if db > -1.0 {
                     Color32::from_rgb(235, 60, 50)
                 } else if db > -9.0 {
@@ -1851,6 +1860,34 @@ impl VoiceApp {
                     theme::text(8.0),
                     theme::TEXT_DIM,
                 );
+                if g == 0 && monitoring {
+                    // Pico segurado: um traço que fica parado um instante.
+                    let hold = self.watch.hold()[c];
+                    if hold > 1e-4 {
+                        let x = bar.left() + bar_w * db_frac(hold);
+                        p.line_segment(
+                            [pos2(x, bar.top()), pos2(x, bar.bottom())],
+                            Stroke::new(1.5, theme::TEXT),
+                        );
+                    }
+                }
+            }
+            if g == 0 {
+                let led = Rect::from_min_size(
+                    pos2(bar_left + bar_w + 3.0, y0),
+                    vec2(led_w, 2.0 * bar_h + 2.0),
+                );
+                let clipped = self.watch.clipped().contains(&true);
+                p.rect_filled(
+                    led,
+                    2.0,
+                    if clipped {
+                        Color32::from_rgb(235, 50, 40)
+                    } else {
+                        theme::BG_DARK
+                    },
+                );
+                led_resp = Some(ui.interact(led, ui.id().with("clip_led"), Sense::click()));
             }
         }
         if !monitoring {
@@ -1872,7 +1909,15 @@ impl VoiceApp {
                 theme::TEXT_DIM,
             );
         }
-        if resp
+        if let Some(led) = led_resp
+            && led
+                .on_hover_text(
+                    "Acende se o microfone passou de 0 dB (estourou). Clique para apagar.",
+                )
+                .clicked()
+        {
+            self.watch.clear_clip();
+        } else if resp
             .on_hover_text("Clique para ligar/desligar o monitoramento do microfone")
             .clicked()
         {
@@ -2886,9 +2931,24 @@ impl VoiceApp {
             }
         }
         if remove {
-            self.stop();
-            let _ = self.ed.remove_track(id);
-            self.selected.retain(|t| *t != id);
+            self.remove_tracks(vec![id]);
+        }
+    }
+
+    /// Apaga as faixas (um passo de desfazer) e diz o que sumiu, para não passar batido.
+    fn remove_tracks(&mut self, ids: Vec<u64>) {
+        let names: Vec<String> = ids
+            .iter()
+            .filter_map(|id| self.ed.session().track(*id).map(|t| t.name.clone()))
+            .collect();
+        self.stop();
+        if self.ed.remove_tracks(&ids).is_ok() {
+            self.selected.retain(|t| !ids.contains(t));
+            let what = match names.as_slice() {
+                [one] => format!("Faixa \"{one}\" apagada"),
+                many => format!("{} faixas apagadas", many.len()),
+            };
+            self.say(format!("{what} (Ctrl+Z desfaz)"));
         }
     }
 
@@ -3315,6 +3375,15 @@ impl VoiceApp {
         let ctx = ui.ctx().clone();
         self.poll_file();
         self.poll_imports();
+        let now = ctx.input(|i| i.time);
+        if self
+            .watch
+            .feed(self.recorder.levels(), now, self.recorder.is_recording())
+        {
+            self.warn(
+                "O microfone não está mandando som. Confira a entrada em Configuração de áudio.",
+            );
+        }
         if let Some(e) = self.recorder.take_error() {
             self.rec = None;
             self.rec_since = None;
