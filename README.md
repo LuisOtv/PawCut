@@ -26,29 +26,37 @@ Bibliotecas compartilhadas em `crates/`:
 Gravador e editor de voz com a interface e o jeito de usar do Audacity.
 
 - **Tela:**
-  - transporte em cima (Pausar, Tocar, Parar, Início, Fim, Gravar, Loop), medidores do microfone e da saída;
-  - régua (clique toca a partir dali);
-  - faixas empilhadas com Mudo, Solo, Ganho e Pan;
-  - embaixo, a barra de seleção (início e fim editáveis) e a posição do áudio.
+  - transporte (Pausar, Tocar, Parar, Início, Fim, Gravar, Loop);
+  - ferramentas Seleção (F1) e Envelope (F2), botões de edição e **Configuração de áudio**;
+  - medidores **Mic** e **Saída** com L/R (clique no medidor para monitorar o microfone sem gravar);
+  - régua, faixas mono ou **estéreo** (L em cima, R embaixo) e barra de seleção.
+- **Configuração de áudio:** escolha o microfone e a saída, e grave em mono ou estéreo. O padrão é
+  o que o microfone tiver; um microfone binaural/estéreo grava os dois lados. Fica salva entre as sessões.
 - **Gravar:**
   - R grava na faixa selecionada a partir do cursor; Shift+R grava numa faixa nova;
   - as outras faixas tocam enquanto grava (overdub);
-  - a gravação começa na hora e não perde o fim;
-  - o áudio vai sendo salvo no disco: se o app fechar no meio, ele oferece recuperar.
+  - começa na hora e não perde o fim; se o app fechar no meio, ele oferece recuperar.
 - **Editar como no Audacity:**
-  - arrastar seleciona (na vertical pega várias faixas) e duplo clique seleciona o clipe;
-  - para mover um clipe, arraste pelo cabeçalho dele, inclusive para outra faixa;
+  - arrastar seleciona (na vertical pega várias faixas); Z ajusta a seleção ao cruzamento por zero;
+  - clique no cabeçalho do clipe seleciona e Ctrl+clique soma outros; arrastar move todos juntos
+    (Time Shift), e um clipe sozinho pode ir para outra faixa;
+  - mexer em Ganho/Pan/Mudo/Solo de uma faixa selecionada vale para todas as selecionadas;
   - Ctrl+X, Ctrl+C e Ctrl+V; Delete; Ctrl+D duplica; Ctrl+L silencia; Ctrl+T apara;
-  - Ctrl+Alt+I separa em nova faixa;
+    Ctrl+Alt+I separa em nova faixa;
   - Ctrl+1 e Ctrl+3 dão zoom, Ctrl+F cabe tudo, Ctrl+E dá zoom na seleção;
   - Espaço toca/para, P pausa, Shift+Espaço repete.
+- **Envelope (F2):**
+  - clique cria um ponto e arrastar muda o volume ao longo do tempo (ex.: abaixar a música
+    debaixo da voz);
+  - botão direito, ou arrastar para fora, apaga o ponto.
 - **Efeitos** (na seleção; sem seleção, em tudo):
   - **Melhorar voz (1 clique)**;
-  - normalizar loudness (LUFS) ou pico;
-  - amplificar, fades, passa-altas, noise gate, compressor e truncar silêncio.
+  - **Redução de ruído** com perfil (como no Audacity: pegue o perfil num trecho só de chiado e aplique);
+  - normalizar loudness (LUFS) ou pico, amplificar, compressor, limitador, fades;
+  - noise gate, passa-altas, graves e agudos, truncar silêncio e inverter.
 - **Roteiro e teleprompter** (Ver → Roteiro): a letra grande rola sozinha enquanto você grava.
 - **Arquivos:**
-  - o projeto fica em `nome.pawvoice`, com os áudios em `nome.pawvoice-audio/` (WAV);
+  - o projeto fica em `nome.pawvoice`, com os áudios em `nome.pawvoice-audio/` (WAV, mono ou estéreo);
   - exporta a mixagem ou só a seleção em WAV/MP3, ou cada faixa separada.
 
 ---

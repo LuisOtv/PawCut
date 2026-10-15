@@ -1,6 +1,6 @@
-//! A janela do PawVoice, no jeito do Audacity: barra de transporte e medidores em cima,
-//! régua, faixas empilhadas (painel de controle à esquerda, forma de onda à direita),
-//! barra de seleção e de status embaixo. O roteiro/teleprompter fica num painel opcional.
+//! A janela do PawVoice, no jeito do Audacity: barra de transporte, ferramentas, configuração
+//! de áudio e medidores em cima; régua; faixas (mono ou estéreo) com painel de controle à
+//! esquerda; barra de seleção e de status embaixo. O roteiro/teleprompter é um painel opcional.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,12 +12,14 @@ use egui::{
     Align2, Color32, CornerRadius, CursorIcon, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke,
     StrokeKind, UiBuilder, pos2, vec2,
 };
-use paw_audio::dsp;
+use paw_audio::devices::{self, Device};
+use paw_audio::dsp::{self, NoiseProfile};
 use paw_audio::io::{Player, Recorder};
 use paw_ui::icons::{self, Icon};
 use paw_ui::theme;
 use paw_ui::toasts::Toasts;
-use pawvoice_core::{Editor, Segment, Session, format_time, parse_time};
+use pawvoice_core::{Editor, EnvPoint, Planar, Segment, Session, format_time, parse_time};
+use serde::{Deserialize, Serialize};
 
 use crate::effects::{self, Compression};
 use crate::wave;
@@ -25,8 +27,9 @@ use crate::wave;
 pub const RATE: u32 = 48_000;
 const RULER_H: f32 = 28.0;
 /// Largura do painel de controle da faixa (à esquerda de cada faixa).
-const TCP_W: f32 = 176.0;
-const TRACK_H: f32 = 132.0;
+const TCP_W: f32 = 184.0;
+const MONO_H: f32 = 132.0;
+const STEREO_H: f32 = 176.0;
 const TRACK_GAP: f32 = 4.0;
 /// Faixa de título do clipe (arrastar por ela move o clipe).
 const CLIP_HEADER: f32 = 16.0;
@@ -36,13 +39,34 @@ const WAVE_BLUE: Color32 = Color32::from_rgb(0x68, 0x88, 0xf0);
 const WAVE_SEL: Color32 = Color32::from_rgb(0xc0, 0xcc, 0xff);
 const CLIP_BG: Color32 = Color32::from_rgb(0x2a, 0x2f, 0x45);
 const CLIP_HEAD: Color32 = Color32::from_rgb(0x3a, 0x44, 0x6e);
+const CLIP_HEAD_SEL: Color32 = Color32::from_rgb(0x8a, 0x5a, 0x3a);
 const TRACK_BG: Color32 = Color32::from_rgb(0x1c, 0x1c, 0x20);
+const ENV_COLOR: Color32 = Color32::from_rgb(0x50, 0xe0, 0xa0);
 
-/// Amostras de uma faixa e os picos para desenhar.
-type TrackAudio = (Arc<Vec<f32>>, Vec<(f32, f32)>);
+/// Amostras de uma faixa (um vetor por canal) e os picos de cada canal.
+type TrackAudio = (Arc<Planar>, Arc<Vec<Vec<(f32, f32)>>>);
 
-/// Resultado de importar um arquivo: (nome, amostras) ou o erro.
-type Imported = Result<(String, Vec<f32>), String>;
+/// Resultado de importar um arquivo: (nome, canais) ou o erro.
+type Imported = Result<(String, Planar), String>;
+
+/// Clipe sob o ponteiro: (faixa, início, fim, no cabeçalho?).
+type ClipHit = Option<(u64, usize, usize, bool)>;
+
+/// Ferramentas (F1/F2 como no Audacity).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    Select,
+    Envelope,
+}
+
+/// Configuração de áudio que fica salva entre as sessões.
+#[derive(Clone, Serialize, Deserialize, Default)]
+struct AudioSettings {
+    input: Option<String>,
+    output: Option<String>,
+    /// 1 = mono, 2 = estéreo; `None` = o que o microfone tiver.
+    channels: Option<u8>,
+}
 
 /// Para que serve a janela de arquivos aberta.
 enum Purpose {
@@ -60,22 +84,27 @@ enum Dialog {
     Gate { threshold: f32, reduction: f32 },
     Compressor(Compression),
     Silences { threshold: f32, min: f32 },
+    NoiseReduction { reduction: f32, sensitivity: f32 },
+    BassTreble { bass: f32, treble: f32 },
+    Limiter(f32),
     ConfirmClose,
     Recover(Vec<PathBuf>),
 }
 
 /// O que um arrasto no painel das faixas está fazendo.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Drag {
     /// Seleção de tempo; `row` é a faixa onde começou (para selecionar faixas na vertical).
     Select { anchor: usize, row: usize },
-    /// Mover o clipe `[a, b)` da faixa `track`, pego `grab` amostras depois do início.
-    Clip {
-        track: u64,
-        a: usize,
-        b: usize,
+    /// Time Shift: os clipes `(faixa, início, fim)` andam juntos; `grab` é quanto depois do
+    /// início do clipe pego (`anchor`) o mouse apertou.
+    Clips {
+        clips: Vec<(u64, usize, usize)>,
+        anchor: usize,
         grab: usize,
     },
+    /// Ponto `index` do envelope da faixa.
+    Envelope { track: u64, index: usize },
 }
 
 /// Onde a gravação em andamento vai cair.
@@ -89,15 +118,18 @@ struct RecTarget {
 /// Áudio e picos de uma faixa (refeitos quando os trechos mudam).
 struct TrackCache {
     segments: Vec<Segment>,
-    samples: Arc<Vec<f32>>,
-    peaks: Vec<(f32, f32)>,
+    channels: u8,
+    audio: TrackAudio,
 }
 
 pub struct VoiceApp {
     pub ed: Editor,
     pub path: Option<PathBuf>,
+    pub tool: Tool,
     /// Faixas selecionadas (as edições e efeitos agem nelas).
     pub selected: Vec<u64>,
+    /// Clipes selecionados (clique no cabeçalho; Ctrl soma): andam juntos ao arrastar.
+    pub clip_sel: Vec<(u64, usize, usize)>,
     /// Cursor (amostra) e seleção de tempo `[a, b)`.
     pub cursor: usize,
     pub sel: Option<(usize, usize)>,
@@ -112,12 +144,16 @@ pub struct VoiceApp {
     play_offset: usize,
     pub looping: bool,
     recorder: Recorder,
+    audio: AudioSettings,
+    inputs: Vec<Device>,
+    outputs: Vec<Device>,
     rec: Option<RecTarget>,
     rec_since: Option<Instant>,
     rec_spill: Option<PathBuf>,
     rec_peaks: Vec<(f32, f32)>,
     /// Toca as outras faixas enquanto grava (como no Audacity).
     pub overdub: bool,
+    noise: Option<(NoiseProfile, f32)>,
     pub toasts: Toasts,
     dialog: Option<Dialog>,
     file: Option<(Purpose, Receiver<Vec<PathBuf>>)>,
@@ -147,6 +183,15 @@ fn data_dir() -> PathBuf {
         .join("pawvoice")
 }
 
+fn settings_path() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("pawvoice")
+        .join("audio.json")
+}
+
 /// Gravações em andamento ficam aqui até virarem faixa (para recuperar se o app fechar).
 fn spill_dir() -> PathBuf {
     data_dir().join("gravando")
@@ -164,30 +209,51 @@ fn leftover_recordings() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-fn read_raw_f32(path: &Path) -> std::io::Result<Vec<f32>> {
+/// Lê uma gravação interrompida (`<hora>-<canais>ch.f32`, intercalada).
+fn read_spill(path: &Path) -> std::io::Result<Planar> {
     let bytes = std::fs::read(path)?;
-    Ok(bytes
+    let ch = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.rsplit('-').next())
+        .and_then(|s| s.strip_suffix("ch"))
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1)
+        .clamp(1, 2);
+    let data: Vec<f32> = bytes
         .as_chunks::<4>()
         .0
         .iter()
         .map(|b| f32::from_le_bytes(*b))
+        .collect();
+    Ok((0..ch)
+        .map(|c| data.iter().skip(c).step_by(ch).copied().collect())
         .collect())
 }
 
-/// Lê um arquivo de áudio qualquer (pelo ffmpeg) em mono na taxa do projeto.
-fn decode_mono(path: &Path) -> Result<Vec<f32>, String> {
+/// Lê um arquivo de áudio qualquer (pelo ffmpeg) em estéreo na taxa do projeto; se os dois
+/// lados forem iguais, vira mono.
+fn decode(path: &Path) -> Result<Planar, String> {
     let pcm = paw_media::load_audio(path, RATE, 1.0, None).map_err(|e| e.to_string())?;
-    Ok((0..pcm.frames())
-        .map(|i| {
-            let [l, r] = pcm.frame(i as i64);
-            (l + r) * 0.5
-        })
-        .collect())
+    let (mut l, mut r) = (
+        Vec::with_capacity(pcm.frames()),
+        Vec::with_capacity(pcm.frames()),
+    );
+    for i in 0..pcm.frames() {
+        let [a, b] = pcm.frame(i as i64);
+        l.push(a);
+        r.push(b);
+    }
+    Ok(if l == r { vec![l] } else { vec![l, r] })
 }
 
 /// Raiz: fala baixa continua visível (escala parecida com dB).
 fn shape(v: f32) -> f32 {
     v.clamp(-1.0, 1.0).abs().sqrt().copysign(v)
+}
+
+fn track_h(channels: u8) -> f32 {
+    if channels >= 2 { STEREO_H } else { MONO_H }
 }
 
 impl VoiceApp {
@@ -196,6 +262,15 @@ impl VoiceApp {
         let mut app = Self::empty();
         app.screenshot = std::env::var_os("PAWVOICE_SCREENSHOT").map(PathBuf::from);
         app.toasts.bottom_margin = 64.0;
+        app.audio = std::fs::read_to_string(settings_path())
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        if app.audio.output.is_some() {
+            app.player = Player::spawn_on(RATE, 2, app.audio.output.clone());
+        }
+        app.rescan_devices();
+        app.apply_audio_settings();
         let leftovers = leftover_recordings();
         if !leftovers.is_empty() {
             app.dialog = Some(Dialog::Recover(leftovers));
@@ -210,7 +285,9 @@ impl VoiceApp {
         Self {
             ed: Editor::new(Session::new(RATE), Default::default()),
             path: None,
+            tool: Tool::Select,
             selected: Vec::new(),
+            clip_sel: Vec::new(),
             cursor: 0,
             sel: None,
             view_start: 0.0,
@@ -222,11 +299,15 @@ impl VoiceApp {
             play_offset: 0,
             looping: false,
             recorder: Recorder::new(RATE),
+            audio: AudioSettings::default(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
             rec: None,
             rec_since: None,
             rec_spill: None,
             rec_peaks: Vec::new(),
             overdub: true,
+            noise: None,
             toasts: Toasts::default(),
             dialog: None,
             file: None,
@@ -253,6 +334,129 @@ impl VoiceApp {
 
     fn warn(&mut self, text: impl Into<String>) {
         self.toasts.push(text, true);
+    }
+
+    // ---------------------------------------------------------------- configuração de áudio
+
+    fn rescan_devices(&mut self) {
+        self.inputs = devices::sources();
+        self.outputs = devices::sinks();
+    }
+
+    /// Canais de gravação: o escolhido, ou os do microfone (o padrão do sistema se nenhum).
+    pub fn rec_channels(&self) -> u8 {
+        self.audio.channels.unwrap_or_else(|| {
+            let name = self.audio.input.clone().or_else(devices::default_source);
+            self.inputs
+                .iter()
+                .find(|d| Some(&d.name) == name.as_ref())
+                .map_or(1, |d| d.channels.clamp(1, 2))
+        })
+    }
+
+    fn apply_audio_settings(&mut self) {
+        let ch = self.rec_channels();
+        self.recorder.configure(ch, self.audio.input.clone());
+    }
+
+    fn save_audio_settings(&self) {
+        let p = settings_path();
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(t) = serde_json::to_string_pretty(&self.audio) {
+            let _ = std::fs::write(p, t);
+        }
+    }
+
+    fn set_output(&mut self, output: Option<String>) {
+        self.stop();
+        self.audio.output = output.clone();
+        self.player = Player::spawn_on(RATE, 2, output);
+        self.save_audio_settings();
+    }
+
+    /// O menu "Configuração de áudio" do Audacity: microfone, canais e saída.
+    fn audio_setup_menu(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Microfone").weak().small());
+        let default_in = devices::default_source();
+        let mut pick_in = None;
+        if ui
+            .radio(self.audio.input.is_none(), "Padrão do sistema")
+            .clicked()
+        {
+            pick_in = Some(None);
+        }
+        for d in &self.inputs {
+            let mut label = format!(
+                "{} ({})",
+                d.description,
+                if d.channels >= 2 { "estéreo" } else { "mono" }
+            );
+            if Some(&d.name) == default_in.as_ref() {
+                label.push_str(" — padrão");
+            }
+            if ui
+                .radio(self.audio.input.as_ref() == Some(&d.name), label)
+                .clicked()
+            {
+                pick_in = Some(Some(d.name.clone()));
+            }
+        }
+        ui.separator();
+        ui.label(RichText::new("Canais de gravação").weak().small());
+        let auto = self.rec_channels();
+        let mut pick_ch = None;
+        for (v, label) in [
+            (
+                None,
+                format!(
+                    "Do microfone ({})",
+                    if auto >= 2 { "estéreo" } else { "mono" }
+                ),
+            ),
+            (Some(1), "1 (Mono)".to_string()),
+            (Some(2), "2 (Estéreo)".to_string()),
+        ] {
+            if ui.radio(self.audio.channels == v, label).clicked() {
+                pick_ch = Some(v);
+            }
+        }
+        ui.separator();
+        ui.label(RichText::new("Saída").weak().small());
+        let mut pick_out = None;
+        if ui
+            .radio(self.audio.output.is_none(), "Padrão do sistema")
+            .clicked()
+        {
+            pick_out = Some(None);
+        }
+        for d in &self.outputs {
+            if ui
+                .radio(self.audio.output.as_ref() == Some(&d.name), &d.description)
+                .clicked()
+            {
+                pick_out = Some(Some(d.name.clone()));
+            }
+        }
+        ui.separator();
+        if ui.button("Atualizar dispositivos").clicked() {
+            self.rescan_devices();
+        }
+        let changed = pick_in.is_some() || pick_ch.is_some();
+        if let Some(v) = pick_in {
+            self.audio.input = v;
+        }
+        if let Some(v) = pick_ch {
+            self.audio.channels = v;
+        }
+        if changed {
+            self.apply_audio_settings();
+            self.save_audio_settings();
+        }
+        if let Some(v) = pick_out {
+            self.set_output(v);
+        }
     }
 
     // ---------------------------------------------------------------- seleção e alvo
@@ -292,12 +496,34 @@ impl VoiceApp {
 
     fn select_none(&mut self) {
         self.selected.clear();
+        self.clip_sel.clear();
         self.sel = None;
+    }
+
+    /// Z: leva as bordas da seleção para o cruzamento por zero mais perto (sem estalo).
+    pub fn zero_crossings(&mut self) {
+        let (Some((a, b)), Some(id)) = (self.sel, self.sel_tracks().first().copied()) else {
+            return;
+        };
+        let w = RATE as usize / 100;
+        let fix = |me: &Self, at: usize| {
+            let lo = at.saturating_sub(w);
+            let p = me.ed.render_range(id, lo, at + w);
+            let Some(ch) = p.first() else { return at };
+            (1..ch.len())
+                .filter(|i| (ch[i - 1] <= 0.0) != (ch[*i] <= 0.0))
+                .min_by_key(|i| (lo + i).abs_diff(at))
+                .map_or(at, |i| lo + i)
+        };
+        let (na, nb) = (fix(self, a), fix(self, b));
+        if nb > na {
+            self.sel = Some((na, nb));
+        }
     }
 
     // ---------------------------------------------------------------- edições
 
-    pub fn apply_effect(&mut self, label: &'static str, f: impl FnMut(&mut Vec<f32>)) {
+    pub fn apply_effect(&mut self, label: &'static str, f: impl FnMut(&mut [Vec<f32>])) {
         self.stop();
         match self.target() {
             Some((tracks, a, b)) => {
@@ -317,6 +543,7 @@ impl VoiceApp {
         if self.ed.delete(&tracks, a, b).is_ok() {
             self.cursor = a;
             self.sel = None;
+            self.clip_sel.clear();
         }
     }
 
@@ -326,6 +553,7 @@ impl VoiceApp {
             if self.ed.cut(&tracks, a, b).is_ok() {
                 self.cursor = a;
                 self.sel = None;
+                self.clip_sel.clear();
             }
         }
     }
@@ -396,14 +624,19 @@ impl VoiceApp {
     fn prune_selection(&mut self) {
         let ids = self.track_ids();
         self.selected.retain(|t| ids.contains(t));
+        self.clip_sel.clear();
     }
 
     pub fn remove_silences(&mut self, threshold: f32, min: f32) {
         self.stop();
         let mut total = 0;
         for id in self.sel_tracks() {
-            let samples = self.ed.render(id);
-            let runs = dsp::silent_runs_mono(&samples, RATE, threshold, min as f64, 0.12);
+            let p = self.ed.render(id);
+            // Os canais juntos: silêncio é quando os dois lados estão baixos.
+            let mono: Vec<f32> = (0..p.first().map_or(0, Vec::len))
+                .map(|i| p.iter().map(|c| c[i].abs()).fold(0.0, f32::max))
+                .collect();
+            let runs = dsp::silent_runs_mono(&mono, RATE, threshold, min as f64, 0.12);
             if let Ok(removed) = self.ed.delete_many(id, &runs) {
                 total += removed;
             }
@@ -416,6 +649,26 @@ impl VoiceApp {
             ));
         } else {
             self.say("Nenhuma pausa longa encontrada");
+        }
+    }
+
+    /// Guarda o perfil de ruído do trecho selecionado (primeiro passo da redução de ruído).
+    fn capture_noise_profile(&mut self) {
+        let Some((tracks, a, b)) = self.time_target() else {
+            self.warn("Selecione um trecho só de ruído (sem fala) primeiro");
+            return;
+        };
+        let p = self.ed.render_range(tracks[0], a, b);
+        let n = p.first().map_or(0, Vec::len);
+        let mono: Vec<f32> = (0..n)
+            .map(|i| p.iter().map(|c| c[i]).sum::<f32>() / p.len() as f32)
+            .collect();
+        match dsp::noise_profile(&mono) {
+            Some(prof) => {
+                self.noise = Some((prof, (b - a) as f32 / RATE as f32));
+                self.say("Perfil de ruído guardado. Agora selecione o que limpar e aplique.");
+            }
+            None => self.warn("Trecho curto demais para o perfil (use pelo menos 0,1 s)"),
         }
     }
 
@@ -526,7 +779,7 @@ impl VoiceApp {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
-        let spill = dir.join(format!("{stamp}.f32"));
+        let spill = dir.join(format!("{stamp}-{}ch.f32", self.recorder.channels()));
         self.recorder.start(Some(spill.clone()));
         self.rec_spill = Some(spill);
         self.rec_since = Some(Instant::now());
@@ -543,24 +796,32 @@ impl VoiceApp {
     }
 
     fn finish_recording(&mut self) {
-        let samples = self.recorder.stop();
+        let planar = self.recorder.stop();
         self.player.stop();
         self.play_buf = None;
         self.rec_since = None;
         let target = self.rec.take();
-        if samples.len() < RATE as usize / 10 {
+        let len = planar.first().map_or(0, Vec::len);
+        if len < RATE as usize / 10 {
             self.warn("Gravação curta demais (nada foi guardado)");
         } else if let Some(t) = target {
-            let len = samples.len();
             let into = t
                 .track
-                .filter(|id| self.ed.write_at(*id, t.at, samples.clone()).is_ok());
-            let id = into.unwrap_or_else(|| self.ed.add_track(samples, t.at, None));
+                .filter(|id| self.ed.write_at(*id, t.at, planar.clone()).is_ok());
+            let id = into.unwrap_or_else(|| self.ed.add_track(planar, t.at, None));
             self.selected = vec![id];
             self.cursor = t.at + len;
         }
         if let Some(p) = self.rec_spill.take() {
             let _ = std::fs::remove_file(p);
+        }
+    }
+
+    fn toggle_monitor(&mut self) {
+        if self.recorder.is_monitoring() {
+            self.recorder.stop_monitor();
+        } else if !self.recorder.is_recording() {
+            self.recorder.start_monitor();
         }
     }
 
@@ -633,8 +894,12 @@ impl VoiceApp {
                         })
                         .collect();
                     let path = first.join(format!("{}.wav", safe.trim()));
-                    let samples = self.ed.render(*id);
-                    if let Err(e) = pawvoice_core::export_audio(&samples, RATE, 1, &path) {
+                    let p = self.ed.render(*id);
+                    let ch = p.len().max(1);
+                    let inter: Vec<f32> = (0..p.first().map_or(0, Vec::len))
+                        .flat_map(|i| p.iter().map(move |c| c[i]))
+                        .collect();
+                    if let Err(e) = pawvoice_core::export_audio(&inter, RATE, ch as u8, &path) {
                         self.warn(e.to_string());
                     }
                 }
@@ -690,7 +955,7 @@ impl VoiceApp {
                 let name = p
                     .file_stem()
                     .map_or("Áudio".into(), |s| s.to_string_lossy().into_owned());
-                let _ = tx.send(decode_mono(&p).map(|s| (name, s)));
+                let _ = tx.send(decode(&p).map(|s| (name, s)));
             }
         });
         self.imports.push(rx);
@@ -710,9 +975,9 @@ impl VoiceApp {
         });
         for r in done {
             match r {
-                Ok((name, samples)) if !samples.is_empty() => {
+                Ok((name, planar)) if planar.first().is_some_and(|c| !c.is_empty()) => {
                     let empty = self.ed.session().is_empty();
-                    let id = self.ed.add_track(samples, 0, Some(name));
+                    let id = self.ed.add_track(planar, 0, Some(name));
                     self.selected = vec![id];
                     if empty {
                         self.fit();
@@ -851,7 +1116,6 @@ impl VoiceApp {
             self.toggle_play();
         }
         if pressed(Modifiers::NONE, Key::X) {
-            // X: toca/para deixando o cursor onde parou.
             if self.is_playing() {
                 self.pause();
             } else {
@@ -869,6 +1133,15 @@ impl VoiceApp {
             } else {
                 self.start_recording(false);
             }
+        }
+        if pressed(Modifiers::NONE, Key::F1) {
+            self.tool = Tool::Select;
+        }
+        if pressed(Modifiers::NONE, Key::F2) {
+            self.tool = Tool::Envelope;
+        }
+        if pressed(Modifiers::NONE, Key::Z) {
+            self.zero_crossings();
         }
         if pressed(Modifiers::NONE, Key::Delete) || pressed(Modifiers::NONE, Key::Backspace) {
             self.delete_selection();
@@ -1104,6 +1377,11 @@ impl VoiceApp {
                     ui.close();
                     self.sel = Some((0, self.cursor));
                 }
+                ui.separator();
+                if item(ui, "No cruzamento por zero", "Z", self.sel.is_some()) {
+                    ui.close();
+                    self.zero_crossings();
+                }
             });
             ui.menu_button("Ver", |ui| {
                 if item(ui, "Mais zoom", "Ctrl+1", true) {
@@ -1147,11 +1425,54 @@ impl VoiceApp {
                 ui.separator();
                 ui.checkbox(&mut self.looping, "Repetir (loop)");
                 ui.checkbox(&mut self.overdub, "Tocar as outras faixas enquanto grava");
+                let mon = self.recorder.is_monitoring();
+                if item(
+                    ui,
+                    if mon {
+                        "Parar de monitorar o microfone"
+                    } else {
+                        "Monitorar o microfone (medidor)"
+                    },
+                    "",
+                    !self.recorder.is_recording(),
+                ) {
+                    ui.close();
+                    self.toggle_monitor();
+                }
+                ui.separator();
+                ui.menu_button("Configuração de áudio", |ui| self.audio_setup_menu(ui));
+            });
+            ui.menu_button("Ferramentas", |ui| {
+                if ui
+                    .add(
+                        egui::Button::selectable(self.tool == Tool::Select, "Seleção")
+                            .shortcut_text("F1"),
+                    )
+                    .clicked()
+                {
+                    ui.close();
+                    self.tool = Tool::Select;
+                }
+                if ui
+                    .add(
+                        egui::Button::selectable(self.tool == Tool::Envelope, "Envelope")
+                            .shortcut_text("F2"),
+                    )
+                    .clicked()
+                {
+                    ui.close();
+                    self.tool = Tool::Envelope;
+                }
             });
             ui.menu_button("Faixas", |ui| {
-                if item(ui, "Nova faixa", "", true) {
+                if item(ui, "Nova faixa mono", "", true) {
                     ui.close();
-                    let id = self.ed.add_track(Vec::new(), 0, None);
+                    let id = self.ed.add_track(vec![Vec::new()], 0, None);
+                    self.selected = vec![id];
+                }
+                if item(ui, "Nova faixa estéreo", "", true) {
+                    ui.close();
+                    let id = self.ed.add_track(vec![Vec::new(), Vec::new()], 0, None);
                     self.selected = vec![id];
                 }
                 if item(
@@ -1166,6 +1487,18 @@ impl VoiceApp {
                         let _ = self.ed.remove_track(id);
                     }
                     self.selected.clear();
+                }
+                if item(
+                    ui,
+                    "Tirar envelope das selecionadas",
+                    "",
+                    !self.selected.is_empty(),
+                ) {
+                    ui.close();
+                    self.ed.begin_change("Tirar envelope");
+                    for id in self.selected.clone() {
+                        self.ed.set_envelope(id, Vec::new());
+                    }
                 }
             });
             self.effects_menu(ui);
@@ -1186,21 +1519,22 @@ impl VoiceApp {
             if ui
                 .button(RichText::new("Melhorar voz (1 clique)").strong())
                 .on_hover_text(
-                    "Tira o ronco, abaixa o chiado nas pausas, comprime e ajusta o loudness",
+                    "Tira o ronco, abaixa o chiado nas pausas, comprime, ajusta o loudness e limita",
                 )
                 .clicked()
             {
                 ui.close();
                 let t = self.lufs_target;
-                self.apply_effect("Melhorar voz", |s| effects::enhance_voice(s, RATE, t));
+                self.apply_effect("Melhorar voz", |p| effects::enhance_voice(p, RATE, t));
             }
             ui.separator();
+            ui.label(RichText::new("Volume").weak().small());
             ui.horizontal(|ui| {
                 if ui.button("Normalizar loudness").clicked() {
                     ui.close();
                     let t = self.lufs_target;
-                    self.apply_effect("Normalizar loudness", |s| {
-                        effects::loudness(s, RATE, t);
+                    self.apply_effect("Normalizar loudness", |p| {
+                        effects::loudness(p, RATE, t);
                     });
                 }
                 ui.add(
@@ -1213,13 +1547,20 @@ impl VoiceApp {
             });
             if ui.button("Normalizar (pico −1 dB)").clicked() {
                 ui.close();
-                self.apply_effect("Normalizar", |s| effects::peak_normalize(s));
+                self.apply_effect("Normalizar", effects::peak_normalize);
             }
             if ui.button("Amplificar…").clicked() {
                 ui.close();
                 self.dialog = Some(Dialog::Gain(3.0));
             }
-            ui.separator();
+            if ui.button("Compressor…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Compressor(Compression::Medium));
+            }
+            if ui.button("Limitador…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Limiter(-1.0));
+            }
             let has_sel = self.sel.is_some();
             if ui
                 .add_enabled(has_sel, egui::Button::new("Fade in"))
@@ -1227,7 +1568,7 @@ impl VoiceApp {
                 .clicked()
             {
                 ui.close();
-                self.apply_effect("Fade in", |s| dsp::fade(s, true));
+                self.apply_effect("Fade in", |p| effects::each(p, |s| dsp::fade(s, true)));
             }
             if ui
                 .add_enabled(has_sel, egui::Button::new("Fade out"))
@@ -1235,21 +1576,24 @@ impl VoiceApp {
                 .clicked()
             {
                 ui.close();
-                self.apply_effect("Fade out", |s| dsp::fade(s, false));
+                self.apply_effect("Fade out", |p| effects::each(p, |s| dsp::fade(s, false)));
             }
             ui.separator();
-            if ui.button("Filtro passa-altas 80 Hz (tira ronco)").clicked() {
+            ui.label(RichText::new("Ruído e timbre").weak().small());
+            if ui.button("Redução de ruído…").clicked() {
                 ui.close();
-                self.apply_effect("Passa-altas", |s| dsp::high_pass(s, RATE, 80.0));
+                self.dialog = Some(Dialog::NoiseReduction {
+                    reduction: 12.0,
+                    sensitivity: 6.0,
+                });
             }
             if ui.button("Noise gate (chiado nas pausas)…").clicked() {
                 ui.close();
                 let floor = self
                     .target()
                     .and_then(|(tracks, a, b)| {
-                        tracks
-                            .first()
-                            .map(|t| dsp::noise_floor_db(&self.ed.render_range(*t, a, b), RATE))
+                        let p = self.ed.render_range(*tracks.first()?, a, b);
+                        p.first().map(|c| dsp::noise_floor_db(c, RATE))
                     })
                     .unwrap_or(-60.0);
                 self.dialog = Some(Dialog::Gate {
@@ -1257,17 +1601,31 @@ impl VoiceApp {
                     reduction: 18.0,
                 });
             }
-            if ui.button("Compressor…").clicked() {
+            if ui.button("Filtro passa-altas 80 Hz (tira ronco)").clicked() {
                 ui.close();
-                self.dialog = Some(Dialog::Compressor(Compression::Medium));
+                self.apply_effect("Passa-altas", |p| {
+                    effects::each(p, |s| dsp::high_pass(s, RATE, 80.0))
+                });
+            }
+            if ui.button("Graves e agudos…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::BassTreble {
+                    bass: 0.0,
+                    treble: 0.0,
+                });
             }
             ui.separator();
+            ui.label(RichText::new("Tempo").weak().small());
             if ui.button("Truncar silêncio…").clicked() {
                 ui.close();
                 self.dialog = Some(Dialog::Silences {
                     threshold: -40.0,
                     min: 0.6,
                 });
+            }
+            if ui.button("Inverter (de trás para frente)").clicked() {
+                ui.close();
+                self.apply_effect("Inverter", |p| effects::each(p, |s| s.reverse()));
             }
         });
     }
@@ -1292,6 +1650,26 @@ impl VoiceApp {
             Rect::from_center_size(rect.center(), vec2(18.0, 18.0)),
             icon,
             color,
+        );
+        resp.on_hover_text(tip).clicked()
+    }
+
+    /// Botão quadrado das ferramentas (mesma altura dos de edição).
+    fn tool_button(ui: &mut egui::Ui, icon: Icon, tip: &str, on: bool) -> bool {
+        let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 28.0), Sense::click());
+        let bg = if on {
+            theme::ACCENT.gamma_multiply(0.35)
+        } else if resp.hovered() {
+            theme::BAR_LIGHT.gamma_multiply(1.4)
+        } else {
+            theme::BAR_LIGHT
+        };
+        ui.painter().rect_filled(rect, 4.0, bg);
+        icons::paint(
+            ui.painter(),
+            Rect::from_center_size(rect.center(), vec2(16.0, 16.0)),
+            icon,
+            if on { theme::ACCENT } else { theme::TEXT },
         );
         resp.on_hover_text(tip).clicked()
     }
@@ -1344,16 +1722,36 @@ impl VoiceApp {
             if Self::big_button(ui, Icon::Loop, "Repetir (loop)", self.looping, theme::TEXT) {
                 self.looping = !self.looping;
             }
-            ui.add_space(10.0);
+            ui.add_space(8.0);
             let sep = |ui: &mut egui::Ui| {
                 let (r, _) = ui.allocate_exact_size(vec2(1.0, 30.0), Sense::hover());
                 ui.painter().rect_filled(r, 0.0, theme::BORDER);
             };
             sep(ui);
+            if Self::tool_button(
+                ui,
+                Icon::IBeam,
+                "Ferramenta de seleção (F1)",
+                self.tool == Tool::Select,
+            ) {
+                self.tool = Tool::Select;
+            }
+            if Self::tool_button(
+                ui,
+                Icon::Envelope,
+                "Ferramenta envelope (F2): clique cria ponto, arraste muda o volume, botão direito apaga",
+                self.tool == Tool::Envelope,
+            ) {
+                self.tool = Tool::Envelope;
+            }
+            sep(ui);
             let small = |ui: &mut egui::Ui, text: &str, tip: &str, enabled: bool| {
-                ui.add_enabled(enabled, egui::Button::new(text).min_size(vec2(30.0, 26.0)))
-                    .on_hover_text(tip)
-                    .clicked()
+                ui.add_enabled(
+                    enabled,
+                    egui::Button::new(text).min_size(vec2(30.0, 28.0)),
+                )
+                .on_hover_text(tip)
+                .clicked()
             };
             let has_sel = self.sel.is_some();
             if small(ui, "Recortar", "Recortar (Ctrl+X)", has_sel) {
@@ -1389,17 +1787,9 @@ impl VoiceApp {
                 self.redo();
             }
             sep(ui);
-            if icons::button(ui, Icon::Plus, 14.0, false, "Mais zoom (Ctrl+1)").clicked() {
-                let w = self.wave_width / 2.0;
-                self.zoom(2.0, w);
-            }
-            if icons::button(ui, Icon::Minus, 14.0, false, "Menos zoom (Ctrl+3)").clicked() {
-                let w = self.wave_width / 2.0;
-                self.zoom(0.5, w);
-            }
-            if icons::button(ui, Icon::Fit, 14.0, false, "Caber no projeto (Ctrl+F)").clicked() {
-                self.fit();
-            }
+            ui.menu_button("Configuração de áudio", |ui| self.audio_setup_menu(ui))
+                .response
+                .on_hover_text("Microfone, canais de gravação (mono/estéreo) e saída");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
                 self.meters(ui);
@@ -1407,65 +1797,106 @@ impl VoiceApp {
         });
     }
 
-    /// Medidores de gravação (vermelho) e reprodução (verde), com a escala em dB.
+    /// Medidores de gravação (vermelho) e reprodução (verde), cada um com L e R e escala em
+    /// dB. Clicar no do microfone liga/desliga o monitoramento.
     fn meters(&mut self, ui: &mut egui::Ui) {
-        let play_level = self.play_level();
-        let (rect, _) = ui.allocate_exact_size(vec2(330.0, 44.0), Sense::hover());
+        let play = self.play_levels();
+        let (rect, resp) = ui.allocate_exact_size(vec2(250.0, 50.0), Sense::click());
         let p = ui.painter();
-        let rows = [
-            ("Mic", self.recorder.level(), Color32::from_rgb(220, 70, 70)),
-            ("Saída", play_level, Color32::from_rgb(80, 200, 110)),
+        let monitoring = self.recorder.is_monitoring() || self.recorder.is_recording();
+        let label_w = 50.0;
+        let bar_left = rect.left() + label_w;
+        let bar_w = rect.right() - bar_left;
+        let bar_h = 7.0;
+        let groups = [
+            (
+                "Mic",
+                self.recorder.levels(),
+                Color32::from_rgb(220, 70, 70),
+                1.0,
+            ),
+            ("Saída", play, Color32::from_rgb(80, 200, 110), 20.0),
         ];
-        let bar_left = rect.left() + 40.0;
-        for (i, (label, level, color)) in rows.iter().enumerate() {
-            let y = rect.top() + 6.0 + i as f32 * 16.0;
-            let bar = Rect::from_min_max(pos2(bar_left, y), pos2(rect.right(), y + 11.0));
+        for (label, levels, color, top) in groups {
+            let y0 = rect.top() + top;
             p.text(
-                pos2(rect.left(), bar.center().y),
+                pos2(rect.left(), y0 + bar_h + 1.0),
                 Align2::LEFT_CENTER,
-                *label,
+                label,
                 theme::text(10.5),
                 theme::TEXT_DIM,
             );
-            p.rect_filled(bar, 2.0, theme::BG_DARK);
-            let db = 20.0 * level.max(1e-5).log10();
-            let frac = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-            let c = if db > -3.0 {
-                Color32::from_rgb(235, 60, 50)
-            } else if db > -12.0 {
-                Color32::from_rgb(235, 200, 70)
-            } else {
-                *color
-            };
-            p.rect_filled(
-                Rect::from_min_size(bar.min, vec2(bar.width() * frac, bar.height())),
-                2.0,
-                c,
-            );
+            for (c, level) in levels.iter().enumerate() {
+                let y = y0 + c as f32 * (bar_h + 2.0);
+                let bar = Rect::from_min_size(pos2(bar_left, y), vec2(bar_w, bar_h));
+                p.rect_filled(bar, 1.0, theme::BG_DARK);
+                let db = 20.0 * level.max(1e-5).log10();
+                let frac = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+                let col = if db > -1.0 {
+                    Color32::from_rgb(235, 60, 50)
+                } else if db > -9.0 {
+                    Color32::from_rgb(235, 200, 70)
+                } else {
+                    color
+                };
+                p.rect_filled(
+                    Rect::from_min_size(bar.min, vec2(bar_w * frac, bar_h)),
+                    1.0,
+                    col,
+                );
+                p.text(
+                    pos2(bar_left - 4.0, bar.center().y),
+                    Align2::RIGHT_CENTER,
+                    if c == 0 { "L" } else { "R" },
+                    theme::text(8.0),
+                    theme::TEXT_DIM,
+                );
+            }
         }
-        // Escala: −60 … 0 dB.
-        let w = rect.right() - bar_left;
-        for db in [-60, -48, -36, -24, -12, -6, 0] {
-            let x = bar_left + w * (db as f32 + 60.0) / 60.0;
+        if !monitoring {
             p.text(
-                pos2(x, rect.bottom() - 2.0),
-                Align2::CENTER_BOTTOM,
-                db.to_string(),
-                theme::text(8.5),
+                pos2(bar_left + bar_w / 2.0, rect.top() + 8.0),
+                Align2::CENTER_CENTER,
+                "clique para monitorar",
+                theme::text(9.0),
                 theme::TEXT_DIM,
             );
         }
+        for db in [-60, -42, -24, -12, -6, 0] {
+            let x = bar_left + bar_w * (db as f32 + 60.0) / 60.0;
+            p.text(
+                pos2(x, rect.bottom()),
+                Align2::CENTER_BOTTOM,
+                db.to_string(),
+                theme::text(8.0),
+                theme::TEXT_DIM,
+            );
+        }
+        if resp
+            .on_hover_text("Clique para ligar/desligar o monitoramento do microfone")
+            .clicked()
+        {
+            self.toggle_monitor();
+        }
     }
 
-    /// Pico da saída perto da posição que está tocando.
-    fn play_level(&self) -> f32 {
+    /// Pico da saída de cada lado perto da posição que está tocando.
+    fn play_levels(&self) -> [f32; 2] {
         let (Some(buf), true) = (&self.play_buf, self.is_playing()) else {
-            return 0.0;
+            return [0.0; 2];
         };
         let at = self.player.position() * 2;
         let w = (RATE as usize / 20) * 2;
-        buf.get(at.min(buf.len())..(at + w).min(buf.len()))
-            .map_or(0.0, |s| s.iter().fold(0.0f32, |m, v| m.max(v.abs())))
+        let s = buf
+            .get(at.min(buf.len())..(at + w).min(buf.len()))
+            .unwrap_or(&[]);
+        let side = |c: usize| {
+            s.iter()
+                .skip(c)
+                .step_by(2)
+                .fold(0.0f32, |m, v| m.max(v.abs()))
+        };
+        [side(0), side(1)]
     }
 
     // ---------------------------------------------------------------- faixas
@@ -1476,23 +1907,50 @@ impl VoiceApp {
         let fresh = self
             .cache
             .get(&id)
-            .is_some_and(|c| c.segments == t.segments);
+            .is_some_and(|c| c.segments == t.segments && c.channels == t.channels);
         if !fresh {
-            let segments = t.segments.clone();
-            let samples = self.ed.render(id);
-            let peaks = wave::peaks(&samples);
+            let (segments, channels) = (t.segments.clone(), t.channels);
+            let planar = self.ed.render(id);
+            let peaks: Vec<Vec<(f32, f32)>> = planar.iter().map(|c| wave::peaks(c)).collect();
             self.cache.insert(
                 id,
                 TrackCache {
                     segments,
-                    samples: Arc::new(samples),
-                    peaks,
+                    channels,
+                    audio: (Arc::new(planar), Arc::new(peaks)),
                 },
             );
         }
-        self.cache
-            .get(&id)
-            .map(|c| (c.samples.clone(), c.peaks.clone()))
+        self.cache.get(&id).map(|c| c.audio.clone())
+    }
+
+    /// Retângulos das faixas (altura conforme mono/estéreo), já com a rolagem.
+    fn rows(&self, lanes: Rect, left: f32, right: f32) -> Vec<(u64, Rect)> {
+        let mut y = lanes.top() - self.v_scroll;
+        self.ed
+            .session()
+            .tracks
+            .iter()
+            .map(|t| {
+                let h = track_h(t.channels);
+                let r = Rect::from_min_size(pos2(left, y), vec2(right - left, h));
+                y += h + TRACK_GAP;
+                (t.id, r)
+            })
+            .collect()
+    }
+
+    /// As faixas de cada canal dentro da área de onda (L em cima, R embaixo).
+    fn channel_lanes(inner: Rect, channels: usize) -> Vec<Rect> {
+        let h = inner.height() / channels.max(1) as f32;
+        (0..channels.max(1))
+            .map(|c| {
+                Rect::from_min_size(
+                    pos2(inner.left(), inner.top() + c as f32 * h),
+                    vec2(inner.width(), h),
+                )
+            })
+            .collect()
     }
 
     fn tracks_panel(&mut self, ui: &mut egui::Ui) {
@@ -1571,18 +2029,13 @@ impl VoiceApp {
 
         // ---- faixas
         let lanes = Rect::from_min_max(pos2(area.left(), ruler.bottom()), area.max);
-        type Row = (u64, String, f32, f32, bool, bool);
-        let tracks: Vec<Row> = self
-            .ed
-            .session()
-            .tracks
-            .iter()
-            .map(|t| (t.id, t.name.clone(), t.gain_db, t.pan, t.mute, t.solo))
-            .collect();
+        let rows = self.rows(lanes, area.left(), area.right());
         let rec_now = self.recorder.is_recording().then_some(self.rec).flatten();
         let new_rec_lane = rec_now.is_some_and(|r| r.track.is_none());
-        let rows = tracks.len() + usize::from(new_rec_lane);
-        let content_h = rows as f32 * (TRACK_H + TRACK_GAP);
+        let content_h = rows
+            .last()
+            .map_or(0.0, |(_, r)| r.bottom() - lanes.top() + self.v_scroll)
+            + if new_rec_lane { STEREO_H } else { 0.0 };
         // Roda: rola as faixas; Shift+roda: anda no tempo; Ctrl+roda: zoom.
         let pointer = ui.input(|i| i.pointer.hover_pos());
         if pointer.is_some_and(|p| lanes.contains(p)) {
@@ -1601,27 +2054,20 @@ impl VoiceApp {
                 }
             }
         }
-        let row_rect = |i: usize, me: &Self| {
-            let top = lanes.top() + i as f32 * (TRACK_H + TRACK_GAP) - me.v_scroll;
-            Rect::from_min_size(pos2(area.left(), top), vec2(area.width(), TRACK_H))
-        };
-        let n_tracks = tracks.len();
-        let row_at = |y: f32, me: &Self| -> Option<usize> {
-            let i = ((y - lanes.top() + me.v_scroll) / (TRACK_H + TRACK_GAP)).floor();
-            (i >= 0.0 && (i as usize) < n_tracks).then_some(i as usize)
+        let row_at = |y: f32| {
+            rows.iter()
+                .position(|(_, r)| y >= r.top() && y < r.bottom())
         };
         let lp = painter.with_clip_rect(lanes);
 
-        // Interação na área das formas de onda (selecionar, mover clipe).
+        // Interação na área das formas de onda.
         let wave_area = Rect::from_min_max(pos2(wave_left, lanes.top()), lanes.max);
         let resp = ui.interact(wave_area, ui.id().with("waves"), Sense::click_and_drag());
         let (cmd, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
-        // Clipe sob o ponteiro: (faixa, início, fim, no cabeçalho?).
-        let clip_under = |p: Pos2, me: &Self| -> Option<(u64, usize, usize, bool)> {
-            let i = row_at(p.y, me)?;
-            let id = tracks[i].0;
+        let clip_under = |p: Pos2, me: &Self| -> ClipHit {
+            let i = row_at(p.y)?;
+            let (id, r) = rows[i];
             let s = s_at(p.x, me) as usize;
-            let r = row_rect(i, me);
             me.ed
                 .session()
                 .track(id)?
@@ -1630,115 +2076,20 @@ impl VoiceApp {
                 .find(|(a, b)| s >= *a && s < *b)
                 .map(|(a, b)| (id, a, b, p.y < r.top() + CLIP_HEADER + 1.0))
         };
-        if let Some(p) = resp.hover_pos()
-            && self.drag.is_none()
-        {
-            ui.ctx().set_cursor_icon(match clip_under(p, self) {
-                Some((_, _, _, true)) => CursorIcon::Grab,
-                _ => CursorIcon::Text,
-            });
-        }
-        if resp.drag_started()
-            && let Some(p) = ui.input(|i| i.pointer.press_origin())
-        {
-            self.stop();
-            self.drag = Some(match clip_under(p, self) {
-                Some((id, a, b, true)) => Drag::Clip {
-                    track: id,
-                    a,
-                    b,
-                    grab: (s_at(p.x, self) as usize).saturating_sub(a),
-                },
-                _ => Drag::Select {
-                    anchor: s_at(p.x, self) as usize,
-                    row: row_at(p.y, self).unwrap_or(0),
-                },
-            });
-        }
-        let mut move_ghost: Option<(usize, usize, usize)> = None;
-        if resp.dragged()
-            && let Some(p) = resp.interact_pointer_pos()
-        {
-            match self.drag {
-                Some(Drag::Select { anchor, row }) => {
-                    let at = s_at(p.x, self) as usize;
-                    self.sel = (at != anchor).then(|| (anchor.min(at), anchor.max(at)));
-                    self.cursor = anchor.min(at);
-                    // Arrastar na vertical seleciona as faixas entre a de começo e a atual.
-                    if n_tracks > 0 {
-                        let now = row_at(p.y, self).unwrap_or(row);
-                        let (r0, r1) = (row.min(now), row.max(now).min(n_tracks - 1));
-                        self.selected = tracks[r0.min(r1)..=r1].iter().map(|t| t.0).collect();
-                    }
-                }
-                Some(Drag::Clip { a, b, grab, track }) => {
-                    let start = (s_at(p.x, self) as usize).saturating_sub(grab);
-                    let row = row_at(p.y, self)
-                        .unwrap_or_else(|| tracks.iter().position(|t| t.0 == track).unwrap_or(0));
-                    move_ghost = Some((row, start, b - a));
-                    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-                }
-                None => {}
-            }
-        }
-        if resp.drag_stopped() {
-            if let (Some(Drag::Clip { track, a, b, grab }), Some(p)) =
-                (self.drag, ui.input(|i| i.pointer.latest_pos()))
-            {
-                let start = (s_at(p.x, self) as usize).saturating_sub(grab);
-                let to = row_at(p.y, self).map_or(track, |r| tracks[r].0);
-                if (to, start) != (track, a) && self.ed.move_clip(track, a, b, to, start).is_ok() {
-                    self.selected = vec![to];
-                    self.sel = Some((start, start + (b - a)));
-                }
-            }
-            self.drag = None;
-        }
-        if resp.double_clicked()
-            && let Some(p) = resp.interact_pointer_pos()
-            && let Some((id, a, b, _)) = clip_under(p, self)
-        {
-            // Duplo clique seleciona o clipe inteiro.
-            self.selected = vec![id];
-            self.sel = Some((a, b));
-        } else if resp.clicked()
-            && let Some(p) = resp.interact_pointer_pos()
-        {
-            self.stop();
-            let at = s_at(p.x, self) as usize;
-            match row_at(p.y, self) {
-                Some(r) => {
-                    let id = tracks[r].0;
-                    if shift {
-                        // Shift+clique estende a seleção de tempo.
-                        let a = self.sel.map_or(self.cursor, |s| s.0);
-                        self.sel = Some((a.min(at), a.max(at)));
-                        if !self.selected.contains(&id) {
-                            self.selected.push(id);
-                        }
-                    } else if cmd {
-                        if !self.selected.contains(&id) {
-                            self.selected.push(id);
-                        }
-                    } else {
-                        self.selected = vec![id];
-                        self.sel = None;
-                        self.cursor = at;
-                    }
-                }
-                None => {
-                    self.select_none();
-                    self.cursor = at;
-                }
-            }
+        if self.tool == Tool::Envelope {
+            self.envelope_interaction(ui, &resp, &rows, wave_left);
+        } else {
+            self.select_interaction(ui, &resp, &rows, wave_left, (cmd, shift), &clip_under);
         }
 
         // Desenho de cada faixa.
-        for (i, (id, name, gain, pan, mute, solo)) in tracks.iter().enumerate() {
-            let r = row_rect(i, self);
+        for (id, r) in &rows {
             if r.bottom() < lanes.top() || r.top() > lanes.bottom() {
                 continue;
             }
+            let Some(track) = self.ed.session().track(*id).cloned() else {
+                continue;
+            };
             let selected = self.selected.contains(id);
             let wave = Rect::from_min_max(pos2(wave_left, r.top()), r.max);
             lp.rect_filled(
@@ -1750,11 +2101,10 @@ impl VoiceApp {
                     TRACK_BG
                 },
             );
-            let Some((samples, peaks)) = self.track_data(*id) else {
+            let Some((planar, peaks)) = self.track_data(*id) else {
                 continue;
             };
             let wp = lp.with_clip_rect(wave.intersect(lanes));
-            // Seleção de tempo nesta faixa.
             if selected && let Some((a, b)) = self.sel {
                 wp.rect_filled(
                     Rect::from_min_max(
@@ -1765,13 +2115,8 @@ impl VoiceApp {
                     Color32::from_white_alpha(28),
                 );
             }
-            let clips = self
-                .ed
-                .session()
-                .track(*id)
-                .map(|t| t.clips())
-                .unwrap_or_default();
-            for (ci, (a, b)) in clips.iter().enumerate() {
+            let has_env = !track.envelope.is_empty();
+            for (ci, (a, b)) in track.clips().iter().enumerate() {
                 let (x0, x1) = (x_of(*a as f64, self), x_of(*b as f64, self));
                 if x1 < wave.left() || x0 > wave.right() {
                     continue;
@@ -1781,6 +2126,7 @@ impl VoiceApp {
                 wp.rect_filled(body, 4.0, CLIP_BG);
                 let head =
                     Rect::from_min_max(body.min, pos2(body.right(), body.top() + CLIP_HEADER));
+                let clip_selected = self.clip_sel.contains(&(*id, *a, *b));
                 wp.rect_filled(
                     head,
                     CornerRadius {
@@ -1789,63 +2135,116 @@ impl VoiceApp {
                         sw: 0,
                         se: 0,
                     },
-                    CLIP_HEAD,
+                    if clip_selected {
+                        CLIP_HEAD_SEL
+                    } else {
+                        CLIP_HEAD
+                    },
                 );
                 wp.with_clip_rect(head.intersect(wave)).text(
                     head.left_center() + vec2(6.0, 0.0),
                     Align2::LEFT_CENTER,
-                    format!("{name} #{}", ci + 1),
+                    format!("{} #{}", track.name, ci + 1),
                     theme::text(10.5),
                     Color32::from_gray(220),
                 );
-                // Forma de onda.
                 let inner = Rect::from_min_max(pos2(body.left(), head.bottom()), body.max);
-                let mid = inner.center().y;
-                let half = inner.height() / 2.0 - 4.0;
-                wp.line_segment(
-                    [pos2(inner.left(), mid), pos2(inner.right(), mid)],
-                    Stroke::new(1.0, WAVE_BLUE.gamma_multiply(0.4)),
-                );
-                let mut x = x0.max(wave.left());
-                while x < x1.min(wave.right()) {
-                    let sa = s_at(x, self) as usize;
-                    let sb = (s_at(x + 1.0, self) as usize).max(sa + 1);
-                    let (lo, hi) = wave::range_minmax(&samples, &peaks, sa, sb);
-                    let in_sel = selected && self.sel.is_some_and(|(a, b)| sa >= a && sa < b);
+                for (c, lane) in Self::channel_lanes(inner, planar.len()).iter().enumerate() {
+                    let mid = lane.center().y;
+                    let half = lane.height() / 2.0 - 3.0;
+                    if c > 0 {
+                        wp.line_segment(
+                            [lane.left_top(), lane.right_top()],
+                            Stroke::new(1.0, theme::BORDER),
+                        );
+                    }
                     wp.line_segment(
-                        [
-                            pos2(x, mid - shape(hi) * half),
-                            pos2(x, mid - shape(lo) * half + 0.5),
-                        ],
-                        Stroke::new(1.0, if in_sel { WAVE_SEL } else { WAVE_BLUE }),
+                        [pos2(lane.left(), mid), pos2(lane.right(), mid)],
+                        Stroke::new(1.0, WAVE_BLUE.gamma_multiply(0.35)),
                     );
-                    x += 1.0;
+                    let mut x = x0.max(wave.left());
+                    while x < x1.min(wave.right()) {
+                        let sa = s_at(x, self) as usize;
+                        let sb = (s_at(x + 1.0, self) as usize).max(sa + 1);
+                        let (mut lo, mut hi) = wave::range_minmax(&planar[c], &peaks[c], sa, sb);
+                        if has_env {
+                            let e = track.env_at(sa);
+                            lo *= e;
+                            hi *= e;
+                        }
+                        let in_sel = selected && self.sel.is_some_and(|(a, b)| sa >= a && sa < b);
+                        wp.line_segment(
+                            [
+                                pos2(x, mid - shape(hi) * half),
+                                pos2(x, mid - shape(lo) * half + 0.5),
+                            ],
+                            Stroke::new(1.0, if in_sel { WAVE_SEL } else { WAVE_BLUE }),
+                        );
+                        x += 1.0;
+                    }
                 }
                 wp.rect_stroke(
                     body,
                     4.0,
-                    Stroke::new(1.0, theme::BORDER),
+                    Stroke::new(
+                        if clip_selected { 2.0 } else { 1.0 },
+                        if clip_selected {
+                            theme::ACCENT
+                        } else {
+                            theme::BORDER
+                        },
+                    ),
                     StrokeKind::Inside,
                 );
             }
-            // Gravando por cima desta faixa: o áudio novo aparece ao vivo.
+            // Envelope: linha (em cima e embaixo de cada canal) e os pontos.
+            if self.tool == Tool::Envelope || has_env {
+                let inner =
+                    Rect::from_min_max(pos2(wave.left(), wave.top() + CLIP_HEADER + 1.0), wave.max);
+                for lane in Self::channel_lanes(inner, planar.len()) {
+                    let mid = lane.center().y;
+                    let half = lane.height() / 2.0 - 3.0;
+                    let mut top = Vec::new();
+                    let mut bot = Vec::new();
+                    let mut x = wave.left();
+                    while x <= wave.right() {
+                        let e = track.env_at(s_at(x, self) as usize).min(1.0);
+                        top.push(pos2(x, mid - e * half));
+                        bot.push(pos2(x, mid + e * half));
+                        x += 3.0;
+                    }
+                    let alpha = if self.tool == Tool::Envelope {
+                        1.0
+                    } else {
+                        0.35
+                    };
+                    let st = Stroke::new(1.5, ENV_COLOR.gamma_multiply(alpha));
+                    wp.add(egui::Shape::line(top, st));
+                    wp.add(egui::Shape::line(bot, st));
+                    if self.tool == Tool::Envelope {
+                        for pnt in &track.envelope {
+                            let x = x_of(pnt.at as f64, self);
+                            let y = mid - pnt.value.min(1.0) * half;
+                            wp.circle_filled(pos2(x, y), 4.0, ENV_COLOR);
+                            wp.circle_stroke(pos2(x, y), 4.0, Stroke::new(1.0, Color32::BLACK));
+                        }
+                    }
+                }
+            }
             if let Some(rt) = rec_now.filter(|rt| rt.track == Some(*id)) {
                 self.paint_recording(&wp, wave, rt.at, wave_left);
             }
-            // Painel de controle da faixa.
-            self.track_controls(
-                ui,
-                r,
-                lanes,
-                *id,
-                name,
-                (*gain, *pan, *mute, *solo),
-                selected,
-            );
+            self.track_controls(ui, *r, lanes, &track, selected);
         }
         // Faixa nova sendo gravada.
         if new_rec_lane && let Some(rt) = rec_now {
-            let r = row_rect(tracks.len(), self);
+            let top = rows
+                .last()
+                .map_or(lanes.top() - self.v_scroll, |(_, r)| r.bottom() + TRACK_GAP);
+            let r = Rect::from_min_size(
+                pos2(area.left(), top),
+                vec2(area.width(), track_h(self.recorder.channels())),
+            );
             let wave = Rect::from_min_max(pos2(wave_left, r.top()), r.max);
             lp.rect_filled(wave, 0.0, TRACK_BG.gamma_multiply(1.25));
             lp.rect_filled(
@@ -1863,17 +2262,39 @@ impl VoiceApp {
             let wp = lp.with_clip_rect(wave.intersect(lanes));
             self.paint_recording(&wp, wave, rt.at, wave_left);
         }
-        // Fantasma do clipe sendo arrastado.
-        if let Some((row, start, len)) = move_ghost {
-            let r = row_rect(row, self);
-            let g = Rect::from_min_max(
-                pos2(x_of(start as f64, self), r.top() + 1.0),
-                pos2(x_of((start + len) as f64, self), r.bottom() - 1.0),
-            );
-            lp.rect_filled(g, 4.0, theme::ACCENT.gamma_multiply(0.2));
-            lp.rect_stroke(g, 4.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
+        // Fantasmas dos clipes sendo arrastados.
+        if let (
+            Some(Drag::Clips {
+                clips,
+                anchor,
+                grab,
+            }),
+            Some(p),
+        ) = (
+            &self.drag,
+            resp.interact_pointer_pos().filter(|_| resp.dragged()),
+        ) {
+            let first = clips.iter().map(|c| c.1).min().unwrap_or(0);
+            let delta =
+                (s_at(p.x, self) as isize - (*anchor + *grab) as isize).max(-(first as isize));
+            let single = clips.len() == 1;
+            for (id, a, b) in clips {
+                let r = if single {
+                    row_at(p.y).map(|i| rows[i].1)
+                } else {
+                    rows.iter().find(|(t, _)| t == id).map(|(_, r)| *r)
+                };
+                let Some(r) = r else { continue };
+                let s = (*a as isize + delta) as f64;
+                let g = Rect::from_min_max(
+                    pos2(x_of(s, self), r.top() + 1.0),
+                    pos2(x_of(s + (b - a) as f64, self), r.bottom() - 1.0),
+                );
+                lp.rect_filled(g, 4.0, theme::ACCENT.gamma_multiply(0.2));
+                lp.rect_stroke(g, 4.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
+            }
         }
-        if tracks.is_empty() && !new_rec_lane {
+        if rows.is_empty() && !new_rec_lane {
             lp.text(
                 wave_area.center(),
                 Align2::CENTER_CENTER,
@@ -1912,13 +2333,303 @@ impl VoiceApp {
         ui.advance_cursor_after_rect(area);
     }
 
+    /// Ferramenta de seleção: selecionar tempo/faixas, selecionar e arrastar clipes.
+    fn select_interaction(
+        &mut self,
+        ui: &egui::Ui,
+        resp: &egui::Response,
+        rows: &[(u64, Rect)],
+        wave_left: f32,
+        (cmd, shift): (bool, bool),
+        clip_under: &dyn Fn(Pos2, &Self) -> ClipHit,
+    ) {
+        let s_at = |x: f32, me: &Self| (me.view_start + (x - wave_left) as f64 * me.spp).max(0.0);
+        let row_at = |y: f32| {
+            rows.iter()
+                .position(|(_, r)| y >= r.top() && y < r.bottom())
+        };
+        if let Some(p) = resp.hover_pos()
+            && self.drag.is_none()
+        {
+            ui.ctx().set_cursor_icon(match clip_under(p, self) {
+                Some((_, _, _, true)) => CursorIcon::Grab,
+                _ => CursorIcon::Text,
+            });
+        }
+        if resp.drag_started()
+            && let Some(p) = ui.input(|i| i.pointer.press_origin())
+        {
+            self.stop();
+            let row = row_at(p.y).unwrap_or(0);
+            self.drag = Some(match clip_under(p, self) {
+                Some((id, a, b, true)) => {
+                    // Time Shift: arrasta os clipes selecionados juntos; se o clipe pego não
+                    // estava na seleção, só ele.
+                    if !self.clip_sel.contains(&(id, a, b)) {
+                        self.clip_sel = vec![(id, a, b)];
+                    }
+                    Drag::Clips {
+                        clips: self.clip_sel.clone(),
+                        anchor: a,
+                        grab: (s_at(p.x, self) as usize).saturating_sub(a),
+                    }
+                }
+                _ => Drag::Select {
+                    anchor: s_at(p.x, self) as usize,
+                    row,
+                },
+            });
+        }
+        if resp.dragged()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            match &self.drag {
+                Some(Drag::Select { anchor, row }) => {
+                    let (anchor, row) = (*anchor, *row);
+                    let at = s_at(p.x, self) as usize;
+                    self.sel = (at != anchor).then(|| (anchor.min(at), anchor.max(at)));
+                    self.cursor = anchor.min(at);
+                    self.clip_sel.clear();
+                    // Arrastar na vertical seleciona as faixas entre a de começo e a atual.
+                    if !rows.is_empty() {
+                        let now = row_at(p.y).unwrap_or(row);
+                        let (r0, r1) = (row.min(now), row.max(now).min(rows.len() - 1));
+                        self.selected = rows[r0.min(r1)..=r1].iter().map(|t| t.0).collect();
+                    }
+                }
+                Some(Drag::Clips { .. }) => ui.ctx().set_cursor_icon(CursorIcon::Grabbing),
+                _ => {}
+            }
+        }
+        if resp.drag_stopped() {
+            if let (
+                Some(Drag::Clips {
+                    clips,
+                    anchor,
+                    grab,
+                }),
+                Some(p),
+            ) = (self.drag.clone(), ui.input(|i| i.pointer.latest_pos()))
+            {
+                let first = clips.iter().map(|c| c.1).min().unwrap_or(0);
+                let delta =
+                    (s_at(p.x, self) as isize - (anchor + grab) as isize).max(-(first as isize));
+                if clips.len() == 1 {
+                    // Um clipe só: pode trocar de faixa.
+                    let (track, a, b) = clips[0];
+                    let to = row_at(p.y).map_or(track, |r| rows[r].0);
+                    let at = (a as isize + delta) as usize;
+                    if (to, at) != (track, a) && self.ed.move_clip(track, a, b, to, at).is_ok() {
+                        self.clip_sel = vec![(to, at, at + (b - a))];
+                        self.selected = vec![to];
+                        self.sel = Some((at, at + (b - a)));
+                    }
+                } else if delta != 0 && self.ed.move_clips(&clips, delta).is_ok() {
+                    self.clip_sel = clips
+                        .iter()
+                        .map(|(t, a, b)| {
+                            let s = (*a as isize + delta) as usize;
+                            (*t, s, s + (b - a))
+                        })
+                        .collect();
+                    if let Some((a, b)) = self.sel {
+                        let s = (a as isize + delta).max(0) as usize;
+                        self.sel = Some((s, s + (b - a)));
+                    }
+                }
+            }
+            self.drag = None;
+        }
+        if resp.clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            self.stop();
+            let at = s_at(p.x, self) as usize;
+            match (row_at(p.y), clip_under(p, self)) {
+                (Some(_), Some((id, a, b, true))) => {
+                    // Clique no cabeçalho seleciona o clipe (Ctrl/Shift soma).
+                    if cmd || shift {
+                        if let Some(i) = self.clip_sel.iter().position(|c| *c == (id, a, b)) {
+                            self.clip_sel.remove(i);
+                        } else {
+                            self.clip_sel.push((id, a, b));
+                        }
+                    } else {
+                        self.clip_sel = vec![(id, a, b)];
+                    }
+                    let mut tracks: Vec<u64> = self.clip_sel.iter().map(|c| c.0).collect();
+                    tracks.sort_unstable();
+                    tracks.dedup();
+                    self.selected = tracks;
+                    let lo = self.clip_sel.iter().map(|c| c.1).min();
+                    let hi = self.clip_sel.iter().map(|c| c.2).max();
+                    self.sel = lo.zip(hi);
+                }
+                (Some(r), _) => {
+                    let id = rows[r].0;
+                    self.clip_sel.clear();
+                    if shift {
+                        let a = self.sel.map_or(self.cursor, |s| s.0);
+                        self.sel = Some((a.min(at), a.max(at)));
+                        if !self.selected.contains(&id) {
+                            self.selected.push(id);
+                        }
+                    } else if cmd {
+                        if !self.selected.contains(&id) {
+                            self.selected.push(id);
+                        }
+                    } else {
+                        self.selected = vec![id];
+                        self.sel = None;
+                        self.cursor = at;
+                    }
+                }
+                (None, _) => {
+                    self.select_none();
+                    self.cursor = at;
+                }
+            }
+        }
+        if resp.double_clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+            && let Some((id, a, b, _)) = clip_under(p, self)
+        {
+            self.clip_sel = vec![(id, a, b)];
+            self.selected = vec![id];
+            self.sel = Some((a, b));
+        }
+    }
+
+    /// Ferramenta envelope: clique cria ponto, arrastar move, botão direito (ou arrastar para
+    /// fora da faixa) apaga.
+    fn envelope_interaction(
+        &mut self,
+        ui: &egui::Ui,
+        resp: &egui::Response,
+        rows: &[(u64, Rect)],
+        wave_left: f32,
+    ) {
+        let s_at = |x: f32, me: &Self| (me.view_start + (x - wave_left) as f64 * me.spp).max(0.0);
+        let x_of = |s: f64, me: &Self| wave_left + ((s - me.view_start) / me.spp) as f32;
+        let row_at = |y: f32| {
+            rows.iter()
+                .position(|(_, r)| y >= r.top() && y < r.bottom())
+        };
+        // Valor do envelope na altura `y` da faixa `r` (distância até o meio do canal).
+        let value_at = |y: f32, r: Rect, channels: usize| {
+            let inner = Rect::from_min_max(pos2(r.left(), r.top() + CLIP_HEADER + 1.0), r.max);
+            let lanes = Self::channel_lanes(inner, channels);
+            let lane = lanes
+                .iter()
+                .find(|l| y >= l.top() && y < l.bottom())
+                .or(lanes.last())
+                .copied()
+                .unwrap_or(inner);
+            ((y - lane.center().y).abs() / (lane.height() / 2.0 - 3.0)).clamp(0.0, 1.0)
+        };
+        let point_near = |p: Pos2, id: u64, me: &Self| -> Option<usize> {
+            me.ed
+                .session()
+                .track(id)?
+                .envelope
+                .iter()
+                .position(|e| (x_of(e.at as f64, me) - p.x).abs() <= 6.0)
+        };
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        }
+        if resp.secondary_clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+            && let Some(i) = row_at(p.y)
+            && let Some(k) = point_near(p, rows[i].0, self)
+        {
+            let id = rows[i].0;
+            let mut env = self
+                .ed
+                .session()
+                .track(id)
+                .map(|t| t.envelope.clone())
+                .unwrap_or_default();
+            env.remove(k);
+            self.ed.begin_change("Envelope");
+            self.ed.set_envelope(id, env);
+        }
+        if (resp.drag_started() || resp.clicked())
+            && let Some(p) = ui.input(|i| i.pointer.press_origin())
+            && let Some(i) = row_at(p.y)
+            && let Some(t) = self.ed.session().track(rows[i].0).cloned()
+        {
+            let (id, r) = rows[i];
+            self.ed.begin_change("Envelope");
+            let index = match point_near(p, id, self) {
+                Some(k) => k,
+                None => {
+                    // Primeiro ponto da faixa: cria também um em 1,0 no começo, para o resto da
+                    // faixa não mudar de volume de repente.
+                    let at = s_at(p.x, self) as usize;
+                    let mut env = t.envelope.clone();
+                    if env.is_empty() && at > 0 {
+                        env.push(EnvPoint { at: 0, value: 1.0 });
+                    }
+                    env.push(EnvPoint {
+                        at,
+                        value: value_at(p.y, r, t.channels as usize),
+                    });
+                    env.sort_by_key(|e| e.at);
+                    env.dedup_by_key(|e| e.at);
+                    let k = env.iter().position(|e| e.at == at).unwrap_or(0);
+                    self.ed.set_envelope(id, env);
+                    k
+                }
+            };
+            self.drag = Some(Drag::Envelope { track: id, index });
+        }
+        if resp.dragged()
+            && let (Some(Drag::Envelope { track, index }), Some(p)) =
+                (self.drag.clone(), resp.interact_pointer_pos())
+            && let Some(r) = rows.iter().find(|(t, _)| *t == track).map(|(_, r)| *r)
+            && let Some(t) = self.ed.session().track(track).cloned()
+            && index < t.envelope.len()
+        {
+            let mut env = t.envelope.clone();
+            if !r.expand(16.0).contains(p) {
+                // Arrastado para fora da faixa: o ponto some (como no Audacity).
+                env.remove(index);
+                self.ed.set_envelope(track, env);
+                self.drag = None;
+            } else {
+                let lo = index.checked_sub(1).map_or(0, |k| env[k].at + 1);
+                let hi = env
+                    .get(index + 1)
+                    .map_or(usize::MAX, |e| e.at.saturating_sub(1));
+                env[index].at = (s_at(p.x, self) as usize).clamp(lo, hi.max(lo));
+                env[index].value = value_at(p.y, r, t.channels as usize);
+                self.ed.set_envelope(track, env);
+            }
+        }
+        if resp.drag_stopped() {
+            self.drag = None;
+        }
+    }
+
     /// Forma de onda ao vivo do que está sendo gravado, começando em `at`.
     fn paint_recording(&mut self, painter: &egui::Painter, wave: Rect, at: usize, wave_left: f32) {
+        let ch = self.recorder.channels().max(1) as usize;
         let seen = self.rec_peaks.len() * wave::BUCKET;
+        // Picos dos canais juntos (o maior dos dois lados).
         let new: Vec<(f32, f32)> = self.recorder.with_buffer(|b| {
-            if b.len() > seen {
-                let whole = (b.len() - seen) / wave::BUCKET * wave::BUCKET;
-                wave::peaks(&b[seen..seen + whole])
+            let frames = b.len() / ch;
+            if frames > seen {
+                let whole = (frames - seen) / wave::BUCKET * wave::BUCKET;
+                let mono: Vec<f32> = (seen..seen + whole)
+                    .map(|i| {
+                        b[i * ch..i * ch + ch]
+                            .iter()
+                            .copied()
+                            .fold(0.0f32, |m, v| if v.abs() > m.abs() { v } else { m })
+                    })
+                    .collect();
+                wave::peaks(&mono)
             } else {
                 Vec::new()
             }
@@ -1953,24 +2664,26 @@ impl VoiceApp {
         painter.ctx().request_repaint();
     }
 
-    /// Painel de controle da faixa (nome, Mudo/Solo, ganho e pan), como o do Audacity.
-    #[allow(clippy::too_many_arguments)]
+    /// Painel de controle da faixa (nome, Mudo/Solo, ganho e pan), como o do Audacity, numa
+    /// grade fixa: rótulos numa coluna, controles noutra. Mexer numa faixa selecionada mexe
+    /// em todas as selecionadas.
     fn track_controls(
         &mut self,
         ui: &mut egui::Ui,
         r: Rect,
         lanes: Rect,
-        id: u64,
-        name: &str,
-        mix: (f32, f32, bool, bool),
+        track: &pawvoice_core::Track,
         selected: bool,
     ) {
+        const PAD: f32 = 8.0;
+        const LABEL_W: f32 = 44.0;
+        const ROW: f32 = 22.0;
+        let id = track.id;
         let tcp = Rect::from_min_max(r.min, pos2(r.left() + TCP_W - 1.0, r.bottom()));
         let visible = tcp.intersect(lanes);
         if visible.height() < 4.0 {
             return;
         }
-        // Fundo (clique seleciona a faixa; Ctrl/Shift soma ou tira).
         let bg = ui.interact(visible, ui.id().with(("tcp", id)), Sense::click());
         if bg.clicked() {
             if ui.input(|i| i.modifiers.command || i.modifiers.shift) {
@@ -2000,90 +2713,177 @@ impl VoiceApp {
                 theme::ACCENT,
             );
         }
-        let (gain, pan, mute, solo) = mix;
-        let (mut g, mut p, mut m, mut s) = mix;
+        let x0 = tcp.left() + PAD;
+        let x1 = tcp.right() - PAD;
+        let row = |i: usize| {
+            Rect::from_min_size(
+                pos2(x0, tcp.top() + 6.0 + i as f32 * (ROW + 4.0)),
+                vec2(x1 - x0, ROW),
+            )
+        };
+        let in_row = |ui: &mut egui::Ui, rect: Rect, add: &mut dyn FnMut(&mut egui::Ui)| {
+            ui.scope_builder(
+                UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                |ui| {
+                    ui.set_clip_rect(visible);
+                    add(ui)
+                },
+            );
+        };
+        let (gain, pan, mute, solo) = (track.gain_db, track.pan, track.mute, track.solo);
+        let (mut g, mut p, mut m, mut s) = (gain, pan, mute, solo);
         let mut remove = false;
-        ui.scope_builder(UiBuilder::new().max_rect(tcp.shrink(6.0)), |ui| {
-            ui.set_clip_rect(visible);
-            ui.spacing_mut().item_spacing.y = 4.0;
-            ui.horizontal(|ui| {
+        // Linha 1: × e nome.
+        in_row(ui, row(0), &mut |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if ui
+                .add(
+                    egui::Button::new("×")
+                        .frame(false)
+                        .min_size(vec2(16.0, ROW)),
+                )
+                .on_hover_text("Apagar a faixa")
+                .clicked()
+            {
+                remove = true;
+            }
+            if let Some((rid, text)) = &mut self.renaming
+                && *rid == id
+            {
+                let rr = ui.add(egui::TextEdit::singleline(text).desired_width(x1 - x0 - 24.0));
+                rr.request_focus();
+                if rr.lost_focus() {
+                    let (rid, text) = self.renaming.take().expect("renomeando");
+                    let _ = self.ed.rename_track(rid, text.trim().to_string());
+                }
+            } else {
+                let nr = ui
+                    .add(
+                        egui::Label::new(RichText::new(&track.name).strong().color(Color32::WHITE))
+                            .truncate()
+                            .sense(Sense::click()),
+                    )
+                    .on_hover_text("Duplo clique para renomear");
+                if nr.double_clicked() {
+                    self.renaming = Some((id, track.name.clone()));
+                }
+            }
+        });
+        // Linha 2: Mudo e Solo, metade cada.
+        in_row(ui, row(1), &mut |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let w = (x1 - x0 - 4.0) / 2.0;
+            let toggle = |ui: &mut egui::Ui, text: &str, on: &mut bool, color: Color32| {
                 if ui
-                    .add(egui::Button::new("×").small().frame(false))
-                    .on_hover_text("Apagar a faixa")
-                    .clicked()
-                {
-                    remove = true;
-                }
-                if let Some((rid, text)) = &mut self.renaming
-                    && *rid == id
-                {
-                    let rr = ui.add(egui::TextEdit::singleline(text).desired_width(130.0));
-                    rr.request_focus();
-                    if rr.lost_focus() {
-                        let (rid, text) = self.renaming.take().expect("renomeando");
-                        let _ = self.ed.rename_track(rid, text.trim().to_string());
-                    }
-                } else {
-                    let nr = ui
-                        .add(
-                            egui::Label::new(RichText::new(name).strong().color(Color32::WHITE))
-                                .truncate()
-                                .sense(Sense::click()),
-                        )
-                        .on_hover_text("Duplo clique para renomear");
-                    if nr.double_clicked() {
-                        self.renaming = Some((id, name.to_string()));
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                let toggle = |ui: &mut egui::Ui, text: &str, on: bool, color: Color32| {
-                    ui.add(
-                        egui::Button::new(RichText::new(text).color(if on {
+                    .add_sized(
+                        [w, ROW],
+                        egui::Button::new(RichText::new(text).color(if *on {
                             Color32::BLACK
                         } else {
                             theme::TEXT
                         }))
-                        .fill(if on { color } else { theme::BAR_LIGHT })
-                        .min_size(vec2(76.0, 22.0)),
+                        .fill(if *on { color } else { theme::BAR_LIGHT }),
                     )
                     .clicked()
-                };
-                if toggle(ui, "Mudo", m, Color32::from_rgb(230, 80, 70)) {
-                    m = !m;
+                {
+                    *on = !*on;
                 }
-                if toggle(ui, "Solo", s, Color32::from_rgb(235, 200, 70)) {
-                    s = !s;
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Ganho").small().color(theme::TEXT_DIM));
-                let r = ui
-                    .add(egui::Slider::new(&mut g, -36.0..=36.0).show_value(false))
-                    .on_hover_text(format!("{g:+.1} dB (duplo clique zera)"));
-                if r.double_clicked() {
-                    g = 0.0;
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Pan   ").small().color(theme::TEXT_DIM));
-                let side = if p.abs() < 0.01 {
-                    "centro".to_string()
-                } else if p < 0.0 {
-                    format!("{:.0}% esquerda", -p * 100.0)
-                } else {
-                    format!("{:.0}% direita", p * 100.0)
-                };
-                let r = ui
-                    .add(egui::Slider::new(&mut p, -1.0..=1.0).show_value(false))
-                    .on_hover_text(format!("{side} (duplo clique centraliza)"));
-                if r.double_clicked() {
-                    p = 0.0;
-                }
-            });
+            };
+            toggle(ui, "Mudo", &mut m, Color32::from_rgb(230, 80, 70));
+            toggle(ui, "Solo", &mut s, Color32::from_rgb(235, 200, 70));
         });
+        // Linhas 3 e 4: rótulo à esquerda (mesma coluna) e slider do mesmo tamanho.
+        let slider_row = |ui: &mut egui::Ui,
+                          rect: Rect,
+                          label: &str,
+                          value: &mut f32,
+                          range: std::ops::RangeInclusive<f32>,
+                          tip: String|
+         -> bool {
+            let mut reset = false;
+            ui.scope_builder(
+                UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                |ui| {
+                    ui.set_clip_rect(visible);
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    // Rótulo alinhado à esquerda numa coluna fixa (todos começam no mesmo x).
+                    let (lr, _) = ui.allocate_exact_size(vec2(LABEL_W, ROW), Sense::hover());
+                    ui.painter().text(
+                        lr.left_center(),
+                        Align2::LEFT_CENTER,
+                        label,
+                        theme::text(11.0),
+                        theme::TEXT_DIM,
+                    );
+                    ui.spacing_mut().slider_width = x1 - x0 - LABEL_W;
+                    let r = ui
+                        .add(egui::Slider::new(value, range).show_value(false))
+                        .on_hover_text(tip);
+                    reset = r.double_clicked();
+                },
+            );
+            reset
+        };
+        let gain_tip = format!("{g:+.1} dB · duplo clique zera");
+        if slider_row(ui, row(2), "Ganho", &mut g, -36.0..=36.0, gain_tip) {
+            g = 0.0;
+        }
+        let side = if p.abs() < 0.01 {
+            "centro".to_string()
+        } else if p < 0.0 {
+            format!("{:.0}% esquerda", -p * 100.0)
+        } else {
+            format!("{:.0}% direita", p * 100.0)
+        };
+        if slider_row(
+            ui,
+            row(3),
+            "Pan",
+            &mut p,
+            -1.0..=1.0,
+            format!("{side} · duplo clique centraliza"),
+        ) {
+            p = 0.0;
+        }
+        // Rodapé: formato da faixa, como o "Stereo, 44100Hz" do Audacity.
+        painter.text(
+            pos2(x0, tcp.bottom() - 6.0),
+            Align2::LEFT_BOTTOM,
+            format!(
+                "{}, {} Hz",
+                if track.channels >= 2 {
+                    "Estéreo"
+                } else {
+                    "Mono"
+                },
+                RATE
+            ),
+            theme::text(10.0),
+            theme::TEXT_DIM,
+        );
         if (g, p, m, s) != (gain, pan, mute, solo) {
-            self.ed.set_mix(id, g, p, m, s);
+            // Na seleção, vale para todas as faixas selecionadas.
+            let targets = if selected && self.selected.len() > 1 {
+                self.selected.clone()
+            } else {
+                vec![id]
+            };
+            for t in targets {
+                let Some(cur) = self.ed.session().track(t).cloned() else {
+                    continue;
+                };
+                self.ed.set_mix(
+                    t,
+                    if g != gain { g } else { cur.gain_db },
+                    if p != pan { p } else { cur.pan },
+                    if m != mute { m } else { cur.mute },
+                    if s != solo { s } else { cur.solo },
+                );
+            }
         }
         if remove {
             self.stop();
@@ -2162,10 +2962,23 @@ impl VoiceApp {
                 "Gravando."
             } else if self.is_playing() {
                 "Tocando."
+            } else if self.recorder.is_monitoring() {
+                "Monitorando o microfone."
             } else {
                 "Parado."
             };
             ui.label(RichText::new(state).small());
+            ui.add_space(16.0);
+            ui.label(
+                RichText::new(match self.tool {
+                    Tool::Select => "Seleção (F1)",
+                    Tool::Envelope => {
+                        "Envelope (F2): clique cria ponto · arraste muda · botão direito apaga"
+                    }
+                })
+                .small()
+                .color(theme::TEXT_DIM),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
                 if !self
@@ -2181,7 +2994,12 @@ impl VoiceApp {
                 }
                 ui.label(
                     RichText::new(format!(
-                        "{} faixa(s) · {}",
+                        "Gravação: {} · {} faixa(s) · {}",
+                        if self.recorder.channels() >= 2 {
+                            "estéreo"
+                        } else {
+                            "mono"
+                        },
                         self.ed.session().tracks.len(),
                         format_time(self.ed.session().len(), RATE)
                     ))
@@ -2270,14 +3088,19 @@ impl VoiceApp {
         };
         let mut apply = false;
         let mut close = false;
+        let mut capture = false;
         let title = match dialog {
             Dialog::Gain(_) => "Amplificar",
             Dialog::Gate { .. } => "Noise gate",
             Dialog::Compressor(_) => "Compressor",
             Dialog::Silences { .. } => "Truncar silêncio",
+            Dialog::NoiseReduction { .. } => "Redução de ruído",
+            Dialog::BassTreble { .. } => "Graves e agudos",
+            Dialog::Limiter(_) => "Limitador",
             Dialog::ConfirmClose => "Sair sem salvar?",
             Dialog::Recover(_) => "Recuperação automática",
         };
+        let noise_info = self.noise.as_ref().map(|(_, secs)| *secs);
         egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
@@ -2337,6 +3160,60 @@ impl VoiceApp {
                                 .suffix(" s"),
                         );
                     }
+                    Dialog::NoiseReduction {
+                        reduction,
+                        sensitivity,
+                    } => {
+                        ui.label(
+                            RichText::new(
+                                "Passo 1: selecione um trecho só de ruído (sem fala) e clique em Obter perfil.",
+                            )
+                            .weak(),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("Obter perfil de ruído").clicked() {
+                                capture = true;
+                            }
+                            ui.label(match noise_info {
+                                Some(s) => RichText::new(format!("perfil de {s:.1} s guardado"))
+                                    .color(Color32::from_rgb(120, 220, 120)),
+                                None => RichText::new("sem perfil ainda").weak(),
+                            });
+                        });
+                        ui.separator();
+                        ui.label(
+                            RichText::new(
+                                "Passo 2: selecione o que quer limpar (ou nada, para tudo) e aplique.",
+                            )
+                            .weak(),
+                        );
+                        ui.add(
+                            egui::Slider::new(reduction, 3.0..=40.0)
+                                .text("redução")
+                                .suffix(" dB"),
+                        );
+                        ui.add(
+                            egui::Slider::new(sensitivity, 0.0..=24.0)
+                                .text("sensibilidade")
+                                .suffix(" dB"),
+                        );
+                    }
+                    Dialog::BassTreble { bass, treble } => {
+                        ui.add(
+                            egui::Slider::new(bass, -15.0..=15.0)
+                                .text("graves (250 Hz)")
+                                .suffix(" dB"),
+                        );
+                        ui.add(
+                            egui::Slider::new(treble, -15.0..=15.0)
+                                .text("agudos (4 kHz)")
+                                .suffix(" dB"),
+                        );
+                    }
+                    Dialog::Limiter(db) => {
+                        ui.label(RichText::new("Nada passa deste nível.").weak());
+                        ui.add(egui::Slider::new(db, -12.0..=0.0).text("teto").suffix(" dB"));
+                    }
                     Dialog::ConfirmClose => {
                         ui.label("O projeto tem mudanças que não foram salvas.");
                     }
@@ -2355,7 +3232,12 @@ impl VoiceApp {
                         Dialog::Recover(_) => ("Recuperar", "Descartar"),
                         _ => ("Aplicar", "Cancelar"),
                     };
-                    if ui.button(RichText::new(ok).strong()).clicked() {
+                    let ready =
+                        !matches!(dialog, Dialog::NoiseReduction { .. }) || noise_info.is_some();
+                    if ui
+                        .add_enabled(ready, egui::Button::new(RichText::new(ok).strong()))
+                        .clicked()
+                    {
                         apply = true;
                     }
                     if ui.button(cancel).clicked() {
@@ -2363,6 +3245,9 @@ impl VoiceApp {
                     }
                 });
             });
+        if capture {
+            self.capture_noise_profile();
+        }
         if close {
             if let Some(Dialog::Recover(files)) = self.dialog.take() {
                 for f in files {
@@ -2375,27 +3260,46 @@ impl VoiceApp {
             return;
         }
         match self.dialog.take() {
-            Some(Dialog::Gain(db)) => self.apply_effect("Amplificar", |s| dsp::gain(s, db)),
+            Some(Dialog::Gain(db)) => {
+                self.apply_effect("Amplificar", |p| effects::each(p, |s| dsp::gain(s, db)))
+            }
             Some(Dialog::Gate {
                 threshold,
                 reduction,
-            }) => self.apply_effect("Noise gate", |s| {
-                dsp::noise_gate(s, RATE, threshold, reduction)
+            }) => self.apply_effect("Noise gate", |p| {
+                effects::each(p, |s| dsp::noise_gate(s, RATE, threshold, reduction))
             }),
             Some(Dialog::Compressor(c)) => {
-                self.apply_effect("Compressor", |s| effects::compress(s, RATE, c))
+                self.apply_effect("Compressor", |p| effects::compress(p, RATE, c))
             }
             Some(Dialog::Silences { threshold, min }) => self.remove_silences(threshold, min),
+            Some(Dialog::NoiseReduction {
+                reduction,
+                sensitivity,
+            }) => {
+                if let Some((prof, _)) = self.noise.clone() {
+                    self.apply_effect("Redução de ruído", |p| {
+                        effects::each(p, |s| dsp::reduce_noise(s, &prof, reduction, sensitivity))
+                    });
+                }
+            }
+            Some(Dialog::BassTreble { bass, treble }) => self
+                .apply_effect("Graves e agudos", |p| {
+                    effects::each(p, |s| dsp::bass_treble(s, RATE, bass, treble))
+                }),
+            Some(Dialog::Limiter(db)) => self.apply_effect("Limitador", |p| {
+                effects::each(p, |s| dsp::limit(s, RATE, db))
+            }),
             Some(Dialog::ConfirmClose) => {
                 self.allow_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Some(Dialog::Recover(files)) => {
                 for f in files {
-                    if let Ok(s) = read_raw_f32(&f)
-                        && !s.is_empty()
+                    if let Ok(p) = read_spill(&f)
+                        && p.first().is_some_and(|c| !c.is_empty())
                     {
-                        let id = self.ed.add_track(s, 0, Some("Recuperada".into()));
+                        let id = self.ed.add_track(p, 0, Some("Recuperada".into()));
                         self.selected = vec![id];
                     }
                     let _ = std::fs::remove_file(&f);
@@ -2461,7 +3365,7 @@ impl VoiceApp {
             .frame(bar(theme::BG_DARK))
             .show(ui, |ui| self.menu_bar(ui));
         egui::Panel::top("toolbar")
-            .exact_size(56.0)
+            .exact_size(58.0)
             .frame(bar(theme::BAR))
             .show(ui, |ui| self.toolbar(ui));
         egui::Panel::bottom("status")
@@ -2487,7 +3391,7 @@ impl VoiceApp {
         self.dialogs(&ctx);
         self.toasts.tick(&ctx);
         self.toasts.ui(&ctx);
-        if self.is_playing() || self.recorder.is_recording() {
+        if self.is_playing() || self.recorder.is_recording() || self.recorder.is_monitoring() {
             ctx.request_repaint();
         }
     }
@@ -2534,25 +3438,29 @@ mod tests {
 
     fn app_with(samples: Vec<f32>) -> (VoiceApp, u64) {
         let mut app = VoiceApp::empty();
-        let id = app.ed.add_track(samples, 0, None);
+        let id = app.ed.add_track(vec![samples], 0, None);
         app.selected = vec![id];
         (app, id)
+    }
+
+    fn mono(app: &VoiceApp, id: u64) -> Vec<f32> {
+        app.ed.render(id).remove(0)
     }
 
     #[test]
     fn effects_act_on_the_selection_or_everything() {
         let (mut app, id) = app_with(vec![0.1; 1000]);
         app.sel = Some((100, 200));
-        app.apply_effect("Ganho", |s| dsp::gain(s, 20.0));
-        let out = app.ed.render(id);
+        app.apply_effect("Ganho", |p| effects::each(p, |s| dsp::gain(s, 20.0)));
+        let out = mono(&app, id);
         assert!((out[150] - 1.0).abs() < 1e-4 && (out[50] - 0.1).abs() < 1e-6);
         app.select_none();
-        app.apply_effect("Ganho", |s| dsp::gain(s, -20.0));
-        assert!((app.ed.render(id)[50] - 0.01).abs() < 1e-6);
+        app.apply_effect("Ganho", |p| effects::each(p, |s| dsp::gain(s, -20.0)));
+        assert!((mono(&app, id)[50] - 0.01).abs() < 1e-6);
         app.selected = vec![id];
         app.sel = Some((0, 500));
         app.delete_selection();
-        assert_eq!(app.ed.render(id).len(), 500);
+        assert_eq!(mono(&app, id).len(), 500);
         assert_eq!(app.cursor, 0);
     }
 
@@ -2561,11 +3469,11 @@ mod tests {
         let (mut app, id) = app_with((1..=100).map(|i| i as f32).collect());
         app.sel = Some((10, 20));
         app.cut();
-        assert_eq!(app.ed.render(id).len(), 90);
+        assert_eq!(mono(&app, id).len(), 90);
         assert_eq!((app.cursor, app.sel), (10, None));
         app.cursor = 0;
         app.paste();
-        assert_eq!(app.ed.render(id)[0..2], [11.0, 12.0]);
+        assert_eq!(mono(&app, id)[0..2], [11.0, 12.0]);
         assert_eq!(app.sel, Some((0, 10)), "o que foi colado fica selecionado");
     }
 
@@ -2577,7 +3485,34 @@ mod tests {
         s.extend(tone);
         let (mut app, id) = app_with(s);
         app.remove_silences(-40.0, 0.6);
-        let secs = app.ed.render(id).len() as f32 / RATE as f32;
+        let secs = mono(&app, id).len() as f32 / RATE as f32;
         assert!((secs - 2.24).abs() < 0.1, "{secs}");
+    }
+
+    #[test]
+    fn zero_crossings_snap_the_selection() {
+        let s: Vec<f32> = (0..4800).map(|i| (i as f32 * 0.1).sin()).collect();
+        let (mut app, id) = app_with(s);
+        app.sel = Some((1000, 3000));
+        app.zero_crossings();
+        let (a, b) = app.sel.unwrap();
+        let p = mono(&app, id);
+        assert!(p[a].abs() < 0.1 && p[b].abs() < 0.1, "{} {}", p[a], p[b]);
+        assert!(a.abs_diff(1000) < 100 && b.abs_diff(3000) < 100);
+    }
+
+    #[test]
+    fn spill_files_are_read_with_their_channels() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("123-2ch.f32");
+        let data: Vec<u8> = [0.5f32, -0.5, 0.25, -0.25]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        std::fs::write(&f, data).unwrap();
+        assert_eq!(
+            read_spill(&f).unwrap(),
+            vec![vec![0.5, 0.25], vec![-0.5, -0.25]]
+        );
     }
 }

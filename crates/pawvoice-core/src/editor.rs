@@ -1,12 +1,13 @@
 //! Edição de uma sessão com desfazer/refazer, no estilo do Audacity: as operações agem num
-//! intervalo de tempo `[a, b)` das faixas selecionadas.
+//! intervalo de tempo `[a, b)` das faixas selecionadas. Tempos em quadros (um quadro = uma
+//! amostra de cada canal).
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use thiserror::Error;
 
-use crate::{SILENCE, Segment, Session, SourceId, Track};
+use crate::{EnvPoint, SILENCE, Segment, Session, SourceId, Track};
 
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum EditError {
@@ -18,14 +19,53 @@ pub enum EditError {
     EmptyClipboard,
 }
 
+/// Áudio imutável de uma fonte (intercalado).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Audio {
+    pub channels: u8,
+    pub data: Vec<f32>,
+}
+
+impl Audio {
+    pub fn frames(&self) -> usize {
+        self.data.len() / self.channels.max(1) as usize
+    }
+
+    /// De canais separados para intercalado.
+    pub fn from_planar(planar: &Planar) -> Self {
+        let channels = planar.len().max(1);
+        let frames = planar.iter().map(Vec::len).max().unwrap_or(0);
+        let mut data = Vec::with_capacity(frames * channels);
+        for i in 0..frames {
+            for ch in planar {
+                data.push(ch.get(i).copied().unwrap_or(0.0));
+            }
+        }
+        Self {
+            channels: channels as u8,
+            data,
+        }
+    }
+}
+
+/// Áudio em canais separados: `planar[canal][quadro]`.
+pub type Planar = Vec<Vec<f32>>;
+
+/// Uma faixa copiada: trechos, canais e o envelope (com tempos relativos ao início).
+#[derive(Clone)]
+struct Copied {
+    segments: Vec<Segment>,
+    channels: u8,
+    envelope: Vec<EnvPoint>,
+}
+
 /// Sessão + fontes de áudio + histórico + área de transferência.
 pub struct Editor {
     session: Session,
-    sources: BTreeMap<SourceId, Arc<Vec<f32>>>,
+    sources: BTreeMap<SourceId, Arc<Audio>>,
     undo: Vec<(Session, &'static str)>,
     redo: Vec<(Session, &'static str)>,
-    /// Um trecho por faixa copiada.
-    clipboard: Vec<Vec<Segment>>,
+    clipboard: Vec<Copied>,
     revision: u64,
     saved_revision: u64,
 }
@@ -109,8 +149,46 @@ fn insert(segs: &[Segment], at: usize, new: &[Segment]) -> Vec<Segment> {
     merge(out)
 }
 
+// ---- envelope acompanhando as edições
+
+/// Apagar `[a, b)` com ripple: os pontos de dentro somem e os de depois andam para trás.
+fn env_delete(env: &mut Vec<EnvPoint>, a: usize, b: usize) {
+    env.retain(|p| p.at < a || p.at >= b);
+    for p in env.iter_mut().filter(|p| p.at >= b) {
+        p.at -= b - a;
+    }
+}
+
+/// Inserir `len` em `at`: os pontos de depois andam para frente.
+fn env_insert(env: &mut [EnvPoint], at: usize, len: usize) {
+    for p in env.iter_mut().filter(|p| p.at >= at) {
+        p.at += len;
+    }
+}
+
+/// Pontos de `[a, b)`, com tempo relativo a `a`.
+fn env_take(env: &[EnvPoint], a: usize, b: usize) -> Vec<EnvPoint> {
+    env.iter()
+        .filter(|p| p.at >= a && p.at < b)
+        .map(|p| EnvPoint {
+            at: p.at - a,
+            value: p.value,
+        })
+        .collect()
+}
+
+/// Põe `pts` (relativos) a partir de `at`, trocando os que havia em `[at, at + len)`.
+fn env_put(env: &mut Vec<EnvPoint>, at: usize, len: usize, pts: &[EnvPoint]) {
+    env.retain(|p| p.at < at || p.at >= at + len);
+    env.extend(pts.iter().map(|p| EnvPoint {
+        at: p.at + at,
+        value: p.value,
+    }));
+    env.sort_by_key(|p| p.at);
+}
+
 impl Editor {
-    pub fn new(session: Session, sources: BTreeMap<SourceId, Arc<Vec<f32>>>) -> Self {
+    pub fn new(session: Session, sources: BTreeMap<SourceId, Arc<Audio>>) -> Self {
         Self {
             session,
             sources,
@@ -126,7 +204,7 @@ impl Editor {
         &self.session
     }
 
-    pub fn sources(&self) -> &BTreeMap<SourceId, Arc<Vec<f32>>> {
+    pub fn sources(&self) -> &BTreeMap<SourceId, Arc<Audio>> {
         &self.sources
     }
 
@@ -163,6 +241,11 @@ impl Editor {
         self.revision += 1;
     }
 
+    /// Marca um passo de desfazer antes de uma mudança contínua (arrastar envelope, mixer).
+    pub fn begin_change(&mut self, label: &'static str) {
+        self.checkpoint(label);
+    }
+
     pub fn undo(&mut self) -> bool {
         let Some((prev, label)) = self.undo.pop() else {
             return false;
@@ -194,7 +277,11 @@ impl Editor {
                 used.extend(t.segments.iter().map(|g| g.source));
             }
         }
-        used.extend(self.clipboard.iter().flatten().map(|g| g.source));
+        used.extend(
+            self.clipboard
+                .iter()
+                .flat_map(|c| c.segments.iter().map(|g| g.source)),
+        );
         self.sources.retain(|id, _| used.contains(id));
     }
 
@@ -216,22 +303,6 @@ impl Editor {
         Ok(())
     }
 
-    /// Aplica `f` nos trechos de cada faixa (um passo de desfazer).
-    fn edit_tracks(
-        &mut self,
-        tracks: &[u64],
-        label: &'static str,
-        mut f: impl FnMut(&[Segment]) -> Vec<Segment>,
-    ) -> Result<(), EditError> {
-        self.checkpoint(label);
-        for id in tracks {
-            let t = self.track_mut(*id)?;
-            t.segments = merge(f(&t.segments));
-        }
-        self.prune();
-        Ok(())
-    }
-
     pub fn set_script(&mut self, text: String) {
         // O roteiro não entra no desfazer (é texto livre, editado o tempo todo).
         if self.session.script != text {
@@ -240,10 +311,11 @@ impl Editor {
         }
     }
 
-    fn add_source(&mut self, samples: Vec<f32>) -> Segment {
+    fn add_source(&mut self, planar: &Planar) -> Segment {
         let source = self.session.fresh();
-        let len = samples.len();
-        self.sources.insert(source, Arc::new(samples));
+        let audio = Audio::from_planar(planar);
+        let len = audio.frames();
+        self.sources.insert(source, Arc::new(audio));
         Segment {
             source,
             start: 0,
@@ -251,26 +323,32 @@ impl Editor {
         }
     }
 
-    /// Faixa nova com `samples` começando em `at`. Devolve o id.
-    pub fn add_track(&mut self, samples: Vec<f32>, at: usize, name: Option<String>) -> u64 {
+    /// Faixa nova com `planar` (1 ou 2 canais) começando em `at`. Devolve o id.
+    pub fn add_track(&mut self, planar: Planar, at: usize, name: Option<String>) -> u64 {
         self.checkpoint("Nova faixa");
-        let seg = self.add_source(samples);
+        let channels = planar.len().clamp(1, 2) as u8;
+        let seg = self.add_source(&planar);
         let id = self.session.fresh();
         let n = self.session.tracks.len() + 1;
-        self.session.tracks.push(Track::new(
+        let mut t = Track::new(
             id,
             name.unwrap_or_else(|| format!("Áudio {n}")),
             merge(vec![Segment::silence(at), seg]),
-        ));
+        );
+        t.channels = channels;
+        self.session.tracks.push(t);
         id
     }
 
-    /// Grava `samples` por cima da faixa a partir de `at`.
-    pub fn write_at(&mut self, track: u64, at: usize, samples: Vec<f32>) -> Result<(), EditError> {
+    /// Grava `planar` por cima da faixa a partir de `at` (uma faixa mono vira estéreo se a
+    /// gravação for estéreo).
+    pub fn write_at(&mut self, track: u64, at: usize, planar: Planar) -> Result<(), EditError> {
         self.session.track(track).ok_or(EditError::NoTrack)?;
         self.checkpoint("Gravar");
-        let seg = self.add_source(samples);
+        let seg = self.add_source(&planar);
+        let ch = planar.len().clamp(1, 2) as u8;
         let t = self.track_mut(track)?;
+        t.channels = t.channels.max(ch);
         t.segments = overwrite(&t.segments, at, &[seg]);
         Ok(())
     }
@@ -306,10 +384,30 @@ impl Editor {
         }
     }
 
+    /// Troca o envelope da faixa (chame `begin_change` antes, uma vez por gesto).
+    pub fn set_envelope(&mut self, id: u64, mut points: Vec<EnvPoint>) {
+        points.sort_by_key(|p| p.at);
+        points.dedup_by_key(|p| p.at);
+        for p in &mut points {
+            p.value = p.value.clamp(0.0, 2.0);
+        }
+        if let Ok(t) = self.track_mut(id) {
+            t.envelope = points;
+            self.revision += 1;
+        }
+    }
+
     /// Delete: apaga e puxa o resto (em cada faixa).
     pub fn delete(&mut self, tracks: &[u64], a: usize, b: usize) -> Result<(), EditError> {
         self.check(tracks, a, b)?;
-        self.edit_tracks(tracks, "Apagar", |s| ripple_delete(s, a, b))
+        self.checkpoint("Apagar");
+        for id in tracks {
+            let t = self.track_mut(*id)?;
+            t.segments = ripple_delete(&t.segments, a, b);
+            env_delete(&mut t.envelope, a, b);
+        }
+        self.prune();
+        Ok(())
     }
 
     /// Apaga vários trechos de uma faixa num passo (ex.: silêncios). Devolve quanto saiu.
@@ -323,37 +421,45 @@ impl Editor {
         if ranges.is_empty() {
             return Err(EditError::EmptyRange);
         }
+        self.session.track(track).ok_or(EditError::NoTrack)?;
         ranges.sort();
-        let mut removed = 0;
-        self.edit_tracks(&[track], "Remover silêncios", |s| {
-            let mut cur = s.to_vec();
-            // Do fim para o começo: os índices do que falta não mudam.
-            for (a, b) in ranges.iter().rev() {
-                let before = total(&cur);
-                cur = ripple_delete(&cur, *a, *b);
-                removed += before - total(&cur);
-            }
-            cur
-        })?;
+        self.checkpoint("Truncar silêncio");
+        let t = self.track_mut(track)?;
+        let before = total(&t.segments);
+        // Do fim para o começo: os índices do que falta não mudam.
+        for (a, b) in ranges.iter().rev() {
+            t.segments = ripple_delete(&t.segments, *a, *b);
+            env_delete(&mut t.envelope, *a, *b);
+        }
+        let removed = before - total(&t.segments);
+        self.prune();
         Ok(removed)
     }
 
     /// Silenciar (Ctrl+L).
     pub fn silence(&mut self, tracks: &[u64], a: usize, b: usize) -> Result<(), EditError> {
         self.check(tracks, a, b)?;
-        self.edit_tracks(tracks, "Silenciar", |s| {
-            overwrite(s, a, &[Segment::silence(b - a)])
-        })
+        self.checkpoint("Silenciar");
+        for id in tracks {
+            let t = self.track_mut(*id)?;
+            t.segments = overwrite(&t.segments, a, &[Segment::silence(b - a)]);
+        }
+        self.prune();
+        Ok(())
     }
 
     /// Aparar (Ctrl+T): tudo fora de `[a, b)` vira silêncio; o que fica não muda de lugar.
     pub fn trim(&mut self, tracks: &[u64], a: usize, b: usize) -> Result<(), EditError> {
         self.check(tracks, a, b)?;
-        self.edit_tracks(tracks, "Aparar", |s| {
+        self.checkpoint("Aparar");
+        for id in tracks {
+            let t = self.track_mut(*id)?;
             let mut out = vec![Segment::silence(a)];
-            out.extend(slice(s, a, b));
-            out
-        })
+            out.extend(slice(&t.segments, a, b));
+            t.segments = merge(out);
+        }
+        self.prune();
+        Ok(())
     }
 
     pub fn copy(&mut self, tracks: &[u64], a: usize, b: usize) -> Result<(), EditError> {
@@ -361,15 +467,25 @@ impl Editor {
         self.clipboard = tracks
             .iter()
             .filter_map(|id| self.session.track(*id))
-            .map(|t| slice(&t.segments, a, b))
+            .map(|t| Copied {
+                segments: slice(&t.segments, a, b),
+                channels: t.channels,
+                envelope: env_take(&t.envelope, a, b),
+            })
             .collect();
         Ok(())
     }
 
     pub fn cut(&mut self, tracks: &[u64], a: usize, b: usize) -> Result<(), EditError> {
         self.copy(tracks, a, b)?;
-        self.check(tracks, a, b)?;
-        self.edit_tracks(tracks, "Recortar", |s| ripple_delete(s, a, b))
+        self.checkpoint("Recortar");
+        for id in tracks {
+            let t = self.track_mut(*id)?;
+            t.segments = ripple_delete(&t.segments, a, b);
+            env_delete(&mut t.envelope, a, b);
+        }
+        self.prune();
+        Ok(())
     }
 
     /// Cola em `at` (inserindo) a partir de `first`; faltando faixas, cria novas.
@@ -379,69 +495,80 @@ impl Editor {
             return Err(EditError::EmptyClipboard);
         }
         let clip = self.clipboard.clone();
-        let len = clip.iter().map(|c| total(c)).max().unwrap_or(0);
+        let len = clip.iter().map(|c| total(&c.segments)).max().unwrap_or(0);
         self.checkpoint("Colar");
         let start = first
             .and_then(|f| self.session.tracks.iter().position(|t| t.id == f))
             .unwrap_or(self.session.tracks.len());
         let mut targets = Vec::new();
-        for (i, segs) in clip.iter().enumerate() {
+        for (i, c) in clip.iter().enumerate() {
             let id = match self.session.tracks.get(start + i) {
                 Some(t) => t.id,
                 None => {
                     let id = self.session.fresh();
                     let n = self.session.tracks.len() + 1;
-                    self.session
-                        .tracks
-                        .push(Track::new(id, format!("Áudio {n}"), Vec::new()));
+                    let mut t = Track::new(id, format!("Áudio {n}"), Vec::new());
+                    t.channels = c.channels;
+                    self.session.tracks.push(t);
                     id
                 }
             };
             let t = self.track_mut(id)?;
-            t.segments = insert(&t.segments, at, segs);
+            let n = total(&c.segments);
+            t.segments = insert(&t.segments, at, &c.segments);
+            t.channels = t.channels.max(c.channels);
+            env_insert(&mut t.envelope, at, n);
+            env_put(&mut t.envelope, at, n, &c.envelope);
             targets.push(id);
         }
         Ok((targets, len))
     }
 
-    /// Duplicar (Ctrl+D): a seleção vai para faixas novas, no mesmo tempo.
-    pub fn duplicate(&mut self, tracks: &[u64], a: usize, b: usize) -> Result<Vec<u64>, EditError> {
+    /// Faixas novas com `[a, b)` de cada faixa, no mesmo tempo (`take` = tirar da original).
+    fn copy_to_new(
+        &mut self,
+        tracks: &[u64],
+        a: usize,
+        b: usize,
+        take: bool,
+        label: &'static str,
+    ) -> Result<Vec<u64>, EditError> {
         self.check(tracks, a, b)?;
-        self.checkpoint("Duplicar");
+        self.checkpoint(label);
         let mut new = Vec::new();
         for id in tracks {
-            let Some(t) = self.session.track(*id) else {
+            let Some(t) = self.session.track(*id).cloned() else {
                 continue;
             };
             let mut segs = vec![Segment::silence(a)];
             segs.extend(slice(&t.segments, a, b));
-            let name = format!("{} (cópia)", t.name);
             let nid = self.session.fresh();
-            self.session.tracks.push(Track::new(nid, name, merge(segs)));
+            let name = if take {
+                t.name.clone()
+            } else {
+                format!("{} (cópia)", t.name)
+            };
+            let mut nt = Track::new(nid, name, merge(segs));
+            nt.channels = t.channels;
+            env_put(&mut nt.envelope, a, b - a, &env_take(&t.envelope, a, b));
+            self.session.tracks.push(nt);
+            if take {
+                let src = self.track_mut(*id)?;
+                src.segments = overwrite(&src.segments, a, &[Segment::silence(b - a)]);
+            }
             new.push(nid);
         }
         Ok(new)
     }
 
+    /// Duplicar (Ctrl+D): a seleção vai para faixas novas, no mesmo tempo.
+    pub fn duplicate(&mut self, tracks: &[u64], a: usize, b: usize) -> Result<Vec<u64>, EditError> {
+        self.copy_to_new(tracks, a, b, false, "Duplicar")
+    }
+
     /// Separar em faixa nova: tira a seleção (deixa silêncio) e põe numa faixa nova.
     pub fn split_new(&mut self, tracks: &[u64], a: usize, b: usize) -> Result<Vec<u64>, EditError> {
-        self.check(tracks, a, b)?;
-        self.checkpoint("Separar em faixa nova");
-        let mut new = Vec::new();
-        for id in tracks {
-            let Some(t) = self.session.track(*id) else {
-                continue;
-            };
-            let mut segs = vec![Segment::silence(a)];
-            segs.extend(slice(&t.segments, a, b));
-            let name = t.name.clone();
-            let nid = self.session.fresh();
-            self.session.tracks.push(Track::new(nid, name, merge(segs)));
-            let t = self.track_mut(*id)?;
-            t.segments = overwrite(&t.segments, a, &[Segment::silence(b - a)]);
-            new.push(nid);
-        }
-        Ok(new)
+        self.copy_to_new(tracks, a, b, true, "Separar em faixa nova")
     }
 
     /// Arrasta o clipe `[a, b)` da faixa `from` para `at` na faixa `to` (sobrescrevendo lá).
@@ -454,28 +581,72 @@ impl Editor {
         at: usize,
     ) -> Result<(), EditError> {
         self.check(&[from, to], a, b)?;
-        let piece = slice(
-            &self.session.track(from).ok_or(EditError::NoTrack)?.segments,
-            a,
-            b,
-        );
+        let src = self.session.track(from).ok_or(EditError::NoTrack)?;
+        let piece = slice(&src.segments, a, b);
+        let env = env_take(&src.envelope, a, b);
+        let ch = src.channels;
         self.checkpoint("Mover clipe");
         let src = self.track_mut(from)?;
-        src.segments = merge(overwrite(&src.segments, a, &[Segment::silence(b - a)]));
+        src.segments = overwrite(&src.segments, a, &[Segment::silence(b - a)]);
+        src.envelope.retain(|p| p.at < a || p.at >= b);
         let dst = self.track_mut(to)?;
         dst.segments = overwrite(&dst.segments, at, &piece);
+        dst.channels = dst.channels.max(ch);
+        env_put(&mut dst.envelope, at, b - a, &env);
         Ok(())
     }
 
-    /// Efeito em `[a, b)` de cada faixa: o trecho é renderizado, processado e vira uma fonte
-    /// nova (do mesmo tamanho).
+    /// Time Shift de vários clipes juntos: cada `(faixa, início, fim)` anda `delta` quadros
+    /// (um passo de desfazer).
+    pub fn move_clips(
+        &mut self,
+        clips: &[(u64, usize, usize)],
+        delta: isize,
+    ) -> Result<(), EditError> {
+        if clips.is_empty() || delta == 0 {
+            return Err(EditError::EmptyRange);
+        }
+        let min = clips.iter().map(|c| c.1).min().unwrap_or(0) as isize;
+        let delta = delta.max(-min);
+        if delta == 0 {
+            return Err(EditError::EmptyRange);
+        }
+        let mut pieces = Vec::new();
+        for (id, a, b) in clips {
+            let t = self.session.track(*id).ok_or(EditError::NoTrack)?;
+            pieces.push((
+                *id,
+                *a,
+                *b,
+                slice(&t.segments, *a, *b),
+                env_take(&t.envelope, *a, *b),
+            ));
+        }
+        self.checkpoint("Mover clipes");
+        // Primeiro tira todos, depois põe todos (assim um não apaga o outro).
+        for (id, a, b, _, _) in &pieces {
+            let t = self.track_mut(*id)?;
+            t.segments = overwrite(&t.segments, *a, &[Segment::silence(b - a)]);
+            t.envelope.retain(|p| p.at < *a || p.at >= *b);
+        }
+        for (id, a, b, segs, env) in &pieces {
+            let at = (*a as isize + delta) as usize;
+            let t = self.track_mut(*id)?;
+            t.segments = overwrite(&t.segments, at, segs);
+            env_put(&mut t.envelope, at, b - a, env);
+        }
+        Ok(())
+    }
+
+    /// Efeito em `[a, b)` de cada faixa: o trecho é renderizado (canais separados),
+    /// processado e vira uma fonte nova (do mesmo tamanho).
     pub fn process(
         &mut self,
         tracks: &[u64],
         a: usize,
         b: usize,
         label: &'static str,
-        mut f: impl FnMut(&mut Vec<f32>),
+        mut f: impl FnMut(&mut [Vec<f32>]),
     ) -> Result<(), EditError> {
         self.check(tracks, a, b)?;
         let mut pieces = Vec::new();
@@ -485,17 +656,19 @@ impl Editor {
             if a >= end {
                 continue;
             }
-            let mut samples = self.render_segments(&slice(&t.segments, a, end));
-            f(&mut samples);
-            samples.resize(end - a, 0.0);
-            pieces.push((*id, end, samples));
+            let mut planar = self.render_segments(&slice(&t.segments, a, end), t.channels);
+            f(&mut planar);
+            for ch in &mut planar {
+                ch.resize(end - a, 0.0);
+            }
+            pieces.push((*id, planar));
         }
         if pieces.is_empty() {
             return Err(EditError::EmptyRange);
         }
         self.checkpoint(label);
-        for (id, _end, samples) in pieces {
-            let seg = self.add_source(samples);
+        for (id, planar) in pieces {
+            let seg = self.add_source(&planar);
             let t = self.track_mut(id)?;
             t.segments = overwrite(&t.segments, a, &[seg]);
         }
@@ -503,37 +676,56 @@ impl Editor {
         Ok(())
     }
 
-    fn render_segments(&self, segs: &[Segment]) -> Vec<f32> {
-        let mut out = Vec::with_capacity(total(segs));
+    /// Renderiza os trechos com `channels` canais (fonte mono vai para os dois lados;
+    /// estéreo numa faixa mono vira a média).
+    fn render_segments(&self, segs: &[Segment], channels: u8) -> Planar {
+        let channels = channels.max(1) as usize;
+        let n = total(segs);
+        let mut out = vec![Vec::with_capacity(n); channels];
         for s in segs {
             match self.sources.get(&s.source) {
                 Some(src) if s.source != SILENCE => {
-                    let (lo, hi) = (s.start.min(src.len()), s.end.min(src.len()));
-                    out.extend_from_slice(&src[lo..hi]);
-                    out.resize(out.len() + (s.len() - (hi - lo)), 0.0);
+                    let sc = src.channels.max(1) as usize;
+                    let frames = src.frames();
+                    for i in s.start..s.end {
+                        for (c, ch) in out.iter_mut().enumerate() {
+                            let v = if i >= frames {
+                                0.0
+                            } else if channels == 1 && sc > 1 {
+                                (src.data[i * sc] + src.data[i * sc + 1]) * 0.5
+                            } else {
+                                src.data[i * sc + c.min(sc - 1)]
+                            };
+                            ch.push(v);
+                        }
+                    }
                 }
-                _ => out.resize(out.len() + s.len(), 0.0),
+                _ => {
+                    for ch in &mut out {
+                        ch.resize(ch.len() + s.len(), 0.0);
+                    }
+                }
             }
         }
         out
     }
 
-    /// Áudio de uma faixa (sem ganho/pan).
-    pub fn render(&self, id: u64) -> Vec<f32> {
+    /// Áudio de uma faixa (sem ganho/pan/envelope), um vetor por canal.
+    pub fn render(&self, id: u64) -> Planar {
         self.session
             .track(id)
-            .map(|t| self.render_segments(&t.segments))
+            .map(|t| self.render_segments(&t.segments, t.channels))
             .unwrap_or_default()
     }
 
-    pub fn render_range(&self, id: u64, a: usize, b: usize) -> Vec<f32> {
+    pub fn render_range(&self, id: u64, a: usize, b: usize) -> Planar {
         match self.session.track(id) {
-            Some(t) if a < b => self.render_segments(&slice(&t.segments, a, b)),
+            Some(t) if a < b => self.render_segments(&slice(&t.segments, a, b), t.channels),
             _ => Vec::new(),
         }
     }
 
-    /// Mixagem estéreo intercalada de `[a, b)`: respeita mudo, solo, ganho e pan
+    /// Mixagem estéreo intercalada de `[a, b)`: respeita mudo, solo, ganho, pan e envelope
     /// (pan por balanço: o lado oposto abaixa, o centro fica igual).
     pub fn mix(&self, a: usize, b: usize) -> Vec<f32> {
         let n = b.saturating_sub(a);
@@ -545,9 +737,14 @@ impl Editor {
             }
             let g = 10f32.powf(t.gain_db / 20.0);
             let (gl, gr) = (g * (1.0 - t.pan).min(1.0), g * (1.0 + t.pan).min(1.0));
-            for (i, v) in self.render_range(t.id, a, b).iter().enumerate() {
-                out[2 * i] += v * gl;
-                out[2 * i + 1] += v * gr;
+            let planar = self.render_range(t.id, a, b);
+            let Some(left) = planar.first() else { continue };
+            let right = planar.get(1).unwrap_or(left);
+            let has_env = !t.envelope.is_empty();
+            for i in 0..left.len() {
+                let e = if has_env { t.env_at(a + i) } else { 1.0 };
+                out[2 * i] += left[i] * gl * e;
+                out[2 * i + 1] += right[i] * gr * e;
             }
         }
         for v in &mut out {
@@ -561,8 +758,12 @@ impl Editor {
 mod tests {
     use super::*;
 
-    fn ramp(n: usize) -> Vec<f32> {
-        (1..=n).map(|i| i as f32).collect()
+    fn ramp(n: usize) -> Planar {
+        vec![(1..=n).map(|i| i as f32).collect()]
+    }
+
+    fn mono(e: &Editor, id: u64) -> Vec<f32> {
+        e.render(id).into_iter().next().unwrap_or_default()
     }
 
     fn editor_with(n: usize) -> (Editor, u64) {
@@ -575,30 +776,51 @@ mod tests {
     fn delete_silence_trim_and_undo() {
         let (mut e, t) = editor_with(10);
         e.delete(&[t], 2, 5).unwrap();
-        assert_eq!(e.render(t), vec![1., 2., 6., 7., 8., 9., 10.]);
+        assert_eq!(mono(&e, t), vec![1., 2., 6., 7., 8., 9., 10.]);
         e.silence(&[t], 0, 2).unwrap();
-        assert_eq!(e.render(t), vec![0., 0., 6., 7., 8., 9., 10.]);
+        assert_eq!(mono(&e, t), vec![0., 0., 6., 7., 8., 9., 10.]);
         e.trim(&[t], 3, 5).unwrap();
-        assert_eq!(e.render(t), vec![0., 0., 0., 7., 8.]);
+        assert_eq!(mono(&e, t), vec![0., 0., 0., 7., 8.]);
         assert_eq!(e.undo_label(), Some("Aparar"));
         e.undo();
         e.undo();
         e.undo();
-        assert_eq!(e.render(t), ramp(10));
+        assert_eq!(mono(&e, t), ramp(10)[0]);
         e.redo();
-        assert_eq!(e.render(t).len(), 7);
+        assert_eq!(mono(&e, t).len(), 7);
         assert!(e.delete(&[t], 5, 5).is_err());
     }
 
     #[test]
     fn recording_into_a_new_track_or_over_an_old_one() {
         let (mut e, t) = editor_with(4);
-        let late = e.add_track(vec![9.0, 9.0], 3, None);
-        assert_eq!(e.render(late), vec![0., 0., 0., 9., 9.]);
+        let late = e.add_track(vec![vec![9.0, 9.0]], 3, None);
+        assert_eq!(mono(&e, late), vec![0., 0., 0., 9., 9.]);
         assert_eq!(e.session().track(late).unwrap().clips(), vec![(3, 5)]);
-        e.write_at(t, 2, vec![7.0, 7.0, 7.0]).unwrap();
-        assert_eq!(e.render(t), vec![1., 2., 7., 7., 7.]);
+        e.write_at(t, 2, vec![vec![7.0; 3]]).unwrap();
+        assert_eq!(mono(&e, t), vec![1., 2., 7., 7., 7.]);
         assert_eq!(e.session().len(), 5);
+    }
+
+    #[test]
+    fn stereo_tracks_keep_both_channels() {
+        let mut e = Editor::new(Session::new(48_000), BTreeMap::new());
+        let s = e.add_track(vec![vec![1.0, 2.0], vec![-1.0, -2.0]], 0, None);
+        assert_eq!(e.session().track(s).unwrap().channels, 2);
+        assert_eq!(e.render(s), vec![vec![1.0, 2.0], vec![-1.0, -2.0]]);
+        // Mixagem: esquerda e direita separadas.
+        assert_eq!(e.mix(0, 1), vec![1.0, -1.0]);
+        // Efeito por canal.
+        e.process(&[s], 0, 2, "Inverter", |p| {
+            for ch in p.iter_mut() {
+                ch.reverse();
+            }
+        })
+        .unwrap();
+        assert_eq!(e.render(s), vec![vec![2.0, 1.0], vec![-2.0, -1.0]]);
+        // Gravar mono por cima de estéreo vai para os dois lados.
+        e.write_at(s, 1, vec![vec![5.0]]).unwrap();
+        assert_eq!(e.render(s), vec![vec![2.0, 5.0], vec![-2.0, 5.0]]);
     }
 
     #[test]
@@ -606,44 +828,75 @@ mod tests {
         let (mut e, t) = editor_with(6);
         e.copy(&[t], 1, 3).unwrap();
         e.paste(Some(t), 0).unwrap();
-        assert_eq!(e.render(t), vec![2., 3., 1., 2., 3., 4., 5., 6.]);
+        assert_eq!(mono(&e, t), vec![2., 3., 1., 2., 3., 4., 5., 6.]);
         e.cut(&[t], 0, 2).unwrap();
-        assert_eq!(e.render(t), ramp(6));
-        // Colar com mais faixas copiadas do que existem cria faixas.
+        assert_eq!(mono(&e, t), ramp(6)[0]);
         let (targets, len) = e.paste(None, 2).unwrap();
         assert_eq!((targets.len(), len), (1, 2));
-        assert_eq!(e.render(targets[0]), vec![0., 0., 2., 3.]);
+        assert_eq!(mono(&e, targets[0]), vec![0., 0., 2., 3.]);
         let dup = e.duplicate(&[t], 4, 6).unwrap();
-        assert_eq!(e.render(dup[0]), vec![0., 0., 0., 0., 5., 6.]);
+        assert_eq!(mono(&e, dup[0]), vec![0., 0., 0., 0., 5., 6.]);
         let moved = e.split_new(&[t], 0, 2).unwrap();
-        assert_eq!(e.render(t), vec![0., 0., 3., 4., 5., 6.]);
-        assert_eq!(e.render(moved[0]), vec![1., 2.]);
+        assert_eq!(mono(&e, t), vec![0., 0., 3., 4., 5., 6.]);
+        assert_eq!(mono(&e, moved[0]), vec![1., 2.]);
     }
 
     #[test]
-    fn moving_a_clip_in_time_and_between_tracks() {
+    fn moving_one_or_many_clips() {
         let (mut e, t) = editor_with(4);
         e.move_clip(t, 0, 4, t, 3).unwrap();
-        assert_eq!(e.render(t), vec![0., 0., 0., 1., 2., 3., 4.]);
-        let other = e.add_track(vec![5.0], 0, None);
+        assert_eq!(mono(&e, t), vec![0., 0., 0., 1., 2., 3., 4.]);
+        let other = e.add_track(vec![vec![5.0]], 0, None);
         e.move_clip(t, 3, 7, other, 2).unwrap();
-        assert!(e.render(t).is_empty());
-        assert_eq!(e.render(other), vec![5., 0., 1., 2., 3., 4.]);
+        assert!(mono(&e, t).is_empty());
+        assert_eq!(mono(&e, other), vec![5., 0., 1., 2., 3., 4.]);
+        // Vários clipes juntos, em faixas diferentes: um passo de desfazer.
+        let third = e.add_track(vec![vec![8.0, 8.0]], 1, None);
+        e.move_clips(&[(other, 0, 1), (other, 2, 6), (third, 1, 3)], 2)
+            .unwrap();
+        assert_eq!(mono(&e, other), vec![0., 0., 5., 0., 1., 2., 3., 4.]);
+        assert_eq!(mono(&e, third), vec![0., 0., 0., 8., 8.]);
+        e.undo();
+        assert_eq!(mono(&e, third), vec![0., 8., 8.]);
+        // Não passa do começo.
+        e.move_clips(&[(third, 1, 3)], -10).unwrap();
+        assert_eq!(mono(&e, third), vec![8., 8.]);
+    }
+
+    #[test]
+    fn envelope_shapes_the_mix_and_follows_edits() {
+        let mut e = Editor::new(Session::new(48_000), BTreeMap::new());
+        let t = e.add_track(vec![vec![1.0; 10]], 0, None);
+        e.begin_change("Envelope");
+        e.set_envelope(
+            t,
+            vec![
+                EnvPoint { at: 0, value: 1.0 },
+                EnvPoint { at: 8, value: 0.0 },
+            ],
+        );
+        let m = e.mix(0, 10);
+        assert!((m[0] - 1.0).abs() < 1e-6 && m[16].abs() < 1e-6 && (m[8] - 0.5).abs() < 1e-6);
+        assert!(m[18].abs() < 1e-6, "depois do último ponto vale o último");
+        // Apagar antes do ponto puxa o ponto junto.
+        e.delete(&[t], 0, 2).unwrap();
+        assert_eq!(e.session().track(t).unwrap().envelope[0].at, 6);
+        e.undo();
+        e.undo();
+        assert!(e.session().track(t).unwrap().envelope.is_empty());
     }
 
     #[test]
     fn process_mix_and_prune() {
         let (mut e, t) = editor_with(6);
-        e.process(&[t], 2, 4, "Ganho", |s| {
-            s.iter_mut().for_each(|v| *v *= 10.0)
+        e.process(&[t], 2, 4, "Ganho", |p| {
+            p[0].iter_mut().for_each(|v| *v *= 10.0)
         })
         .unwrap();
-        assert_eq!(e.render(t), vec![1., 2., 30., 40., 5., 6.]);
-        let u = e.add_track(vec![0.25; 3], 0, None);
+        assert_eq!(mono(&e, t), vec![1., 2., 30., 40., 5., 6.]);
+        let u = e.add_track(vec![vec![0.25; 3]], 0, None);
         e.set_mix(u, 0.0, 1.0, false, false);
-        let m = e.mix(0, 2);
-        // faixa 1 (1,2) no centro + faixa 2 (0.25) só na direita; mixagem limitada a ±1.
-        assert_eq!(m, vec![1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(e.mix(0, 2), vec![1.0, 1.0, 1.0, 1.0]);
         e.set_mix(t, 0.0, 0.0, true, false);
         assert_eq!(e.mix(0, 1), vec![0.0, 0.25]);
         e.set_mix(u, 0.0, 1.0, false, true);
@@ -654,6 +907,6 @@ mod tests {
             "solo só toca a faixa com solo"
         );
         assert!(e.delete_many(t, &[(0, 1), (4, 5)]).unwrap() == 2);
-        assert_eq!(e.render(t), vec![2., 30., 40., 6.]);
+        assert_eq!(mono(&e, t), vec![2., 30., 40., 6.]);
     }
 }

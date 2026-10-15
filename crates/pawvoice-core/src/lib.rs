@@ -9,7 +9,7 @@ mod editor;
 mod file;
 mod wav;
 
-pub use editor::{EditError, Editor};
+pub use editor::{Audio, EditError, Editor, Planar};
 pub use file::{FileError, export_audio, load_session, save_session};
 pub use wav::{read_wav_f32, write_wav_f32};
 
@@ -45,11 +45,25 @@ impl Segment {
     }
 }
 
+/// Ponto do envelope de volume (ferramenta Envelope): ganho linear em `at` (0 = mudo,
+/// 1 = original, até 2 = +6 dB).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EnvPoint {
+    pub at: usize,
+    pub value: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub id: u64,
     pub name: String,
     pub segments: Vec<Segment>,
+    /// 1 = mono, 2 = estéreo.
+    #[serde(default = "one")]
+    pub channels: u8,
+    /// Envelope de volume (vazio = sem mudança). Pontos em ordem de tempo.
+    #[serde(default)]
+    pub envelope: Vec<EnvPoint>,
     #[serde(default)]
     pub gain_db: f32,
     /// −1 esquerda … 1 direita.
@@ -61,16 +75,43 @@ pub struct Track {
     pub solo: bool,
 }
 
+fn one() -> u8 {
+    1
+}
+
 impl Track {
     pub fn new(id: u64, name: String, segments: Vec<Segment>) -> Self {
         Self {
             id,
             name,
             segments,
+            channels: 1,
+            envelope: Vec::new(),
             gain_db: 0.0,
             pan: 0.0,
             mute: false,
             solo: false,
+        }
+    }
+
+    /// Ganho do envelope em `t` (linear entre os pontos; antes do primeiro e depois do último
+    /// vale o ponto da ponta, como no Audacity).
+    pub fn env_at(&self, t: usize) -> f32 {
+        let e = &self.envelope;
+        match e.len() {
+            0 => 1.0,
+            _ => {
+                let i = e.partition_point(|p| p.at <= t);
+                if i == 0 {
+                    e[0].value
+                } else if i == e.len() {
+                    e[i - 1].value
+                } else {
+                    let (a, b) = (e[i - 1], e[i]);
+                    let k = (t - a.at) as f32 / (b.at - a.at).max(1) as f32;
+                    a.value + (b.value - a.value) * k
+                }
+            }
         }
     }
 
@@ -101,7 +142,7 @@ impl Track {
     }
 }
 
-pub const SESSION_VERSION: u32 = 2;
+pub const SESSION_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {

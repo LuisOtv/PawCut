@@ -50,6 +50,11 @@ pub struct Player {
 
 impl Player {
     pub fn spawn(rate: u32, channels: u8) -> Self {
+        Self::spawn_on(rate, channels, None)
+    }
+
+    /// Como `spawn`, mas tocando na saída `device` (nome do PulseAudio; `None` = padrão).
+    pub fn spawn_on(rate: u32, channels: u8, device: Option<String>) -> Self {
         let state = Arc::new(Mutex::new(PlayState {
             buffer: None,
             start: 0,
@@ -80,7 +85,7 @@ impl Player {
                     None,
                     "Paw",
                     Direction::Playback,
-                    None,
+                    device.as_deref(),
                     "Reprodução",
                     &spec(rate, channels),
                     None,
@@ -192,9 +197,13 @@ impl Player {
 /// para não perder nada se o programa fechar no meio.
 pub struct Recorder {
     rate: u32,
+    channels: u8,
+    device: Option<String>,
     running: Arc<AtomicBool>,
+    /// Só monitorando (medidor), sem guardar o áudio.
+    monitor: Arc<AtomicBool>,
     buffer: Arc<Mutex<Vec<f32>>>,
-    level: Arc<AtomicU32>,
+    levels: Arc<[AtomicU32; 2]>,
     error: Arc<Mutex<Option<String>>>,
     handle: Option<JoinHandle<()>>,
 }
@@ -203,33 +212,95 @@ impl Recorder {
     pub fn new(rate: u32) -> Self {
         Self {
             rate,
+            channels: 1,
+            device: None,
             running: Arc::new(AtomicBool::new(false)),
+            monitor: Arc::new(AtomicBool::new(false)),
             buffer: Arc::new(Mutex::new(Vec::new())),
-            level: Arc::new(AtomicU32::new(0)),
+            levels: Arc::new([AtomicU32::new(0), AtomicU32::new(0)]),
             error: Arc::new(Mutex::new(None)),
             handle: None,
         }
     }
 
+    /// Canais (1 ou 2) e microfone (`None` = padrão) das próximas gravações.
+    pub fn configure(&mut self, channels: u8, device: Option<String>) {
+        let changed = (channels.clamp(1, 2), &device) != (self.channels, &self.device);
+        if changed {
+            let monitoring = self.is_monitoring();
+            self.stop_stream();
+            self.channels = channels.clamp(1, 2);
+            self.device = device;
+            if monitoring {
+                self.start_monitor();
+            }
+        }
+    }
+
+    pub fn channels(&self) -> u8 {
+        self.channels
+    }
+
+    /// Gravando de verdade (não só monitorando).
     pub fn is_recording(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
+        self.running.load(Ordering::SeqCst) && !self.monitor.load(Ordering::SeqCst)
+    }
+
+    pub fn is_monitoring(&self) -> bool {
+        self.running.load(Ordering::SeqCst) && self.monitor.load(Ordering::SeqCst)
+    }
+
+    /// Liga o medidor do microfone sem gravar (o "monitorar" do Audacity).
+    pub fn start_monitor(&mut self) {
+        if self.running.load(Ordering::SeqCst) {
+            return;
+        }
+        self.monitor.store(true, Ordering::SeqCst);
+        self.spawn(None);
+    }
+
+    pub fn stop_monitor(&mut self) {
+        if self.is_monitoring() {
+            self.stop_stream();
+        }
+    }
+
+    fn stop_stream(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+        for l in self.levels.iter() {
+            l.store(0f32.to_bits(), Ordering::Relaxed);
+        }
     }
 
     /// Começa a gravar. `spill`: arquivo f32 cru onde cada pedaço também é gravado.
+    /// Se estava monitorando, a gravação continua do mesmo fluxo (sem atraso).
     pub fn start(&mut self, spill: Option<PathBuf>) {
         if self.is_recording() {
             return;
         }
+        if self.is_monitoring() {
+            self.stop_stream();
+        }
+        self.monitor.store(false, Ordering::SeqCst);
+        self.spawn(spill);
+    }
+
+    fn spawn(&mut self, spill: Option<PathBuf>) {
         self.buffer.lock().expect("buffer").clear();
         *self.error.lock().expect("erro") = None;
         self.running.store(true, Ordering::SeqCst);
-        let (run, buf, lvl, err, rate) = (
+        let (run, buf, lvl, err, rate, mon) = (
             self.running.clone(),
             self.buffer.clone(),
-            self.level.clone(),
+            self.levels.clone(),
             self.error.clone(),
             self.rate,
+            self.monitor.clone(),
         );
+        let (channels, dev) = (self.channels, self.device.clone());
         self.handle = Some(
             thread::Builder::new()
                 .name("paw-record".into())
@@ -240,15 +311,15 @@ impl Recorder {
                         tlength: u32::MAX,
                         prebuf: u32::MAX,
                         minreq: u32::MAX,
-                        fragsize: bytes_for(10, rate, 1),
+                        fragsize: bytes_for(10, rate, channels),
                     };
                     let device = match Simple::new(
                         None,
                         "Paw",
                         Direction::Record,
-                        None,
+                        dev.as_deref(),
                         "Gravação",
-                        &spec(rate, 1),
+                        &spec(rate, channels),
                         None,
                         Some(&attr),
                     ) {
@@ -268,15 +339,25 @@ impl Recorder {
                             .iter()
                             .map(|b| f32::from_le_bytes(*b))
                             .collect();
-                        let peak = samples.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-                        let old = f32::from_bits(lvl.load(Ordering::Relaxed));
-                        lvl.store(peak.max(old * 0.85).to_bits(), Ordering::Relaxed);
+                        let ch = channels as usize;
+                        for (c, l) in lvl.iter().enumerate() {
+                            let peak = samples
+                                .iter()
+                                .skip(c.min(ch - 1))
+                                .step_by(ch)
+                                .fold(0.0f32, |m, v| m.max(v.abs()));
+                            let old = f32::from_bits(l.load(Ordering::Relaxed));
+                            l.store(peak.max(old * 0.85).to_bits(), Ordering::Relaxed);
+                        }
+                        if mon.load(Ordering::SeqCst) {
+                            return;
+                        }
                         if let Some(f) = file.as_mut() {
                             let _ = f.write_all(bytes);
                         }
                         buf.lock().expect("buffer").extend_from_slice(&samples);
                     };
-                    let mut bytes = vec![0u8; CHUNK * 4];
+                    let mut bytes = vec![0u8; CHUNK * 4 * channels as usize];
                     while run.load(Ordering::SeqCst) {
                         if let Err(e) = device.read(&mut bytes) {
                             *err.lock().expect("erro") = Some(format!("Erro ao gravar: {e}"));
@@ -291,8 +372,8 @@ impl Recorder {
                         .map(|l| (l.0 as u128 * rate as u128 / 1_000_000) as usize)
                         .unwrap_or(0)
                         .min(rate as usize / 2);
-                    if pending > 0 {
-                        let mut rest = vec![0u8; pending * 4];
+                    if pending > 0 && !mon.load(Ordering::SeqCst) {
+                        let mut rest = vec![0u8; pending * 4 * channels as usize];
                         if device.read(&mut rest).is_ok() {
                             take(&rest);
                         }
@@ -306,34 +387,37 @@ impl Recorder {
         );
     }
 
-    /// Para e devolve tudo que foi gravado.
-    pub fn stop(&mut self) -> Vec<f32> {
-        self.running.store(false, Ordering::SeqCst);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-        self.level.store(0f32.to_bits(), Ordering::Relaxed);
-        std::mem::take(&mut *self.buffer.lock().expect("buffer"))
+    /// Para e devolve o que foi gravado, um vetor por canal.
+    pub fn stop(&mut self) -> Vec<Vec<f32>> {
+        self.stop_stream();
+        let data = std::mem::take(&mut *self.buffer.lock().expect("buffer"));
+        let ch = self.channels.max(1) as usize;
+        (0..ch)
+            .map(|c| data.iter().skip(c).step_by(ch).copied().collect())
+            .collect()
     }
 
-    /// Quantas amostras já foram gravadas.
+    /// Quantos quadros já foram gravados.
     pub fn len(&self) -> usize {
-        self.buffer.lock().map_or(0, |b| b.len())
+        self.buffer.lock().map_or(0, |b| b.len()) / self.channels.max(1) as usize
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Lê o que já foi gravado (para desenhar a forma de onda ao vivo).
+    /// Lê o que já foi gravado, intercalado (para desenhar a forma de onda ao vivo).
     pub fn with_buffer<R>(&self, f: impl FnOnce(&[f32]) -> R) -> R {
         let b = self.buffer.lock().expect("buffer");
         f(&b)
     }
 
-    /// Pico recente do microfone (0..1), para o medidor.
-    pub fn level(&self) -> f32 {
-        f32::from_bits(self.level.load(Ordering::Relaxed))
+    /// Pico recente do microfone (0..1) de cada lado, para o medidor (mono: os dois iguais).
+    pub fn levels(&self) -> [f32; 2] {
+        [
+            f32::from_bits(self.levels[0].load(Ordering::Relaxed)),
+            f32::from_bits(self.levels[1].load(Ordering::Relaxed)),
+        ]
     }
 
     /// Erro da última gravação (microfone não abriu etc.).

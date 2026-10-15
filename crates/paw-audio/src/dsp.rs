@@ -417,3 +417,246 @@ mod mono_tests {
         assert!(s[0] < 0.01 && s[999] > 0.99);
     }
 }
+
+// ------------------------------------------------------------------------------------------
+// Redução de ruído (como a do Audacity): pega o "perfil" do ruído num trecho só de ruído e
+// abaixa, em cada faixa de frequência, o que não passa daquele nível.
+
+const NR_SIZE: usize = 2048;
+const NR_HOP: usize = NR_SIZE / 4;
+
+fn hann() -> Vec<f32> {
+    (0..NR_SIZE)
+        .map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / NR_SIZE as f32).cos())
+        .collect()
+}
+
+/// Potência média de cada faixa de frequência do ruído.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoiseProfile {
+    pub power: Vec<f32>,
+}
+
+/// Mede o ruído de um trecho (o ideal é ~1 s só de ruído, sem fala).
+pub fn noise_profile(s: &[f32]) -> Option<NoiseProfile> {
+    use rustfft::{FftPlanner, num_complex::Complex};
+    if s.len() < NR_SIZE {
+        return None;
+    }
+    let fft = FftPlanner::<f32>::new().plan_fft_forward(NR_SIZE);
+    let win = hann();
+    let mut power = vec![0.0f32; NR_SIZE / 2 + 1];
+    let mut frames = 0;
+    let mut buf = vec![Complex::new(0.0, 0.0); NR_SIZE];
+    let mut pos = 0;
+    while pos + NR_SIZE <= s.len() {
+        for i in 0..NR_SIZE {
+            buf[i] = Complex::new(s[pos + i] * win[i], 0.0);
+        }
+        fft.process(&mut buf);
+        for (k, p) in power.iter_mut().enumerate() {
+            *p += buf[k].norm_sqr();
+        }
+        frames += 1;
+        pos += NR_HOP;
+    }
+    for p in &mut power {
+        *p /= frames as f32;
+    }
+    Some(NoiseProfile { power })
+}
+
+/// Reduz o ruído: em cada faixa de frequência abaixo de `sensitivity_db` acima do perfil,
+/// abaixa `reduction_db`. As decisões são suavizadas entre frequências vizinhas e no tempo
+/// para não sobrar o "som de robô".
+pub fn reduce_noise(s: &mut [f32], profile: &NoiseProfile, reduction_db: f32, sensitivity_db: f32) {
+    use rustfft::{FftPlanner, num_complex::Complex};
+    let bins = NR_SIZE / 2 + 1;
+    if profile.power.len() != bins || s.is_empty() {
+        return;
+    }
+    let mut planner = FftPlanner::<f32>::new();
+    let fwd = planner.plan_fft_forward(NR_SIZE);
+    let inv = planner.plan_fft_inverse(NR_SIZE);
+    let win = hann();
+    let floor = 10f32.powf(-reduction_db.abs() / 20.0);
+    let thr: Vec<f32> = profile
+        .power
+        .iter()
+        .map(|p| p * 10f32.powf(sensitivity_db / 10.0))
+        .collect();
+    // Bordas com zeros para a janela cobrir o começo e o fim.
+    let pad = NR_SIZE;
+    let mut input = vec![0.0f32; s.len() + 2 * pad];
+    input[pad..pad + s.len()].copy_from_slice(s);
+    let mut out = vec![0.0f32; input.len()];
+    let mut buf = vec![Complex::new(0.0, 0.0); NR_SIZE];
+    let mut prev_gain = vec![1.0f32; bins];
+    let mut pos = 0;
+    while pos + NR_SIZE <= input.len() {
+        for i in 0..NR_SIZE {
+            buf[i] = Complex::new(input[pos + i] * win[i], 0.0);
+        }
+        fwd.process(&mut buf);
+        let mut gain: Vec<f32> = (0..bins)
+            .map(|k| {
+                if buf[k].norm_sqr() > thr[k] {
+                    1.0
+                } else {
+                    floor
+                }
+            })
+            .collect();
+        // Suaviza entre frequências vizinhas (±3 faixas).
+        let raw = gain.clone();
+        for (k, g) in gain.iter_mut().enumerate() {
+            let (a, b) = (k.saturating_sub(3), (k + 4).min(bins));
+            *g = raw[a..b].iter().sum::<f32>() / (b - a) as f32;
+        }
+        // No tempo: abre na hora, fecha devagar (evita picotar o fim das palavras).
+        for (g, p) in gain.iter_mut().zip(prev_gain.iter_mut()) {
+            *g = g.max(*p * 0.7).max(floor);
+            *p = *g;
+        }
+        for k in 0..bins {
+            buf[k] *= gain[k];
+            if k > 0 && k < NR_SIZE / 2 {
+                buf[NR_SIZE - k] *= gain[k];
+            }
+        }
+        inv.process(&mut buf);
+        for i in 0..NR_SIZE {
+            out[pos + i] += buf[i].re / NR_SIZE as f32 * win[i];
+        }
+        pos += NR_HOP;
+    }
+    // Janela de Hann na análise e na síntese com sobreposição de 75%: soma 1,5.
+    let n = s.len();
+    for (v, o) in s.iter_mut().zip(&out[pad..pad + n]) {
+        *v = o / 1.5;
+    }
+}
+
+/// Graves e agudos (shelf em 250 Hz e 4 kHz), em dB.
+pub fn bass_treble(s: &mut [f32], sample_rate: u32, bass_db: f32, treble_db: f32) {
+    use std::f64::consts::PI;
+    let shelf = |hz: f64, db: f32, low: bool| {
+        let a = 10f64.powf(db as f64 / 40.0);
+        let w0 = 2.0 * PI * hz / sample_rate as f64;
+        let (sin, cos) = w0.sin_cos();
+        let alpha = sin / 2.0 * std::f64::consts::SQRT_2;
+        let sq = 2.0 * a.sqrt() * alpha;
+        let (b0, b1, b2, a0, a1, a2) = if low {
+            (
+                a * ((a + 1.0) - (a - 1.0) * cos + sq),
+                2.0 * a * ((a - 1.0) - (a + 1.0) * cos),
+                a * ((a + 1.0) - (a - 1.0) * cos - sq),
+                (a + 1.0) + (a - 1.0) * cos + sq,
+                -2.0 * ((a - 1.0) + (a + 1.0) * cos),
+                (a + 1.0) + (a - 1.0) * cos - sq,
+            )
+        } else {
+            (
+                a * ((a + 1.0) + (a - 1.0) * cos + sq),
+                -2.0 * a * ((a - 1.0) + (a + 1.0) * cos),
+                a * ((a + 1.0) + (a - 1.0) * cos - sq),
+                (a + 1.0) - (a - 1.0) * cos + sq,
+                2.0 * ((a - 1.0) - (a + 1.0) * cos),
+                (a + 1.0) - (a - 1.0) * cos - sq,
+            )
+        };
+        Biquad {
+            b: [b0 / a0, b1 / a0, b2 / a0],
+            a: [a1 / a0, a2 / a0],
+            x: [0.0; 2],
+            y: [0.0; 2],
+        }
+    };
+    let (mut lo, mut hi) = (shelf(250.0, bass_db, true), shelf(4000.0, treble_db, false));
+    for v in s {
+        *v = hi.run(lo.run(*v as f64)) as f32;
+    }
+}
+
+/// Limitador: nada passa de `ceiling_db` (ganho cai na hora e volta devagar).
+pub fn limit(s: &mut [f32], sample_rate: u32, ceiling_db: f32) {
+    let ceiling = 10f32.powf(ceiling_db / 20.0);
+    let release = (-1.0 / (0.08 * sample_rate as f32)).exp();
+    let mut g = 1.0f32;
+    for v in s {
+        // O ganho volta devagar para 1, mas nunca deixa esta amostra passar do teto.
+        let need = if v.abs() > ceiling {
+            ceiling / v.abs()
+        } else {
+            1.0
+        };
+        g = (release * g + (1.0 - release)).min(need);
+        *v *= g;
+    }
+}
+
+#[cfg(test)]
+mod nr_tests {
+    use super::*;
+
+    const SR: f32 = 48_000.0;
+
+    /// Ruído branco determinístico.
+    fn noise(n: usize, amp: f32) -> Vec<f32> {
+        let mut x = 12345u32;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                (x as f32 / u32::MAX as f32 * 2.0 - 1.0) * amp
+            })
+            .collect()
+    }
+
+    fn rms(s: &[f32]) -> f32 {
+        (s.iter().map(|v| v * v).sum::<f32>() / s.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn noise_reduction_lowers_the_hiss_and_keeps_the_voice() {
+        let n = SR as usize * 2;
+        let hiss = noise(n, 0.02);
+        let profile = noise_profile(&hiss[..SR as usize / 2]).unwrap();
+        // Primeiro segundo: só chiado. Segundo: tom + chiado.
+        let mut s: Vec<f32> = (0..n)
+            .map(|i| {
+                let tone = if i >= SR as usize {
+                    0.3 * (std::f32::consts::TAU * 440.0 * i as f32 / SR).sin()
+                } else {
+                    0.0
+                };
+                tone + hiss[i]
+            })
+            .collect();
+        let before = rms(&s[2000..SR as usize - 2000]);
+        reduce_noise(&mut s, &profile, 24.0, 6.0);
+        let after = rms(&s[2000..SR as usize - 2000]);
+        assert!(
+            20.0 * (after / before).log10() < -15.0,
+            "chiado: {before} → {after}"
+        );
+        let voice = rms(&s[SR as usize + 4000..n - 4000]);
+        assert!(
+            (voice - 0.3 / 2f32.sqrt()).abs() < 0.03,
+            "voz preservada: {voice}"
+        );
+    }
+
+    #[test]
+    fn limiter_and_tone_controls() {
+        let mut s: Vec<f32> = (0..48_000).map(|i| (i as f32 * 0.05).sin()).collect();
+        limit(&mut s, 48_000, -6.0);
+        assert!(peak(&s) <= 10f32.powf(-6.0 / 20.0) + 1e-4);
+        let mut low: Vec<f32> = (0..48_000)
+            .map(|i| 0.1 * (std::f32::consts::TAU * 60.0 * i as f32 / SR).sin())
+            .collect();
+        bass_treble(&mut low, 48_000, 12.0, 0.0);
+        assert!(peak(&low[24_000..]) > 0.3, "graves +12 dB");
+    }
+}

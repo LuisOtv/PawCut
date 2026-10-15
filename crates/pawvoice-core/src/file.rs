@@ -50,7 +50,7 @@ pub fn save_session(editor: &Editor, path: &Path) -> Result<(), FileError> {
             && let Some(src) = editor.sources().get(id)
         {
             let tmp = dir.join(format!("{id}.wav.tmp"));
-            write_wav_f32(&tmp, src, rate)?;
+            write_wav_f32(&tmp, &src.data, rate, src.channels as u16)?;
             std::fs::rename(&tmp, &file)?;
         }
     }
@@ -86,8 +86,11 @@ pub fn load_session(path: &Path) -> Result<Editor, FileError> {
         .filter(|s| *s != SILENCE)
     {
         if let std::collections::btree_map::Entry::Vacant(e) = sources.entry(id) {
-            let (samples, _) = read_wav_f32(&dir.join(format!("{id}.wav")))?;
-            e.insert(Arc::new(samples));
+            let (data, _, channels) = read_wav_f32(&dir.join(format!("{id}.wav")))?;
+            e.insert(Arc::new(crate::Audio {
+                channels: channels as u8,
+                data,
+            }));
         }
     }
     let mut editor = Editor::new(session, sources);
@@ -152,9 +155,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("narracao.pawvoice");
         let mut e = Editor::new(Session::new(48_000), BTreeMap::new());
-        let t = e.add_track((0..100).map(|i| i as f32 / 100.0 + 0.01).collect(), 0, None);
-        e.process(&[t], 10, 20, "Ganho", |s| {
-            s.iter_mut().for_each(|v| *v *= 2.0)
+        let t = e.add_track(
+            vec![(0..100).map(|i| i as f32 / 100.0 + 0.01).collect(); 2],
+            0,
+            None,
+        );
+        e.process(&[t], 10, 20, "Ganho", |p| {
+            p.iter_mut().flatten().for_each(|v| *v *= 2.0)
         })
         .unwrap();
         e.set_script("Olá, pessoal!".into());
