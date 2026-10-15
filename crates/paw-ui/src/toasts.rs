@@ -9,6 +9,8 @@ use crate::theme;
 #[derive(Default)]
 pub struct Toasts {
     items: Vec<(String, bool, Instant)>,
+    /// Distância da borda de baixo (para não tapar uma barra fixa embaixo).
+    pub bottom_margin: f32,
 }
 
 impl Toasts {
@@ -40,7 +42,7 @@ impl Toasts {
     /// Desenha por cima de tudo; clicar num aviso fecha.
     pub fn ui(&mut self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
-        let mut y = screen.bottom() - 16.0;
+        let mut y = screen.bottom() - 16.0 - self.bottom_margin;
         let mut close = None;
         for (i, (text, error, born)) in self.items.iter().enumerate().rev() {
             let age = born.elapsed().as_secs_f32();

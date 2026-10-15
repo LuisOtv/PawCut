@@ -1,3 +1,48 @@
+# PawSuite
+
+Apps próprios, em Rust, para criar vídeos do YouTube sem depender de programas de outras
+empresas. Todos usam a mesma interface escura (no estilo do DaVinci Resolve) e as mesmas
+bibliotecas:
+
+| App | Para quê | Estado |
+|---|---|---|
+| **PawCut** | editor de vídeo | pronto |
+| **PawVoice** | gravar e editar narração | primeira versão |
+| PawWrite | roteiros (no lugar do Word) | planejado |
+| PawPaint | thumbnails (no lugar do Krita) | planejado |
+
+```bash
+scripts/install.sh            # compila e instala todos (menu de aplicativos + ~/.local/bin)
+scripts/install.sh pawvoice   # só um
+```
+
+Bibliotecas compartilhadas em `crates/`:
+- `paw-ui`: tema, ícones, avisos e backups;
+- `paw-audio`: loudness, filtros, gate, compressor, tocar e gravar;
+- `paw-media`: ffmpeg.
+
+## PawVoice
+
+- **Gravar:** R grava e para. A forma de onda aparece ao vivo, com medidor do microfone.
+  Enquanto grava, o áudio vai sendo salvo no disco: se o app fechar no meio, ele oferece recuperar.
+- **Tomadas:** cada gravação vira uma tomada na lista da esquerda. Dá para renomear, duplicar,
+  dividir no cursor (Ctrl+I), exportar ou apagar. Arraste áudios para a janela para importar.
+- **Editar:**
+  - arraste para selecionar; Delete apaga, Ctrl+L silencia, Ctrl+T fica só com a seleção;
+  - desfazer e refazer mostram o nome da ação;
+  - a edição não estraga o original: os cortes só mudam a lista de trechos.
+- **Efeitos** (na seleção ou na tomada inteira):
+  - **Melhorar voz (1 clique)**: passa-altas, gate, compressor e loudness;
+  - normalizar loudness (LUFS) ou pico;
+  - ganho, fades, passa-altas, noise gate, compressor e remover silêncios.
+- **Roteiro e teleprompter:** cole ou abra um `.txt/.md`. No modo teleprompter a letra fica
+  grande e rola sozinha enquanto você grava, na velocidade escolhida (palavras por minuto).
+- **Salvar e exportar:**
+  - a sessão fica em `nome.pawvoice`, com os áudios em `nome.pawvoice-audio/` (WAV);
+  - cada tomada exporta em WAV 24 bits ou MP3, e dá para exportar todas de uma vez para uma pasta.
+
+---
+
 # PawCut
 
 Editor de vídeo simples para Linux, com a cara da página **Edit do DaVinci Resolve**.

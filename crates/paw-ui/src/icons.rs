@@ -36,6 +36,7 @@ pub enum Icon {
     Skim,
     Trim,
     Loop,
+    Record,
 }
 
 fn p(r: Rect, x: f32, y: f32) -> Pos2 {
@@ -47,6 +48,9 @@ pub fn paint(painter: &Painter, r: Rect, icon: Icon, c: Color32) {
     let s = Stroke::new((r.width() / 11.0).max(1.2), c);
     let poly = |pts: Vec<Pos2>| Shape::convex_polygon(pts, c, Stroke::NONE);
     match icon {
+        Icon::Record => {
+            painter.circle_filled(r.center(), r.width() * 0.32, c);
+        }
         Icon::Loop => {
             // Seta em volta: um retângulo arredondado aberto com a ponta da seta.
             let pts: Vec<Pos2> = (0..=24)

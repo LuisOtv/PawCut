@@ -2716,6 +2716,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "pawvoice-app"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "egui_kittest",
+ "image",
+ "paw-audio",
+ "paw-media",
+ "paw-ui",
+ "pawvoice-core",
+ "rfd",
+ "tempfile",
+ "winit",
+]
+
+[[package]]
+name = "pawvoice-core"
+version = "0.1.0"
+dependencies = [
+ "paw-audio",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "peniko"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
