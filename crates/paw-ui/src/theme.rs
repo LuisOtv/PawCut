@@ -10,7 +10,8 @@ pub const BAR: Color32 = Color32::from_rgb(0x27, 0x27, 0x2b);
 pub const BAR_LIGHT: Color32 = Color32::from_rgb(0x30, 0x30, 0x35);
 pub const BORDER: Color32 = Color32::from_rgb(0x0f, 0x0f, 0x11);
 pub const TEXT: Color32 = Color32::from_rgb(0xc8, 0xc8, 0xcc);
-pub const TEXT_DIM: Color32 = Color32::from_rgb(0x80, 0x80, 0x88);
+/// Texto secundário: ≥ 4,5:1 sobre BG e BAR (o cinza anterior ficava em ~4,2:1).
+pub const TEXT_DIM: Color32 = Color32::from_rgb(0x8e, 0x8e, 0x96);
 pub const ACCENT: Color32 = Color32::from_rgb(0xe8, 0x6a, 0x35);
 pub const PLAYHEAD: Color32 = Color32::from_rgb(0xe8, 0x45, 0x40);
 pub const TIMECODE: Color32 = Color32::from_rgb(0xf0, 0x7a, 0x4a);

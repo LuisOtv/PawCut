@@ -463,6 +463,20 @@ impl Workspace {
         let painter = ui.painter_at(area);
         painter.rect_filled(area, 0.0, theme::BG_DARK);
 
+        if p.video_tracks
+            .iter()
+            .chain(&p.audio_tracks)
+            .all(|t| t.clips.is_empty())
+        {
+            painter.text(
+                pos2(layout.left + 24.0, area.top() + RULER_H + content_h + 16.0),
+                Align2::LEFT_TOP,
+                "Arraste mídia do Media Pool para cá",
+                theme::text(12.0),
+                theme::TEXT_DIM,
+            );
+        }
+
         // Mantém o cursor visível enquanto toca.
         if self.playback.is_playing() {
             let px = self.x_of(self.st.playhead as f32, layout.left);
@@ -1186,7 +1200,7 @@ impl Workspace {
                 Stroke::new(1.0, theme::TEXT_DIM),
             );
             ruler_painter.text(
-                pos2(x + 4.0, ruler.top() + 4.0),
+                pos2(x + 7.0, ruler.top() + 4.0),
                 Align2::LEFT_TOP,
                 format_timecode(f, fps),
                 theme::mono(10.0),

@@ -1905,7 +1905,7 @@ impl VoiceApp {
                 pos2(x, rect.bottom()),
                 Align2::CENTER_BOTTOM,
                 db.to_string(),
-                theme::text(8.0),
+                theme::text(9.0),
                 theme::TEXT_DIM,
             );
         }
