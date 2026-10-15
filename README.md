@@ -23,23 +23,33 @@ Bibliotecas compartilhadas em `crates/`:
 
 ## PawVoice
 
-- **Gravar:** R grava e para. A forma de onda aparece ao vivo, com medidor do microfone.
-  Enquanto grava, o áudio vai sendo salvo no disco: se o app fechar no meio, ele oferece recuperar.
-- **Tomadas:** cada gravação vira uma tomada na lista da esquerda. Dá para renomear, duplicar,
-  dividir no cursor (Ctrl+I), exportar ou apagar. Arraste áudios para a janela para importar.
-- **Editar:**
-  - arraste para selecionar; Delete apaga, Ctrl+L silencia, Ctrl+T fica só com a seleção;
-  - desfazer e refazer mostram o nome da ação;
-  - a edição não estraga o original: os cortes só mudam a lista de trechos.
-- **Efeitos** (na seleção ou na tomada inteira):
-  - **Melhorar voz (1 clique)**: passa-altas, gate, compressor e loudness;
+Gravador e editor de voz com a interface e o jeito de usar do Audacity.
+
+- **Tela:**
+  - transporte em cima (Pausar, Tocar, Parar, Início, Fim, Gravar, Loop), medidores do microfone e da saída;
+  - régua (clique toca a partir dali);
+  - faixas empilhadas com Mudo, Solo, Ganho e Pan;
+  - embaixo, a barra de seleção (início e fim editáveis) e a posição do áudio.
+- **Gravar:**
+  - R grava na faixa selecionada a partir do cursor; Shift+R grava numa faixa nova;
+  - as outras faixas tocam enquanto grava (overdub);
+  - a gravação começa na hora e não perde o fim;
+  - o áudio vai sendo salvo no disco: se o app fechar no meio, ele oferece recuperar.
+- **Editar como no Audacity:**
+  - arrastar seleciona (na vertical pega várias faixas) e duplo clique seleciona o clipe;
+  - para mover um clipe, arraste pelo cabeçalho dele, inclusive para outra faixa;
+  - Ctrl+X, Ctrl+C e Ctrl+V; Delete; Ctrl+D duplica; Ctrl+L silencia; Ctrl+T apara;
+  - Ctrl+Alt+I separa em nova faixa;
+  - Ctrl+1 e Ctrl+3 dão zoom, Ctrl+F cabe tudo, Ctrl+E dá zoom na seleção;
+  - Espaço toca/para, P pausa, Shift+Espaço repete.
+- **Efeitos** (na seleção; sem seleção, em tudo):
+  - **Melhorar voz (1 clique)**;
   - normalizar loudness (LUFS) ou pico;
-  - ganho, fades, passa-altas, noise gate, compressor e remover silêncios.
-- **Roteiro e teleprompter:** cole ou abra um `.txt/.md`. No modo teleprompter a letra fica
-  grande e rola sozinha enquanto você grava, na velocidade escolhida (palavras por minuto).
-- **Salvar e exportar:**
-  - a sessão fica em `nome.pawvoice`, com os áudios em `nome.pawvoice-audio/` (WAV);
-  - cada tomada exporta em WAV 24 bits ou MP3, e dá para exportar todas de uma vez para uma pasta.
+  - amplificar, fades, passa-altas, noise gate, compressor e truncar silêncio.
+- **Roteiro e teleprompter** (Ver → Roteiro): a letra grande rola sozinha enquanto você grava.
+- **Arquivos:**
+  - o projeto fica em `nome.pawvoice`, com os áudios em `nome.pawvoice-audio/` (WAV);
+  - exporta a mixagem ou só a seleção em WAV/MP3, ou cada faixa separada.
 
 ---
 

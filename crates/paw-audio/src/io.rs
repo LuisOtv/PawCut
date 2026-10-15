@@ -1,4 +1,7 @@
-//! Tocar e gravar pelo PulseAudio, em mono, cada um na sua thread.
+//! Tocar e gravar pelo PulseAudio, cada um na sua thread.
+//!
+//! Os buffers são pedidos pequenos (10 ms na gravação, 50 ms na reprodução): o padrão do
+//! PulseAudio chega a 2 s, o que atrasava o começo da gravação e perdia o fim ao parar.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -8,18 +11,25 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use libpulse_binding::def::BufferAttr;
 use libpulse_binding::sample::{Format, Spec};
 use libpulse_binding::stream::Direction;
 use libpulse_simple_binding::Simple;
 
-const CHUNK: usize = 1024;
+/// Quadros por pedaço lido/escrito.
+const CHUNK: usize = 480;
 
-fn spec(rate: u32) -> Spec {
+fn spec(rate: u32, channels: u8) -> Spec {
     Spec {
         format: Format::F32le,
-        channels: 1,
+        channels,
         rate,
     }
+}
+
+/// Bytes de `ms` milissegundos.
+fn bytes_for(ms: u32, rate: u32, channels: u8) -> u32 {
+    rate * ms / 1000 * 4 * channels as u32
 }
 
 struct PlayState {
@@ -29,8 +39,9 @@ struct PlayState {
     generation: u64,
 }
 
-/// Toca um trecho de uma trilha mono. A posição tocada é o relógio da interface.
+/// Toca um trecho de um buffer intercalado (`channels` canais). As posições são em quadros.
 pub struct Player {
+    channels: usize,
     state: Arc<Mutex<PlayState>>,
     playing: Arc<AtomicBool>,
     position: Arc<AtomicUsize>,
@@ -38,7 +49,7 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn spawn(rate: u32) -> Self {
+    pub fn spawn(rate: u32, channels: u8) -> Self {
         let state = Arc::new(Mutex::new(PlayState {
             buffer: None,
             start: 0,
@@ -54,18 +65,26 @@ impl Player {
             position.clone(),
             has_device.clone(),
         );
+        let ch = channels as usize;
         thread::Builder::new()
             .name("paw-play".into())
             .spawn(move || {
+                let attr = BufferAttr {
+                    maxlength: u32::MAX,
+                    tlength: bytes_for(60, rate, channels),
+                    prebuf: u32::MAX,
+                    minreq: u32::MAX,
+                    fragsize: u32::MAX,
+                };
                 let device = Simple::new(
                     None,
                     "Paw",
                     Direction::Playback,
                     None,
                     "Reprodução",
-                    &spec(rate),
+                    &spec(rate, channels),
                     None,
-                    None,
+                    Some(&attr),
                 )
                 .ok();
                 dev.store(device.is_some(), Ordering::SeqCst);
@@ -80,7 +99,7 @@ impl Player {
                             }
                             current = u64::MAX;
                         }
-                        thread::sleep(Duration::from_millis(5));
+                        thread::sleep(Duration::from_millis(3));
                         continue;
                     }
                     let (buf, start, end, generation) = {
@@ -98,7 +117,7 @@ impl Player {
                         current = generation;
                         cursor = start;
                     }
-                    let end = end.min(buf.len());
+                    let end = end.min(buf.len() / ch);
                     if cursor >= end {
                         // Espera o que está no buffer da placa terminar de tocar.
                         if let Some(d) = &device {
@@ -109,7 +128,7 @@ impl Player {
                         continue;
                     }
                     let to = (cursor + CHUNK).min(end);
-                    let bytes: Vec<u8> = buf[cursor..to]
+                    let bytes: Vec<u8> = buf[cursor * ch..to * ch]
                         .iter()
                         .flat_map(|v| v.to_le_bytes())
                         .collect();
@@ -132,6 +151,7 @@ impl Player {
             })
             .expect("não foi possível criar a thread de reprodução");
         Self {
+            channels: ch,
             state,
             playing,
             position,
@@ -139,7 +159,11 @@ impl Player {
         }
     }
 
-    /// Toca `buffer[from..to]`.
+    pub fn channels(&self) -> usize {
+        self.channels
+    }
+
+    /// Toca os quadros `[from, to)` de `buffer` (intercalado).
     pub fn play(&self, buffer: Arc<Vec<f32>>, from: usize, to: usize) {
         let mut s = self.state.lock().expect("estado do player");
         s.buffer = Some(buffer);
@@ -158,7 +182,7 @@ impl Player {
         self.playing.load(Ordering::SeqCst)
     }
 
-    /// Amostra saindo da caixa de som agora.
+    /// Quadro saindo da caixa de som agora.
     pub fn position(&self) -> usize {
         self.position.load(Ordering::SeqCst)
     }
@@ -210,15 +234,23 @@ impl Recorder {
             thread::Builder::new()
                 .name("paw-record".into())
                 .spawn(move || {
+                    // Fragmentos de 10 ms: o áudio chega quase na hora (o padrão é até 2 s).
+                    let attr = BufferAttr {
+                        maxlength: u32::MAX,
+                        tlength: u32::MAX,
+                        prebuf: u32::MAX,
+                        minreq: u32::MAX,
+                        fragsize: bytes_for(10, rate, 1),
+                    };
                     let device = match Simple::new(
                         None,
                         "Paw",
                         Direction::Record,
                         None,
                         "Gravação",
-                        &spec(rate),
+                        &spec(rate, 1),
                         None,
-                        None,
+                        Some(&attr),
                     ) {
                         Ok(d) => d,
                         Err(e) => {
@@ -229,12 +261,7 @@ impl Recorder {
                         }
                     };
                     let mut file = spill.and_then(|p| File::create(p).ok()).map(BufWriter::new);
-                    let mut bytes = vec![0u8; CHUNK * 4];
-                    while run.load(Ordering::SeqCst) {
-                        if let Err(e) = device.read(&mut bytes) {
-                            *err.lock().expect("erro") = Some(format!("Erro ao gravar: {e}"));
-                            break;
-                        }
+                    let mut take = |bytes: &[u8]| {
                         let samples: Vec<f32> = bytes
                             .as_chunks::<4>()
                             .0
@@ -243,11 +270,32 @@ impl Recorder {
                             .collect();
                         let peak = samples.iter().fold(0.0f32, |m, v| m.max(v.abs()));
                         let old = f32::from_bits(lvl.load(Ordering::Relaxed));
-                        lvl.store(peak.max(old * 0.8).to_bits(), Ordering::Relaxed);
+                        lvl.store(peak.max(old * 0.85).to_bits(), Ordering::Relaxed);
                         if let Some(f) = file.as_mut() {
-                            let _ = f.write_all(&bytes);
+                            let _ = f.write_all(bytes);
                         }
                         buf.lock().expect("buffer").extend_from_slice(&samples);
+                    };
+                    let mut bytes = vec![0u8; CHUNK * 4];
+                    while run.load(Ordering::SeqCst) {
+                        if let Err(e) = device.read(&mut bytes) {
+                            *err.lock().expect("erro") = Some(format!("Erro ao gravar: {e}"));
+                            break;
+                        }
+                        take(&bytes);
+                    }
+                    // Ao parar, lê o que já foi captado e ainda estava no buffer: senão o
+                    // fim da gravação some.
+                    let pending = device
+                        .get_latency()
+                        .map(|l| (l.0 as u128 * rate as u128 / 1_000_000) as usize)
+                        .unwrap_or(0)
+                        .min(rate as usize / 2);
+                    if pending > 0 {
+                        let mut rest = vec![0u8; pending * 4];
+                        if device.read(&mut rest).is_ok() {
+                            take(&rest);
+                        }
                     }
                     if let Some(mut f) = file {
                         let _ = f.flush();

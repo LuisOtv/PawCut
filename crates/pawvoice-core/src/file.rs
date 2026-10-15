@@ -38,7 +38,7 @@ pub fn save_session(editor: &Editor, path: &Path) -> Result<(), FileError> {
     std::fs::create_dir_all(&dir)?;
     let used: std::collections::HashSet<SourceId> = editor
         .session()
-        .takes
+        .tracks
         .iter()
         .flat_map(|t| t.segments.iter().map(|s| s.source))
         .filter(|s| *s != SILENCE)
@@ -80,7 +80,7 @@ pub fn load_session(path: &Path) -> Result<Editor, FileError> {
     let dir = audio_dir(path);
     let mut sources = BTreeMap::new();
     for id in session
-        .takes
+        .tracks
         .iter()
         .flat_map(|t| t.segments.iter().map(|s| s.source))
         .filter(|s| *s != SILENCE)
@@ -95,8 +95,14 @@ pub fn load_session(path: &Path) -> Result<Editor, FileError> {
     Ok(editor)
 }
 
-/// Exporta áudio mono: `.wav` (24 bits) ou `.mp3` (192 kb/s), pelo ffmpeg.
-pub fn export_audio(samples: &[f32], sample_rate: u32, out: &Path) -> Result<(), FileError> {
+/// Exporta áudio intercalado (`channels` canais): `.wav` (24 bits) ou `.mp3` (192 kb/s),
+/// pelo ffmpeg.
+pub fn export_audio(
+    samples: &[f32],
+    sample_rate: u32,
+    channels: u8,
+    out: &Path,
+) -> Result<(), FileError> {
     let mp3 = out
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("mp3"));
@@ -108,7 +114,7 @@ pub fn export_audio(samples: &[f32], sample_rate: u32, out: &Path) -> Result<(),
     let mut child = Command::new("ffmpeg")
         .args(["-v", "error", "-y", "-f", "f32le", "-ar"])
         .arg(sample_rate.to_string())
-        .args(["-ac", "1", "-i", "-"])
+        .args(["-ac", &channels.to_string(), "-i", "-"])
         .args(codec)
         .arg(out)
         .stdin(Stdio::piped())
@@ -146,9 +152,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("narracao.pawvoice");
         let mut e = Editor::new(Session::new(48_000), BTreeMap::new());
-        let t = e.add_take((0..100).map(|i| i as f32 / 100.0).collect(), None);
-        e.process(t, 10, 20, "Ganho", |s| s.iter_mut().for_each(|v| *v = 0.0))
-            .unwrap();
+        let t = e.add_track((0..100).map(|i| i as f32 / 100.0 + 0.01).collect(), 0, None);
+        e.process(&[t], 10, 20, "Ganho", |s| {
+            s.iter_mut().for_each(|v| *v *= 2.0)
+        })
+        .unwrap();
         e.set_script("Olá, pessoal!".into());
         save_session(&e, &path).unwrap();
         let back = load_session(&path).unwrap();
@@ -156,7 +164,7 @@ mod tests {
         assert_eq!(back.render(t), e.render(t));
         assert!(!back.is_dirty());
         // Apaga a parte processada: o WAV dela some do disco ao salvar de novo.
-        e.delete(t, 10, 20).unwrap();
+        e.delete(&[t], 10, 20).unwrap();
         save_session(&e, &path).unwrap();
         assert_eq!(std::fs::read_dir(audio_dir(&path)).unwrap().count(), 1);
     }
@@ -167,7 +175,7 @@ mod tests {
         let s: Vec<f32> = (0..48_000).map(|i| (i as f32 * 0.05).sin() * 0.3).collect();
         for name in ["a.wav", "a.mp3"] {
             let out = dir.path().join(name);
-            export_audio(&s, 48_000, &out).unwrap();
+            export_audio(&s, 48_000, 1, &out).unwrap();
             assert!(std::fs::metadata(&out).unwrap().len() > 1000);
         }
     }
