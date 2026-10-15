@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use crate::{EnvPoint, SILENCE, Segment, Session, SourceId, Track};
+use crate::{EnvPoint, Label, LabelTrack, SILENCE, Segment, Session, SourceId, Track};
 
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum EditError {
@@ -522,6 +522,110 @@ impl Editor {
         Ok(left)
     }
 
+    /// Faixa de rótulos nova. Devolve o id.
+    pub fn add_label_track(&mut self) -> u64 {
+        self.checkpoint("Nova faixa de rótulo");
+        self.new_label_track()
+    }
+
+    fn new_label_track(&mut self) -> u64 {
+        let id = self.session.fresh();
+        let n = self.session.label_tracks.len() + 1;
+        self.session.label_tracks.push(LabelTrack {
+            id,
+            name: if n == 1 {
+                "Rótulos".to_string()
+            } else {
+                format!("Rótulos {n}")
+            },
+            labels: Vec::new(),
+        });
+        id
+    }
+
+    pub fn remove_label_track(&mut self, id: u64) -> Result<(), EditError> {
+        self.session.label_track(id).ok_or(EditError::NoTrack)?;
+        self.checkpoint("Apagar faixa de rótulo");
+        self.session.label_tracks.retain(|t| t.id != id);
+        Ok(())
+    }
+
+    /// Põe um rótulo em `[at, end]` (`end == at` é um ponto). Sem `track`, usa a primeira faixa
+    /// de rótulos (criando uma se não houver, no mesmo passo de desfazer). Devolve a faixa e o
+    /// índice do rótulo.
+    pub fn add_label(
+        &mut self,
+        track: Option<u64>,
+        at: usize,
+        end: usize,
+        text: String,
+    ) -> Result<(u64, usize), EditError> {
+        let tid = match track.or_else(|| self.session.label_tracks.first().map(|t| t.id)) {
+            Some(id) => {
+                self.session.label_track(id).ok_or(EditError::NoTrack)?;
+                self.checkpoint("Novo rótulo");
+                id
+            }
+            None => {
+                self.checkpoint("Novo rótulo");
+                self.new_label_track()
+            }
+        };
+        let t = self
+            .session
+            .label_tracks
+            .iter_mut()
+            .find(|t| t.id == tid)
+            .ok_or(EditError::NoTrack)?;
+        let at_i = t.labels.partition_point(|l| l.at <= at);
+        t.labels.insert(
+            at_i,
+            Label {
+                at,
+                end: end.max(at),
+                text,
+            },
+        );
+        Ok((tid, at_i))
+    }
+
+    pub fn set_label_text(
+        &mut self,
+        track: u64,
+        index: usize,
+        text: String,
+    ) -> Result<(), EditError> {
+        let cur = self
+            .session
+            .label_track(track)
+            .and_then(|t| t.labels.get(index))
+            .ok_or(EditError::NoTrack)?;
+        if cur.text == text {
+            return Ok(());
+        }
+        self.checkpoint("Editar rótulo");
+        self.session
+            .label_tracks
+            .iter_mut()
+            .find(|t| t.id == track)
+            .ok_or(EditError::NoTrack)?
+            .labels[index]
+            .text = text;
+        Ok(())
+    }
+
+    pub fn remove_label(&mut self, track: u64, index: usize) -> Result<(), EditError> {
+        self.session
+            .label_track(track)
+            .and_then(|t| t.labels.get(index))
+            .ok_or(EditError::NoTrack)?;
+        self.checkpoint("Apagar rótulo");
+        if let Some(t) = self.session.label_tracks.iter_mut().find(|t| t.id == track) {
+            t.labels.remove(index);
+        }
+        Ok(())
+    }
+
     pub fn rename_track(&mut self, id: u64, name: String) -> Result<(), EditError> {
         if self.session.track(id).ok_or(EditError::NoTrack)?.name == name {
             return Ok(());
@@ -1001,6 +1105,68 @@ mod tests {
         );
         e.set_track_color(parts[0], 3).unwrap();
         assert_eq!(e.session().track(parts[0]).unwrap().color, 3);
+    }
+
+    #[test]
+    fn labels_are_sorted_undoable_and_export_chapters() {
+        let (mut e, _) = editor_with(10);
+        let (lt, i) = e.add_label(None, 96_000, 96_000, "Dicas".into()).unwrap();
+        assert_eq!(i, 0);
+        let (lt2, i) = e.add_label(Some(lt), 0, 0, "Intro".into()).unwrap();
+        assert_eq!((lt2, i), (lt, 0));
+        e.add_label(Some(lt), 4_000_000, 4_100_000, "Final".into())
+            .unwrap();
+        e.add_label(Some(lt), 5_000_000, 5_000_000, "  ".into())
+            .unwrap();
+        let texts: Vec<&str> = e
+            .session()
+            .label_track(lt)
+            .unwrap()
+            .labels
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["Intro", "Dicas", "Final", "  "]);
+        assert_eq!(
+            e.session().youtube_chapters(),
+            "0:00 Intro\n0:02 Dicas\n1:23 Final"
+        );
+        assert_eq!(e.session().chapters_problem(), None);
+        assert!(
+            e.session()
+                .labels_text()
+                .starts_with("0.000000\t0.000000\tIntro")
+        );
+        e.set_label_text(lt, 1, "Truques".into()).unwrap();
+        e.remove_label(lt, 3).unwrap();
+        e.undo();
+        e.undo();
+        assert_eq!(e.session().label_track(lt).unwrap().labels[1].text, "Dicas");
+        e.remove_label_track(lt).unwrap();
+        assert!(e.session().label_tracks.is_empty());
+        e.undo();
+        assert_eq!(e.session().label_tracks.len(), 1);
+        assert!(e.remove_label(lt, 99).is_err());
+    }
+
+    #[test]
+    fn chapters_need_three_labels_starting_at_zero() {
+        let mut e = Editor::new(Session::new(48_000), BTreeMap::new());
+        e.add_label(None, 48_000, 48_000, "A".into()).unwrap();
+        e.add_label(None, 96_000, 96_000, "B".into()).unwrap();
+        assert_eq!(
+            e.session().chapters_problem(),
+            Some("O YouTube pede pelo menos 3 capítulos")
+        );
+        e.add_label(None, 144_000, 144_000, "C".into()).unwrap();
+        assert_eq!(
+            e.session().chapters_problem(),
+            Some("O primeiro capítulo precisa começar em 0:00")
+        );
+        // um projeto salvo antes dos rótulos continua abrindo
+        let old = r#"{"version":3,"sample_rate":48000,"tracks":[],"next_id":1}"#;
+        let s: Session = serde_json::from_str(old).unwrap();
+        assert!(s.label_tracks.is_empty());
     }
 
     #[test]

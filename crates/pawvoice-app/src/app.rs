@@ -35,6 +35,9 @@ const SCALE_W: f32 = 30.0;
 const MONO_H: f32 = 156.0;
 const STEREO_H: f32 = 176.0;
 const TRACK_GAP: f32 = 4.0;
+/// Altura de uma faixa de rótulos.
+const LABEL_H: f32 = 56.0;
+const LABEL_COLOR: Color32 = Color32::from_rgb(0xe8, 0xc0, 0x60);
 /// Faixa de título do clipe (arrastar por ela move o clipe).
 const CLIP_HEADER: f32 = 16.0;
 
@@ -134,6 +137,7 @@ enum Purpose {
     Import,
     Export { selection: bool },
     ExportTracks,
+    ExportLabels,
     Script,
 }
 
@@ -211,6 +215,8 @@ pub struct VoiceApp {
     views: HashMap<u64, TrackView>,
     /// Onde o menu da área vazia foi aberto.
     empty_menu: Option<Pos2>,
+    /// Rótulo sendo escrito: (faixa de rótulos, índice, texto).
+    label_edit: Option<(u64, usize, String)>,
     player: Player,
     /// Mixagem tocando e em que amostra da timeline ela começa.
     play_buf: Option<Arc<Vec<f32>>>,
@@ -372,6 +378,7 @@ impl VoiceApp {
             spec_cache: HashMap::new(),
             views: HashMap::new(),
             empty_menu: None,
+            label_edit: None,
             player: Player::spawn(RATE, 2),
             play_buf: None,
             play_offset: 0,
@@ -956,6 +963,13 @@ impl VoiceApp {
                 self.save_to(p);
             }
             Purpose::Import => self.import(paths),
+            Purpose::ExportLabels => {
+                let text = self.ed.session().labels_text();
+                match std::fs::write(&first, text) {
+                    Ok(()) => self.say("Rótulos exportados"),
+                    Err(e) => self.warn(format!("Não deu para salvar os rótulos: {e}")),
+                }
+            }
             Purpose::Export { selection } => self.export_mix(&first, selection),
             Purpose::ExportTracks => {
                 let tracks: Vec<(u64, String)> = self
@@ -1252,6 +1266,9 @@ impl VoiceApp {
         if pressed(ctrl, Key::D) {
             self.duplicate();
         }
+        if pressed(ctrl, Key::B) {
+            self.add_label_here();
+        }
         if pressed(Modifiers::COMMAND | Modifiers::ALT, Key::I) {
             self.split_new();
         }
@@ -1354,6 +1371,29 @@ impl VoiceApp {
                     ui.close();
                     self.export_dialog(true);
                 }
+                let has_labels = self
+                    .ed
+                    .session()
+                    .label_tracks
+                    .iter()
+                    .any(|t| !t.labels.is_empty());
+                if item(ui, "Copiar capítulos para o YouTube", "", has_labels) {
+                    ui.close();
+                    let ctx = ui.ctx().clone();
+                    self.copy_chapters(&ctx);
+                }
+                if item(ui, "Exportar rótulos (.txt)…", "", has_labels) {
+                    ui.close();
+                    self.ask(Purpose::ExportLabels, || {
+                        rfd::FileDialog::new()
+                            .set_title("Exportar rótulos")
+                            .add_filter("Texto", &["txt"])
+                            .set_file_name("rotulos.txt")
+                            .save_file()
+                            .into_iter()
+                            .collect()
+                    });
+                }
                 if item(ui, "Exportar faixas separadas (pasta)…", "", has) {
                     ui.close();
                     self.ask(Purpose::ExportTracks, || {
@@ -1423,6 +1463,10 @@ impl VoiceApp {
                 if item(ui, "Duplicar", "Ctrl+D", has_sel) {
                     ui.close();
                     self.duplicate();
+                }
+                if item(ui, "Adicionar rótulo na seleção", "Ctrl+B", true) {
+                    ui.close();
+                    self.add_label_here();
                 }
                 ui.separator();
                 ui.menu_button("Remover especial", |ui| {
@@ -1557,6 +1601,10 @@ impl VoiceApp {
                     ui.close();
                     let id = self.ed.add_track(vec![Vec::new(), Vec::new()], 0, None);
                     self.selected = vec![id];
+                }
+                if item(ui, "Nova faixa de rótulo", "", true) {
+                    ui.close();
+                    self.ed.add_label_track();
                 }
                 if item(
                     ui,
@@ -2164,10 +2212,28 @@ impl VoiceApp {
         let rows = self.rows(lanes, area.left(), area.right());
         let rec_now = self.recorder.is_recording().then_some(self.rec).flatten();
         let new_rec_lane = rec_now.is_some_and(|r| r.track.is_none());
-        let content_h = rows
+        // As faixas de rótulos ficam embaixo das de áudio.
+        let mut label_y = rows
             .last()
-            .map_or(0.0, |(_, r)| r.bottom() - lanes.top() + self.v_scroll)
-            + if new_rec_lane { STEREO_H } else { 0.0 };
+            .map_or(lanes.top() - self.v_scroll, |(_, r)| r.bottom() + TRACK_GAP)
+            + if new_rec_lane {
+                STEREO_H + TRACK_GAP
+            } else {
+                0.0
+            };
+        let label_rows: Vec<(u64, Rect)> = self
+            .ed
+            .session()
+            .label_tracks
+            .iter()
+            .map(|t| {
+                let r =
+                    Rect::from_min_size(pos2(area.left(), label_y), vec2(area.width(), LABEL_H));
+                label_y += LABEL_H + TRACK_GAP;
+                (t.id, r)
+            })
+            .collect();
+        let content_h = label_y - lanes.top() + self.v_scroll;
         // Roda: rola as faixas; Shift+roda: anda no tempo; Ctrl+roda: zoom.
         let pointer = ui.input(|i| i.pointer.hover_pos());
         if pointer.is_some_and(|p| lanes.contains(p)) {
@@ -2196,9 +2262,11 @@ impl VoiceApp {
         let wave_area = Rect::from_min_max(pos2(wave_left, lanes.top()), lanes.max);
         let resp = ui.interact(wave_area, ui.id().with("waves"), Sense::click_and_drag());
         let (cmd, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
-        let rows_bottom = rows
+        let rows_bottom = label_rows
             .last()
-            .map_or(lanes.top(), |(_, r)| r.bottom() + TRACK_GAP);
+            .map(|(_, r)| r.bottom() + TRACK_GAP)
+            .or_else(|| rows.last().map(|(_, r)| r.bottom() + TRACK_GAP))
+            .unwrap_or(lanes.top());
         if resp.secondary_clicked()
             && let Some(p) = resp.interact_pointer_pos()
             && p.y >= rows_bottom
@@ -2434,6 +2502,7 @@ impl VoiceApp {
             let wp = lp.with_clip_rect(wave.intersect(lanes));
             self.paint_recording(&wp, wave, rt.at, wave_left);
         }
+        self.label_tracks_ui(ui, lanes, wave_left, &label_rows);
         // Fantasmas dos clipes sendo arrastados.
         if let (
             Some(Drag::Clips {
@@ -3152,6 +3221,189 @@ impl VoiceApp {
         }
     }
 
+    /// Põe um rótulo na seleção (ou no cursor) e já abre para escrever o texto (Ctrl+B).
+    fn add_label_here(&mut self) {
+        let (a, b) = self.sel.unwrap_or((self.cursor, self.cursor));
+        if let Ok((t, i)) = self.ed.add_label(None, a, b, String::new()) {
+            self.label_edit = Some((t, i, String::new()));
+        }
+    }
+
+    fn copy_chapters(&mut self, ctx: &egui::Context) {
+        let text = self.ed.session().youtube_chapters();
+        if text.is_empty() {
+            self.warn("Nenhum rótulo com texto para virar capítulo");
+            return;
+        }
+        ctx.copy_text(text);
+        match self.ed.session().chapters_problem() {
+            Some(p) => self.warn(format!("Copiei os capítulos, mas {p}")),
+            None => self.say("Capítulos copiados: cole na descrição do vídeo"),
+        }
+    }
+
+    /// Faixas de rótulos: duplo clique cria, duplo clique num rótulo edita, botão direito apaga.
+    fn label_tracks_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        lanes: Rect,
+        wave_left: f32,
+        rows: &[(u64, Rect)],
+    ) {
+        let painter = ui.painter_at(lanes);
+        let x_of = |s: usize, me: &Self| wave_left + ((s as f64 - me.view_start) / me.spp) as f32;
+        for (tid, r) in rows {
+            if r.bottom() < lanes.top() || r.top() > lanes.bottom() {
+                continue;
+            }
+            let Some(track) = self.ed.session().label_track(*tid).cloned() else {
+                continue;
+            };
+            let wave = Rect::from_min_max(pos2(wave_left, r.top()), r.max);
+            let tcp = Rect::from_min_max(r.min, pos2(wave_left - 1.0, r.bottom()));
+            painter.rect_filled(wave, 0.0, TRACK_BG);
+            painter.rect_filled(tcp, 0.0, theme::BAR);
+            let visible = tcp.intersect(lanes);
+            let mut remove = false;
+            ui.scope_builder(
+                UiBuilder::new()
+                    .max_rect(Rect::from_min_size(
+                        pos2(tcp.left() + 8.0, tcp.top() + 6.0),
+                        vec2(TCP_W - 16.0, 22.0),
+                    ))
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                |ui| {
+                    ui.set_clip_rect(visible);
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if ui
+                        .add(
+                            egui::Button::new("×")
+                                .frame(false)
+                                .min_size(vec2(16.0, 22.0)),
+                        )
+                        .on_hover_text("Apagar a faixa de rótulos")
+                        .clicked()
+                    {
+                        remove = true;
+                    }
+                    ui.label(RichText::new(&track.name).strong().color(Color32::WHITE));
+                },
+            );
+            painter.text(
+                pos2(tcp.left() + 10.0, tcp.top() + 34.0),
+                Align2::LEFT_TOP,
+                "Ctrl+B põe um rótulo\nou duplo clique aqui ao lado",
+                theme::text(10.0),
+                theme::TEXT_DIM,
+            );
+            if remove {
+                let _ = self.ed.remove_label_track(*tid);
+                self.say("Faixa de rótulos apagada (Ctrl+Z desfaz)");
+                return;
+            }
+            let area = wave.intersect(lanes);
+            let wp = painter.with_clip_rect(area);
+            let bg = ui.interact(area, ui.id().with(("label-bg", *tid)), Sense::click());
+            if let Some(p) = bg.interact_pointer_pos() {
+                let at = (self.view_start + (p.x - wave_left) as f64 * self.spp).max(0.0) as usize;
+                if bg.double_clicked() {
+                    if let Ok((t, i)) = self.ed.add_label(Some(*tid), at, at, String::new()) {
+                        self.label_edit = Some((t, i, String::new()));
+                    }
+                } else if bg.clicked() {
+                    self.cursor = at;
+                    self.sel = None;
+                }
+            }
+            for (i, l) in track.labels.iter().enumerate() {
+                let (x0, x1) = (x_of(l.at, self), x_of(l.end, self));
+                if x1 < wave.left() - 400.0 || x0 > wave.right() {
+                    continue;
+                }
+                let region = l.end > l.at;
+                if region {
+                    let body = Rect::from_min_max(
+                        pos2(x0, wave.top() + 2.0),
+                        pos2(x1, wave.bottom() - 2.0),
+                    );
+                    wp.rect_filled(body, 2.0, LABEL_COLOR.gamma_multiply(0.18));
+                    wp.line_segment(
+                        [pos2(x1, wave.top()), pos2(x1, wave.bottom())],
+                        Stroke::new(1.0, LABEL_COLOR.gamma_multiply(0.7)),
+                    );
+                }
+                wp.line_segment(
+                    [pos2(x0, wave.top()), pos2(x0, wave.bottom())],
+                    Stroke::new(1.5, LABEL_COLOR),
+                );
+                let editing = matches!(&self.label_edit, Some((t, k, _)) if t == tid && *k == i);
+                if editing {
+                    let mut done = false;
+                    let mut cancel = false;
+                    if let Some((_, _, text)) = &mut self.label_edit {
+                        let rr = ui.put(
+                            Rect::from_min_size(
+                                pos2(x0 + 3.0, wave.top() + 6.0),
+                                vec2(180.0, 22.0),
+                            ),
+                            egui::TextEdit::singleline(text).hint_text("Nome do rótulo"),
+                        );
+                        rr.request_focus();
+                        cancel = ui.input(|i| i.key_pressed(Key::Escape));
+                        done = rr.lost_focus();
+                    }
+                    if (done || cancel)
+                        && let Some((t, k, text)) = self.label_edit.take()
+                        && !cancel
+                    {
+                        let _ = self.ed.set_label_text(t, k, text.trim().to_string());
+                    }
+                    continue;
+                }
+                let galley = wp.layout_no_wrap(
+                    if l.text.is_empty() {
+                        "(sem nome)".to_string()
+                    } else {
+                        l.text.clone()
+                    },
+                    theme::text(12.0),
+                    if l.text.is_empty() {
+                        theme::TEXT_DIM
+                    } else {
+                        Color32::WHITE
+                    },
+                );
+                let text_w = galley.size().x;
+                wp.galley(pos2(x0 + 6.0, wave.top() + 8.0), galley, Color32::WHITE);
+                let hit = Rect::from_min_max(
+                    pos2(x0 - 4.0, wave.top()),
+                    pos2((x0 + text_w + 12.0).max(x1), wave.bottom()),
+                )
+                .intersect(area);
+                if hit.width() <= 0.0 {
+                    continue;
+                }
+                let resp = ui.interact(hit, ui.id().with(("label", *tid, i)), Sense::click());
+                if resp.double_clicked() {
+                    self.label_edit = Some((*tid, i, l.text.clone()));
+                } else if resp.clicked() {
+                    self.cursor = l.at;
+                    self.sel = region.then_some((l.at, l.end));
+                }
+                resp.context_menu(|ui| {
+                    if ui.button("Editar texto").clicked() {
+                        ui.close();
+                        self.label_edit = Some((*tid, i, l.text.clone()));
+                    }
+                    if ui.button("Apagar rótulo").clicked() {
+                        ui.close();
+                        let _ = self.ed.remove_label(*tid, i);
+                    }
+                });
+            }
+        }
+    }
+
     /// Menu da faixa (botão "…" e botão direito no painel), como o do Audacity.
     fn track_menu(&mut self, ui: &mut egui::Ui, id: u64) {
         let Some(track) = self.ed.session().track(id).cloned() else {
@@ -3290,6 +3542,10 @@ impl VoiceApp {
                         close = true;
                         let id = self.ed.add_track(vec![Vec::new(), Vec::new()], 0, None);
                         self.selected = vec![id];
+                    }
+                    if ui.button("Nova faixa de rótulo").clicked() {
+                        close = true;
+                        self.ed.add_label_track();
                     }
                     ui.separator();
                     if ui
@@ -3912,12 +4168,17 @@ mod tests {
             .add_track(vec![vec![0.1; 1000], vec![0.2; 1000]], 0, None);
         let ctx = egui::Context::default();
         app.empty_menu = Some(pos2(10.0, 10.0));
+        let (lt, _) = app.ed.add_label(None, 100, 400, "Trecho".into()).unwrap();
+        app.label_edit = Some((lt, 0, "Trec".into()));
         for _ in 0..2 {
             let out = ctx.run_ui(Default::default(), |ui| {
                 app.track_menu(ui, mono_id);
                 app.track_menu(ui, st);
                 app.effects_items(ui);
                 app.empty_area_menu(&ui.ctx().clone());
+                let lanes = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 300.0));
+                let row = Rect::from_min_size(pos2(0.0, 100.0), vec2(800.0, LABEL_H));
+                app.label_tracks_ui(ui, lanes, TCP_W, &[(lt, row)]);
             });
             out.drop_without_applying_deltas();
         }

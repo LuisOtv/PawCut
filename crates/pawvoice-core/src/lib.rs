@@ -146,6 +146,22 @@ impl Track {
     }
 }
 
+/// Marca de texto na linha do tempo: um ponto (`end == at`) ou um trecho.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Label {
+    pub at: usize,
+    pub end: usize,
+    pub text: String,
+}
+
+/// Faixa de rótulos (capítulos, marcações), sempre em ordem de tempo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LabelTrack {
+    pub id: u64,
+    pub name: String,
+    pub labels: Vec<Label>,
+}
+
 pub const SESSION_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,6 +174,9 @@ pub struct Session {
     /// Roteiro (texto do teleprompter).
     #[serde(default)]
     pub script: String,
+    /// Faixas de rótulos (projetos antigos não têm).
+    #[serde(default)]
+    pub label_tracks: Vec<LabelTrack>,
     pub(crate) next_id: u64,
 }
 
@@ -168,12 +187,78 @@ impl Session {
             sample_rate,
             tracks: Vec::new(),
             script: String::new(),
+            label_tracks: Vec::new(),
             next_id: 1,
         }
     }
 
     pub fn track(&self, id: u64) -> Option<&Track> {
         self.tracks.iter().find(|t| t.id == id)
+    }
+
+    pub fn label_track(&self, id: u64) -> Option<&LabelTrack> {
+        self.label_tracks.iter().find(|t| t.id == id)
+    }
+
+    /// Todos os rótulos com texto, em ordem de tempo.
+    fn named_labels(&self) -> Vec<&Label> {
+        let mut all: Vec<&Label> = self
+            .label_tracks
+            .iter()
+            .flat_map(|t| &t.labels)
+            .filter(|l| !l.text.trim().is_empty())
+            .collect();
+        all.sort_by_key(|l| l.at);
+        all
+    }
+
+    /// Capítulos para a descrição do YouTube: uma linha "m:ss Título" por rótulo. O YouTube
+    /// só aceita a lista se ela começar em 0:00 e tiver ao menos 3 capítulos.
+    pub fn youtube_chapters(&self) -> String {
+        self.named_labels()
+            .iter()
+            .map(|l| {
+                let secs = l.at / self.sample_rate.max(1) as usize;
+                let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+                let t = if h > 0 {
+                    format!("{h}:{m:02}:{s:02}")
+                } else {
+                    format!("{m}:{s:02}")
+                };
+                format!("{t} {}", l.text.trim())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Por que a lista de capítulos não serve no YouTube, se não servir.
+    pub fn chapters_problem(&self) -> Option<&'static str> {
+        let all = self.named_labels();
+        if all.len() < 3 {
+            Some("O YouTube pede pelo menos 3 capítulos")
+        } else if all[0].at >= self.sample_rate.max(1) as usize {
+            Some("O primeiro capítulo precisa começar em 0:00")
+        } else {
+            None
+        }
+    }
+
+    /// Rótulos no formato do Audacity: "início<TAB>fim<TAB>texto", em segundos.
+    pub fn labels_text(&self) -> String {
+        let sr = self.sample_rate.max(1) as f64;
+        self.label_tracks
+            .iter()
+            .flat_map(|t| &t.labels)
+            .map(|l| {
+                format!(
+                    "{:.6}\t{:.6}\t{}",
+                    l.at as f64 / sr,
+                    l.end as f64 / sr,
+                    l.text
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Duração do projeto: o fim da faixa mais longa.
