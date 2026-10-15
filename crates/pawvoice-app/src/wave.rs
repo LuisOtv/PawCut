@@ -52,3 +52,86 @@ mod tests {
         }
     }
 }
+
+/// Espectrograma de um canal: `data[coluna * bins + faixa]`, 0 = silêncio, 255 = 0 dBFS.
+pub struct Spec {
+    pub cols: usize,
+    pub bins: usize,
+    /// Amostras entre uma coluna e a próxima.
+    pub hop: usize,
+    pub data: Vec<u8>,
+}
+
+const FFT_N: usize = 1024;
+/// Limite de colunas (cabe numa textura e em memória mesmo para gravações longas).
+const MAX_COLS: usize = 8192;
+/// Até onde vai o eixo de frequência: a voz mora abaixo disso.
+pub const SPEC_MAX_HZ: f32 = 8000.0;
+
+/// Calcula o espectrograma de `s` (janela de Hann, 0 Hz até `SPEC_MAX_HZ`, −80 a 0 dB).
+pub fn spectrogram(s: &[f32], rate: u32) -> Spec {
+    use rustfft::{FftPlanner, num_complex::Complex};
+    let bins = ((SPEC_MAX_HZ * FFT_N as f32 / rate as f32) as usize).clamp(8, FFT_N / 2);
+    let hop = (FFT_N / 2).max(s.len().div_ceil(MAX_COLS));
+    let cols = s.len().div_ceil(hop).max(1);
+    let fft = FftPlanner::<f32>::new().plan_fft_forward(FFT_N);
+    let window: Vec<f32> = (0..FFT_N)
+        .map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / FFT_N as f32).cos())
+        .collect();
+    let mut data = Vec::with_capacity(cols * bins);
+    let mut buf = vec![Complex::new(0.0, 0.0); FFT_N];
+    for col in 0..cols {
+        // Janela centrada no meio do intervalo da coluna.
+        let start = (col * hop + hop / 2) as isize - (FFT_N / 2) as isize;
+        for (i, b) in buf.iter_mut().enumerate() {
+            let v = usize::try_from(start + i as isize)
+                .ok()
+                .and_then(|k| s.get(k))
+                .copied()
+                .unwrap_or(0.0);
+            *b = Complex::new(v * window[i], 0.0);
+        }
+        fft.process(&mut buf);
+        data.extend(buf[..bins].iter().map(|c| {
+            // Senoide de amplitude 1 dá |X| = N/4 com janela de Hann.
+            let mag = c.norm() / (FFT_N as f32 / 4.0);
+            let db = 20.0 * mag.max(1e-6).log10();
+            ((db + 80.0) / 80.0 * 255.0).clamp(0.0, 255.0) as u8
+        }));
+    }
+    Spec {
+        cols,
+        bins,
+        hop,
+        data,
+    }
+}
+
+#[cfg(test)]
+mod spec_tests {
+    use super::*;
+
+    #[test]
+    fn a_tone_lights_up_its_own_band() {
+        let rate = 48_000;
+        let s: Vec<f32> = (0..rate)
+            .map(|i| (std::f32::consts::TAU * 1000.0 * i as f32 / rate as f32).sin())
+            .collect();
+        let spec = spectrogram(&s, rate);
+        assert_eq!(spec.bins, 170);
+        let col = &spec.data[spec.cols / 2 * spec.bins..][..spec.bins];
+        let (peak, v) = col.iter().enumerate().max_by_key(|(_, v)| **v).unwrap();
+        // 1 kHz cai no bin 1000 · 1024 / 48000 ≈ 21
+        assert!((20..=22).contains(&peak), "pico no bin {peak}");
+        assert!(*v > 230, "tom cheio devia ficar perto de 0 dB: {v}");
+        assert!(col[100] < 60, "longe do tom devia ficar escuro");
+    }
+
+    #[test]
+    fn long_audio_is_capped_and_silence_is_black() {
+        let spec = spectrogram(&vec![0.0; 48_000 * 600], 48_000);
+        assert!(spec.cols <= 8192);
+        assert!(spec.data.iter().all(|v| *v == 0));
+        assert_eq!(spec.data.len(), spec.cols * spec.bins);
+    }
+}

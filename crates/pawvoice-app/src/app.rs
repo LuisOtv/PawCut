@@ -20,7 +20,7 @@ use crate::input_watch::{self, InputWatch};
 use paw_ui::icons::{self, Icon};
 use paw_ui::theme;
 use paw_ui::toasts::Toasts;
-use pawvoice_core::{Editor, EnvPoint, Planar, Segment, Session, format_time, parse_time};
+use pawvoice_core::{Editor, EnvPoint, MoveTo, Planar, Segment, Session, format_time, parse_time};
 use serde::{Deserialize, Serialize};
 
 use crate::effects::{self, Compression};
@@ -29,8 +29,10 @@ use crate::wave;
 pub const RATE: u32 = 48_000;
 const RULER_H: f32 = 28.0;
 /// Largura do painel de controle da faixa (à esquerda de cada faixa).
-const TCP_W: f32 = 184.0;
-const MONO_H: f32 = 132.0;
+const TCP_W: f32 = 214.0;
+/// Coluna da régua de amplitude (ou de frequência), no fim do painel da faixa.
+const SCALE_W: f32 = 30.0;
+const MONO_H: f32 = 156.0;
 const STEREO_H: f32 = 176.0;
 const TRACK_GAP: f32 = 4.0;
 /// Faixa de título do clipe (arrastar por ela move o clipe).
@@ -38,12 +40,67 @@ const CLIP_HEADER: f32 = 16.0;
 
 /// Cores no estilo do tema escuro do Audacity.
 const WAVE_BLUE: Color32 = Color32::from_rgb(0x68, 0x88, 0xf0);
-const WAVE_SEL: Color32 = Color32::from_rgb(0xc0, 0xcc, 0xff);
 const CLIP_BG: Color32 = Color32::from_rgb(0x2a, 0x2f, 0x45);
 const CLIP_HEAD: Color32 = Color32::from_rgb(0x3a, 0x44, 0x6e);
 const CLIP_HEAD_SEL: Color32 = Color32::from_rgb(0x8a, 0x5a, 0x3a);
 const TRACK_BG: Color32 = Color32::from_rgb(0x1c, 0x1c, 0x20);
 const ENV_COLOR: Color32 = Color32::from_rgb(0x50, 0xe0, 0xa0);
+
+/// Cores da onda que dá para escolher no menu da faixa (a primeira é a padrão).
+const WAVE_COLORS: [(&str, Color32); 6] = [
+    ("Azul", WAVE_BLUE),
+    ("Verde", Color32::from_rgb(0x5c, 0xc0, 0x7a)),
+    ("Vermelho", Color32::from_rgb(0xe0, 0x6a, 0x6a)),
+    ("Roxo", Color32::from_rgb(0xb0, 0x7a, 0xe0)),
+    ("Laranja", Color32::from_rgb(0xe8, 0x9a, 0x4a)),
+    ("Ciano", Color32::from_rgb(0x4a, 0xc8, 0xd8)),
+];
+
+fn wave_color(index: u8) -> Color32 {
+    WAVE_COLORS[index as usize % WAVE_COLORS.len()].1
+}
+
+/// Como a faixa é desenhada (menu da faixa, como no Audacity).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum TrackView {
+    #[default]
+    Wave,
+    Spectrogram,
+    /// Forma de onda em cima e espectrograma embaixo.
+    Multi,
+}
+
+/// Cor do espectrograma: preto → roxo → magenta → laranja → branco.
+fn heat(v: u8) -> Color32 {
+    const STOPS: [(f32, [f32; 3]); 5] = [
+        (0.0, [8.0, 8.0, 18.0]),
+        (0.3, [70.0, 30.0, 130.0]),
+        (0.55, [200.0, 50.0, 120.0]),
+        (0.8, [250.0, 160.0, 50.0]),
+        (1.0, [255.0, 250.0, 220.0]),
+    ];
+    let t = v as f32 / 255.0;
+    let i = STOPS.iter().rposition(|(p, _)| *p <= t).unwrap_or(0).min(3);
+    let ((p0, c0), (p1, c1)) = (STOPS[i], STOPS[i + 1]);
+    let k = ((t - p0) / (p1 - p0)).clamp(0.0, 1.0);
+    let ch = |n: usize| (c0[n] + (c1[n] - c0[n]) * k) as u8;
+    Color32::from_rgb(ch(0), ch(1), ch(2))
+}
+
+/// Divide a pista de um canal: (parte da onda, parte do espectrograma).
+fn lane_parts(lane: Rect, view: TrackView) -> (Option<Rect>, Option<Rect>) {
+    match view {
+        TrackView::Wave => (Some(lane), None),
+        TrackView::Spectrogram => (None, Some(lane)),
+        TrackView::Multi => {
+            let mid = lane.center().y;
+            (
+                Some(Rect::from_min_max(lane.min, pos2(lane.right(), mid))),
+                Some(Rect::from_min_max(pos2(lane.left(), mid), lane.max)),
+            )
+        }
+    }
+}
 
 /// Amostras de uma faixa (um vetor por canal) e os picos de cada canal.
 type TrackAudio = (Arc<Planar>, Arc<Vec<Vec<(f32, f32)>>>);
@@ -124,6 +181,16 @@ struct TrackCache {
     audio: TrackAudio,
 }
 
+/// Espectrograma de uma faixa: uma textura por canal.
+struct SpecCache {
+    segments: Vec<Segment>,
+    channels: u8,
+    textures: Vec<egui::TextureHandle>,
+    /// Amostras por coluna e número de colunas (para mapear o tempo na textura).
+    hop: usize,
+    cols: usize,
+}
+
 pub struct VoiceApp {
     pub ed: Editor,
     pub path: Option<PathBuf>,
@@ -140,6 +207,10 @@ pub struct VoiceApp {
     pub spp: f64,
     v_scroll: f32,
     cache: HashMap<u64, TrackCache>,
+    spec_cache: HashMap<u64, SpecCache>,
+    views: HashMap<u64, TrackView>,
+    /// Onde o menu da área vazia foi aberto.
+    empty_menu: Option<Pos2>,
     player: Player,
     /// Mixagem tocando e em que amostra da timeline ela começa.
     play_buf: Option<Arc<Vec<f32>>>,
@@ -298,6 +369,9 @@ impl VoiceApp {
             spp: 400.0,
             v_scroll: 0.0,
             cache: HashMap::new(),
+            spec_cache: HashMap::new(),
+            views: HashMap::new(),
+            empty_menu: None,
             player: Player::spawn(RATE, 2),
             play_buf: None,
             play_offset: 0,
@@ -1511,7 +1585,12 @@ impl VoiceApp {
     }
 
     fn effects_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("Efeitos", |ui| {
+        ui.menu_button("Efeitos", |ui| self.effects_items(ui));
+    }
+
+    /// Itens dos efeitos (no menu "Efeitos" e no botão da faixa).
+    fn effects_items(&mut self, ui: &mut egui::Ui) {
+        {
             ui.label(
                 RichText::new(if self.sel.is_some() {
                     "Aplica na seleção"
@@ -1632,7 +1711,7 @@ impl VoiceApp {
                 ui.close();
                 self.apply_effect("Inverter", |p| effects::each(p, |s| s.reverse()));
             }
-        });
+        }
     }
 
     // ---------------------------------------------------------------- barra de ferramentas
@@ -1748,48 +1827,6 @@ impl VoiceApp {
                 self.tool == Tool::Envelope,
             ) {
                 self.tool = Tool::Envelope;
-            }
-            sep(ui);
-            let small = |ui: &mut egui::Ui, text: &str, tip: &str, enabled: bool| {
-                ui.add_enabled(
-                    enabled,
-                    egui::Button::new(text).min_size(vec2(30.0, 28.0)),
-                )
-                .on_hover_text(tip)
-                .clicked()
-            };
-            let has_sel = self.sel.is_some();
-            if small(ui, "Recortar", "Recortar (Ctrl+X)", has_sel) {
-                self.cut();
-            }
-            if small(ui, "Copiar", "Copiar (Ctrl+C)", has_sel) {
-                self.copy();
-            }
-            if small(ui, "Colar", "Colar (Ctrl+V)", self.ed.has_clipboard()) {
-                self.paste();
-            }
-            if small(ui, "Aparar", "Aparar: fica só a seleção (Ctrl+T)", has_sel) {
-                self.trim();
-            }
-            if small(ui, "Silenciar", "Silenciar a seleção (Ctrl+L)", has_sel) {
-                self.silence();
-            }
-            sep(ui);
-            if small(
-                ui,
-                "Desfazer",
-                "Desfazer (Ctrl+Z)",
-                self.ed.undo_label().is_some(),
-            ) {
-                self.undo();
-            }
-            if small(
-                ui,
-                "Refazer",
-                "Refazer (Ctrl+Y)",
-                self.ed.redo_label().is_some(),
-            ) {
-                self.redo();
             }
             sep(ui);
             ui.menu_button("Configuração de áudio", |ui| self.audio_setup_menu(ui))
@@ -1969,6 +2006,55 @@ impl VoiceApp {
         self.cache.get(&id).map(|c| c.audio.clone())
     }
 
+    /// Texturas do espectrograma da faixa (calcula na primeira vez e quando os trechos mudam).
+    fn spec_for(
+        &mut self,
+        ctx: &egui::Context,
+        id: u64,
+    ) -> Option<(Vec<egui::TextureHandle>, usize, usize)> {
+        let t = self.ed.session().track(id)?;
+        let fresh = self
+            .spec_cache
+            .get(&id)
+            .is_some_and(|c| c.segments == t.segments && c.channels == t.channels);
+        if !fresh {
+            let (segments, channels) = (t.segments.clone(), t.channels);
+            let (planar, _) = self.track_data(id)?;
+            let mut textures = Vec::new();
+            let (mut hop, mut cols) = (1, 1);
+            for (c, ch) in planar.iter().enumerate() {
+                let spec = wave::spectrogram(ch, RATE);
+                (hop, cols) = (spec.hop, spec.cols);
+                // Linha 0 da imagem = agudos, para a textura sair de cabeça para cima.
+                let mut pixels = vec![Color32::BLACK; spec.cols * spec.bins];
+                for col in 0..spec.cols {
+                    for bin in 0..spec.bins {
+                        pixels[(spec.bins - 1 - bin) * spec.cols + col] =
+                            heat(spec.data[col * spec.bins + bin]);
+                    }
+                }
+                let image = egui::ColorImage::new([spec.cols, spec.bins], pixels);
+                textures.push(ctx.load_texture(
+                    format!("spec-{id}-{c}"),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+            self.spec_cache.insert(
+                id,
+                SpecCache {
+                    segments,
+                    channels,
+                    textures,
+                    hop,
+                    cols,
+                },
+            );
+        }
+        let c = self.spec_cache.get(&id)?;
+        Some((c.textures.clone(), c.hop, c.cols))
+    }
+
     /// Retângulos das faixas (altura conforme mono/estéreo), já com a rolagem.
     fn rows(&self, lanes: Rect, left: f32, right: f32) -> Vec<(u64, Rect)> {
         let mut y = lanes.top() - self.v_scroll;
@@ -1999,6 +2085,7 @@ impl VoiceApp {
     }
 
     fn tracks_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let area = ui.available_rect_before_wrap();
         self.wave_width = area.width() - TCP_W;
         let painter = ui.painter_at(area);
@@ -2109,6 +2196,16 @@ impl VoiceApp {
         let wave_area = Rect::from_min_max(pos2(wave_left, lanes.top()), lanes.max);
         let resp = ui.interact(wave_area, ui.id().with("waves"), Sense::click_and_drag());
         let (cmd, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+        let rows_bottom = rows
+            .last()
+            .map_or(lanes.top(), |(_, r)| r.bottom() + TRACK_GAP);
+        if resp.secondary_clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+            && p.y >= rows_bottom
+        {
+            self.empty_menu = Some(p);
+        }
+        self.empty_area_menu(&ctx);
         let clip_under = |p: Pos2, me: &Self| -> ClipHit {
             let i = row_at(p.y)?;
             let (id, r) = rows[i];
@@ -2161,6 +2258,16 @@ impl VoiceApp {
                 );
             }
             let has_env = !track.envelope.is_empty();
+            let view = self.views.get(id).copied().unwrap_or_default();
+            let spec = if view == TrackView::Wave {
+                None
+            } else {
+                self.spec_for(&ctx, *id)
+            };
+            let (wave_col, wave_sel) = {
+                let c = wave_color(track.color);
+                (c, c.lerp_to_gamma(Color32::WHITE, 0.6))
+            };
             for (ci, (a, b)) in track.clips().iter().enumerate() {
                 let (x0, x1) = (x_of(*a as f64, self), x_of(*b as f64, self));
                 if x1 < wave.left() || x0 > wave.right() {
@@ -2195,17 +2302,37 @@ impl VoiceApp {
                 );
                 let inner = Rect::from_min_max(pos2(body.left(), head.bottom()), body.max);
                 for (c, lane) in Self::channel_lanes(inner, planar.len()).iter().enumerate() {
-                    let mid = lane.center().y;
-                    let half = lane.height() / 2.0 - 3.0;
                     if c > 0 {
                         wp.line_segment(
                             [lane.left_top(), lane.right_top()],
                             Stroke::new(1.0, theme::BORDER),
                         );
                     }
+                    let (wave_lane, spec_lane) = lane_parts(*lane, view);
+                    if let (Some(sl), Some((textures, hop, cols))) = (spec_lane, &spec)
+                        && let Some(tex) = textures.get(c)
+                    {
+                        let (xa, xb) = (x0.max(wave.left()), x1.min(wave.right()));
+                        if xb > xa {
+                            let total = (hop * cols) as f64;
+                            let uv = Rect::from_min_max(
+                                pos2((s_at(xa, self) / total).min(1.0) as f32, 0.0),
+                                pos2((s_at(xb, self) / total).min(1.0) as f32, 1.0),
+                            );
+                            wp.image(
+                                tex.id(),
+                                Rect::from_min_max(pos2(xa, sl.top()), pos2(xb, sl.bottom())),
+                                uv,
+                                Color32::WHITE,
+                            );
+                        }
+                    }
+                    let Some(lane) = wave_lane else { continue };
+                    let mid = lane.center().y;
+                    let half = lane.height() / 2.0 - 3.0;
                     wp.line_segment(
                         [pos2(lane.left(), mid), pos2(lane.right(), mid)],
-                        Stroke::new(1.0, WAVE_BLUE.gamma_multiply(0.35)),
+                        Stroke::new(1.0, wave_col.gamma_multiply(0.35)),
                     );
                     let mut x = x0.max(wave.left());
                     while x < x1.min(wave.right()) {
@@ -2223,7 +2350,7 @@ impl VoiceApp {
                                 pos2(x, mid - shape(hi) * half),
                                 pos2(x, mid - shape(lo) * half + 0.5),
                             ],
-                            Stroke::new(1.0, if in_sel { WAVE_SEL } else { WAVE_BLUE }),
+                            Stroke::new(1.0, if in_sel { wave_sel } else { wave_col }),
                         );
                         x += 1.0;
                     }
@@ -2730,6 +2857,10 @@ impl VoiceApp {
             return;
         }
         let bg = ui.interact(visible, ui.id().with(("tcp", id)), Sense::click());
+        if bg.secondary_clicked() && !selected {
+            self.selected = vec![id];
+        }
+        bg.context_menu(|ui| self.track_menu(ui, id));
         if bg.clicked() {
             if ui.input(|i| i.modifiers.command || i.modifiers.shift) {
                 if let Some(pos) = self.selected.iter().position(|t| *t == id) {
@@ -2758,8 +2889,69 @@ impl VoiceApp {
                 theme::ACCENT,
             );
         }
+        // Régua da faixa (amplitude, ou frequência no espectrograma), como a do Audacity.
+        let view = self.views.get(&id).copied().unwrap_or_default();
+        let scale = Rect::from_min_max(pos2(tcp.right() - SCALE_W, tcp.top()), tcp.max);
+        painter.rect_filled(scale, 0.0, theme::BG_DARK);
+        painter.line_segment(
+            [scale.left_top(), scale.left_bottom()],
+            Stroke::new(1.0, theme::BORDER),
+        );
+        let scale_inner = Rect::from_min_max(
+            pos2(scale.left(), r.top() + CLIP_HEADER + 1.0),
+            pos2(scale.right(), r.bottom()),
+        );
+        let mark = |y: f32, text: &str, lane: Rect| {
+            let y = y.clamp(lane.top() + 5.0, lane.bottom() - 5.0);
+            painter.text(
+                pos2(scale.right() - 3.0, y),
+                Align2::RIGHT_CENTER,
+                text,
+                theme::text(9.0),
+                theme::TEXT_DIM,
+            );
+        };
+        for lane in Self::channel_lanes(scale_inner, track.channels as usize) {
+            let (wave_lane, spec_lane) = lane_parts(lane, view);
+            if let Some(wl) = wave_lane {
+                let (mid, half) = (wl.center().y, wl.height() / 2.0 - 3.0);
+                let marks: &[(f32, &str)] = if wl.height() > 70.0 {
+                    &[
+                        (1.0, "1,0"),
+                        (0.5, "0,5"),
+                        (0.0, "0,0"),
+                        (-0.5, "-0,5"),
+                        (-1.0, "-1,0"),
+                    ]
+                } else {
+                    &[(1.0, "1,0"), (0.0, "0,0"), (-1.0, "-1,0")]
+                };
+                for (v, text) in marks {
+                    mark(mid - shape(*v) * half, text, wl);
+                }
+            }
+            if let Some(sl) = spec_lane {
+                let marks: &[f32] = if sl.height() > 70.0 {
+                    &[8.0, 6.0, 4.0, 2.0, 0.0]
+                } else {
+                    &[8.0, 4.0, 0.0]
+                };
+                for khz in marks {
+                    let y = sl.bottom() - sl.height() * khz / 8.0;
+                    mark(
+                        y,
+                        &if *khz == 0.0 {
+                            "0".to_string()
+                        } else {
+                            format!("{khz:.0}k")
+                        },
+                        sl,
+                    );
+                }
+            }
+        }
         let x0 = tcp.left() + PAD;
-        let x1 = tcp.right() - PAD;
+        let x1 = tcp.right() - SCALE_W - 6.0;
         let row = |i: usize| {
             Rect::from_min_size(
                 pos2(x0, tcp.top() + 6.0 + i as f32 * (ROW + 4.0)),
@@ -2783,6 +2975,7 @@ impl VoiceApp {
         // Linha 1: × e nome.
         in_row(ui, row(0), &mut |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
+            ui.set_max_width(x1 - x0 - 24.0);
             if ui
                 .add(
                     egui::Button::new("×")
@@ -2797,7 +2990,7 @@ impl VoiceApp {
             if let Some((rid, text)) = &mut self.renaming
                 && *rid == id
             {
-                let rr = ui.add(egui::TextEdit::singleline(text).desired_width(x1 - x0 - 24.0));
+                let rr = ui.add(egui::TextEdit::singleline(text).desired_width(x1 - x0 - 48.0));
                 rr.request_focus();
                 if rr.lost_focus() {
                     let (rid, text) = self.renaming.take().expect("renomeando");
@@ -2815,6 +3008,17 @@ impl VoiceApp {
                     self.renaming = Some((id, track.name.clone()));
                 }
             }
+        });
+        let dots = Rect::from_min_size(pos2(x1 - 22.0, row(0).top()), vec2(22.0, ROW));
+        in_row(ui, dots, &mut |ui| {
+            egui::containers::menu::MenuButton::from_button(
+                egui::Button::new("…")
+                    .frame(false)
+                    .min_size(vec2(22.0, ROW)),
+            )
+            .ui(ui, |ui| self.track_menu(ui, id))
+            .0
+            .on_hover_text("Menu da faixa (ou botão direito no painel)");
         });
         // Linha 2: Mudo e Solo, metade cada.
         in_row(ui, row(1), &mut |ui| {
@@ -2839,7 +3043,20 @@ impl VoiceApp {
             toggle(ui, "Mudo", &mut m, Color32::from_rgb(230, 80, 70));
             toggle(ui, "Solo", &mut s, Color32::from_rgb(235, 200, 70));
         });
-        // Linhas 3 e 4: rótulo à esquerda (mesma coluna) e slider do mesmo tamanho.
+        // Linha 3: efeitos nesta faixa (aplicam na seleção, ou na faixa toda sem seleção).
+        in_row(ui, row(2), &mut |ui| {
+            let (resp, _) = egui::containers::menu::MenuButton::from_button(
+                egui::Button::new("Efeitos").min_size(vec2(x1 - x0, ROW)),
+            )
+            .ui(ui, |ui| {
+                if !self.selected.contains(&id) {
+                    self.selected = vec![id];
+                }
+                self.effects_items(ui);
+            });
+            resp.on_hover_text("Efeitos nesta faixa");
+        });
+        // Linhas 4 e 5: rótulo à esquerda (mesma coluna) e slider do mesmo tamanho.
         let slider_row = |ui: &mut egui::Ui,
                           rect: Rect,
                           label: &str,
@@ -2874,7 +3091,7 @@ impl VoiceApp {
             reset
         };
         let gain_tip = format!("{g:+.1} dB · duplo clique zera");
-        if slider_row(ui, row(2), "Ganho", &mut g, -36.0..=36.0, gain_tip) {
+        if slider_row(ui, row(3), "Ganho", &mut g, -36.0..=36.0, gain_tip) {
             g = 0.0;
         }
         let side = if p.abs() < 0.01 {
@@ -2886,7 +3103,7 @@ impl VoiceApp {
         };
         if slider_row(
             ui,
-            row(3),
+            row(4),
             "Pan",
             &mut p,
             -1.0..=1.0,
@@ -2932,6 +3149,176 @@ impl VoiceApp {
         }
         if remove {
             self.remove_tracks(vec![id]);
+        }
+    }
+
+    /// Menu da faixa (botão "…" e botão direito no painel), como o do Audacity.
+    fn track_menu(&mut self, ui: &mut egui::Ui, id: u64) {
+        let Some(track) = self.ed.session().track(id).cloned() else {
+            return;
+        };
+        let n = self.ed.session().tracks.len();
+        let pos = self
+            .ed
+            .session()
+            .tracks
+            .iter()
+            .position(|t| t.id == id)
+            .unwrap_or(0);
+        if ui.button("Renomear faixa…").clicked() {
+            ui.close();
+            self.renaming = Some((id, track.name.clone()));
+        }
+        ui.separator();
+        for (label, to, enabled) in [
+            ("Mover faixa para cima", MoveTo::Up, pos > 0),
+            ("Mover faixa para baixo", MoveTo::Down, pos + 1 < n),
+            ("Mover faixa para o topo", MoveTo::Top, pos > 0),
+            ("Mover faixa para a base", MoveTo::Bottom, pos + 1 < n),
+        ] {
+            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                ui.close();
+                self.stop();
+                let _ = self.ed.move_track(id, to);
+            }
+        }
+        ui.separator();
+        let mut view = self.views.get(&id).copied().unwrap_or_default();
+        let before = view;
+        ui.radio_value(
+            &mut view,
+            TrackView::Multi,
+            "Multi-view (onda + espectrograma)",
+        );
+        ui.radio_value(&mut view, TrackView::Wave, "Forma de onda");
+        ui.radio_value(&mut view, TrackView::Spectrogram, "Espectrograma");
+        if view != before {
+            self.views.insert(id, view);
+            ui.close();
+        }
+        ui.menu_button("Cor da onda", |ui| {
+            for (i, (name, color)) in WAVE_COLORS.iter().enumerate() {
+                let text = RichText::new(format!("■  {name}")).color(*color);
+                if ui
+                    .selectable_label(track.color as usize == i, text)
+                    .clicked()
+                {
+                    ui.close();
+                    let _ = self.ed.set_track_color(id, i as u8);
+                }
+            }
+        });
+        ui.separator();
+        // Unir: duas faixas mono selecionadas (a de cima vira o lado esquerdo).
+        let mono_pair: Option<(u64, u64)> = {
+            let picked: Vec<u64> = self
+                .ed
+                .session()
+                .tracks
+                .iter()
+                .filter(|t| self.selected.contains(&t.id) || t.id == id)
+                .map(|t| t.id)
+                .collect();
+            match picked.as_slice() {
+                [a, b]
+                    if picked
+                        .iter()
+                        .all(|p| self.ed.session().track(*p).is_some_and(|t| t.channels == 1)) =>
+                {
+                    Some((*a, *b))
+                }
+                _ => None,
+            }
+        };
+        if ui
+            .add_enabled(
+                mono_pair.is_some(),
+                egui::Button::new("Unir faixas estéreo"),
+            )
+            .on_disabled_hover_text("Selecione duas faixas mono (Ctrl+clique)")
+            .clicked()
+            && let Some((a, b)) = mono_pair
+        {
+            ui.close();
+            self.stop();
+            if let Ok(j) = self.ed.join_stereo(a, b) {
+                self.selected = vec![j];
+            }
+        }
+        let stereo = track.channels >= 2;
+        if ui
+            .add_enabled(stereo, egui::Button::new("Inverter canais estéreo"))
+            .clicked()
+        {
+            ui.close();
+            self.stop();
+            let _ = self.ed.swap_channels(id);
+        }
+        for (label, to_mono) in [
+            ("Separar faixas estéreo", false),
+            ("Separar estéreo para mono", true),
+        ] {
+            if ui.add_enabled(stereo, egui::Button::new(label)).clicked() {
+                ui.close();
+                self.stop();
+                if let Ok(ids) = self.ed.split_stereo(id, to_mono) {
+                    self.views.remove(&id);
+                    self.selected = ids;
+                }
+            }
+        }
+    }
+
+    /// Menu da área vazia embaixo das faixas (botão direito).
+    fn empty_area_menu(&mut self, ctx: &egui::Context) {
+        let Some(pos) = self.empty_menu else {
+            return;
+        };
+        let mut close = ctx.input(|i| i.key_pressed(Key::Escape));
+        let area = egui::Area::new(egui::Id::new("empty_area_menu"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                egui::Frame::menu(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(190.0);
+                    if ui.button("Adicionar faixa mono").clicked() {
+                        close = true;
+                        let id = self.ed.add_track(vec![Vec::new()], 0, None);
+                        self.selected = vec![id];
+                    }
+                    if ui.button("Adicionar faixa estéreo").clicked() {
+                        close = true;
+                        let id = self.ed.add_track(vec![Vec::new(), Vec::new()], 0, None);
+                        self.selected = vec![id];
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(
+                            !self.ed.session().is_empty(),
+                            egui::Button::new("Exportar áudio…").shortcut_text("Ctrl+Shift+E"),
+                        )
+                        .clicked()
+                    {
+                        close = true;
+                        self.export_dialog(false);
+                    }
+                    if ui
+                        .add(egui::Button::new("Selecionar tudo").shortcut_text("Ctrl+A"))
+                        .clicked()
+                    {
+                        close = true;
+                        self.select_all();
+                    }
+                });
+            });
+        let outside = ctx.input(|i| {
+            i.pointer.any_pressed()
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|p| !area.response.rect.contains(p))
+        });
+        if close || outside {
+            self.empty_menu = None;
         }
     }
 
@@ -3514,6 +3901,27 @@ mod tests {
 
     fn mono(app: &VoiceApp, id: u64) -> Vec<f32> {
         app.ed.render(id).remove(0)
+    }
+
+    /// Desenha os menus da faixa (mono e estéreo) e o da área vazia sem travar.
+    #[test]
+    fn track_menus_render_for_mono_and_stereo() {
+        let (mut app, mono_id) = app_with(vec![0.1; 1000]);
+        let st = app
+            .ed
+            .add_track(vec![vec![0.1; 1000], vec![0.2; 1000]], 0, None);
+        let ctx = egui::Context::default();
+        app.empty_menu = Some(pos2(10.0, 10.0));
+        for _ in 0..2 {
+            let out = ctx.run_ui(Default::default(), |ui| {
+                app.track_menu(ui, mono_id);
+                app.track_menu(ui, st);
+                app.effects_items(ui);
+                app.empty_area_menu(&ui.ctx().clone());
+            });
+            out.drop_without_applying_deltas();
+        }
+        assert!(app.empty_menu.is_some());
     }
 
     #[test]

@@ -9,7 +9,7 @@ mod editor;
 mod file;
 mod wav;
 
-pub use editor::{Audio, EditError, Editor, Planar};
+pub use editor::{Audio, EditError, Editor, MoveTo, Planar};
 pub use file::{FileError, export_audio, load_session, save_session};
 pub use wav::{read_wav_f32, write_wav_f32};
 
@@ -73,6 +73,9 @@ pub struct Track {
     pub mute: bool,
     #[serde(default)]
     pub solo: bool,
+    /// Cor da onda (índice numa paleta do app; 0 = azul padrão).
+    #[serde(default)]
+    pub color: u8,
 }
 
 fn one() -> u8 {
@@ -91,6 +94,7 @@ impl Track {
             pan: 0.0,
             mute: false,
             solo: false,
+            color: 0,
         }
     }
 

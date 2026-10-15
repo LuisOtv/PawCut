@@ -2747,6 +2747,7 @@ dependencies = [
  "paw-ui",
  "pawvoice-core",
  "rfd",
+ "rustfft",
  "serde",
  "serde_json",
  "tempfile",

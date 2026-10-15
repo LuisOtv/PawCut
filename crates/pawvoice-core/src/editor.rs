@@ -17,6 +17,19 @@ pub enum EditError {
     EmptyRange,
     #[error("a área de transferência está vazia")]
     EmptyClipboard,
+    #[error("a faixa não é estéreo")]
+    NotStereo,
+    #[error("escolha duas faixas mono")]
+    NeedTwoMono,
+}
+
+/// Para onde mover uma faixa na lista.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveTo {
+    Up,
+    Down,
+    Top,
+    Bottom,
 }
 
 /// Áudio imutável de uma fonte (intercalado).
@@ -370,6 +383,143 @@ impl Editor {
         self.session.tracks.retain(|t| !ids.contains(&t.id));
         self.prune();
         Ok(())
+    }
+
+    /// Muda a faixa de lugar na lista. Já no limite: não faz nada.
+    pub fn move_track(&mut self, id: u64, to: MoveTo) -> Result<(), EditError> {
+        let i = self
+            .session
+            .tracks
+            .iter()
+            .position(|t| t.id == id)
+            .ok_or(EditError::NoTrack)?;
+        let last = self.session.tracks.len() - 1;
+        let j = match to {
+            MoveTo::Up => i.saturating_sub(1),
+            MoveTo::Down => (i + 1).min(last),
+            MoveTo::Top => 0,
+            MoveTo::Bottom => last,
+        };
+        if i == j {
+            return Ok(());
+        }
+        self.checkpoint("Mover faixa");
+        let t = self.session.tracks.remove(i);
+        self.session.tracks.insert(j, t);
+        Ok(())
+    }
+
+    pub fn set_track_color(&mut self, id: u64, color: u8) -> Result<(), EditError> {
+        if self.session.track(id).ok_or(EditError::NoTrack)?.color == color {
+            return Ok(());
+        }
+        self.checkpoint("Cor da onda");
+        self.track_mut(id)?.color = color;
+        Ok(())
+    }
+
+    /// Refaz cada trecho com áudio por `f` (silêncios ficam como estão), guardando o resultado
+    /// em fontes novas; assim os clipes da faixa continuam do mesmo tamanho e no mesmo lugar.
+    fn remap(
+        &mut self,
+        segs: &[Segment],
+        channels: u8,
+        f: &dyn Fn(Planar) -> Planar,
+    ) -> Vec<Segment> {
+        segs.iter()
+            .map(|s| {
+                if s.source == SILENCE {
+                    *s
+                } else {
+                    let planar = f(self.render_segments(&[*s], channels));
+                    self.add_source(&planar)
+                }
+            })
+            .collect()
+    }
+
+    /// Troca esquerda e direita de uma faixa estéreo.
+    pub fn swap_channels(&mut self, id: u64) -> Result<(), EditError> {
+        let t = self.session.track(id).ok_or(EditError::NoTrack)?.clone();
+        if t.channels < 2 {
+            return Err(EditError::NotStereo);
+        }
+        self.checkpoint("Inverter canais");
+        let segs = self.remap(&t.segments, t.channels, &|mut p| {
+            p.reverse();
+            p
+        });
+        self.track_mut(id)?.segments = segs;
+        Ok(())
+    }
+
+    /// Divide uma faixa estéreo em duas mono (esquerda e direita), no lugar dela. Com `to_mono`
+    /// as duas ficam no centro; senão cada uma vai para o seu lado, como estava.
+    pub fn split_stereo(&mut self, id: u64, to_mono: bool) -> Result<Vec<u64>, EditError> {
+        let t = self.session.track(id).ok_or(EditError::NoTrack)?.clone();
+        if t.channels < 2 {
+            return Err(EditError::NotStereo);
+        }
+        let at = self
+            .session
+            .tracks
+            .iter()
+            .position(|x| x.id == id)
+            .unwrap_or(0);
+        self.checkpoint("Separar estéreo");
+        let mut ids = Vec::new();
+        for (c, suffix) in ["E", "D"].into_iter().enumerate() {
+            let segs = self.remap(&t.segments, t.channels, &|p| vec![p[c].clone()]);
+            let nid = self.session.fresh();
+            let mut n = Track::new(nid, format!("{} ({suffix})", t.name), segs);
+            n.channels = 1;
+            n.envelope = t.envelope.clone();
+            n.gain_db = t.gain_db;
+            n.mute = t.mute;
+            n.solo = t.solo;
+            n.color = t.color;
+            n.pan = if to_mono {
+                0.0
+            } else if c == 0 {
+                -1.0
+            } else {
+                1.0
+            };
+            self.session.tracks.insert(at + 1 + c, n);
+            ids.push(nid);
+        }
+        self.session.tracks.remove(at);
+        self.prune();
+        Ok(ids)
+    }
+
+    /// Junta duas faixas mono numa estéreo (a primeira vira a esquerda). O resultado ocupa o
+    /// lugar da primeira, com o ganho dela; os trechos viram um clipe só.
+    pub fn join_stereo(&mut self, left: u64, right: u64) -> Result<u64, EditError> {
+        let (l, r) = (
+            self.session.track(left).ok_or(EditError::NoTrack)?.clone(),
+            self.session.track(right).ok_or(EditError::NoTrack)?.clone(),
+        );
+        if left == right || l.channels != 1 || r.channels != 1 {
+            return Err(EditError::NeedTwoMono);
+        }
+        self.checkpoint("Unir faixas estéreo");
+        let (a, b) = (self.render(left), self.render(right));
+        let n = a[0].len().max(b[0].len());
+        let pad = |mut v: Vec<f32>| {
+            v.resize(n, 0.0);
+            v
+        };
+        let planar = vec![pad(a[0].clone()), pad(b[0].clone())];
+        let seg = self.add_source(&planar);
+        let t = self.track_mut(left)?;
+        t.channels = 2;
+        t.segments = vec![seg];
+        t.envelope.clear();
+        t.pan = 0.0;
+        self.session.tracks.retain(|x| x.id != right);
+        self.prune();
+        Ok(left)
     }
 
     pub fn rename_track(&mut self, id: u64, name: String) -> Result<(), EditError> {
@@ -800,6 +950,57 @@ mod tests {
         e.redo();
         assert_eq!(mono(&e, t).len(), 7);
         assert!(e.delete(&[t], 5, 5).is_err());
+    }
+
+    #[test]
+    fn move_swap_split_and_join() {
+        let (mut e, a) = editor_with(3);
+        let b = e.add_track(vec![vec![9.0, 9.0, 9.0]], 0, None);
+        let c = e.add_track(ramp(2), 0, None);
+        let order = |e: &Editor| e.session().tracks.iter().map(|t| t.id).collect::<Vec<_>>();
+        e.move_track(c, MoveTo::Top).unwrap();
+        assert_eq!(order(&e), vec![c, a, b]);
+        e.move_track(c, MoveTo::Down).unwrap();
+        e.move_track(a, MoveTo::Bottom).unwrap();
+        assert_eq!(order(&e), vec![c, b, a]);
+        e.move_track(b, MoveTo::Up).unwrap();
+        assert_eq!(order(&e), vec![b, c, a]);
+        e.undo();
+        assert_eq!(order(&e), vec![c, b, a]);
+
+        // junta a (1,2,3) e b (9,9,9) em estéreo, depois inverte e separa
+        let j = e.join_stereo(a, b).unwrap();
+        assert_eq!(e.session().track(j).unwrap().channels, 2);
+        assert_eq!(e.render(j), vec![vec![1., 2., 3.], vec![9., 9., 9.]]);
+        assert!(e.join_stereo(j, c).is_err());
+        e.swap_channels(j).unwrap();
+        assert_eq!(e.render(j), vec![vec![9., 9., 9.], vec![1., 2., 3.]]);
+        let parts = e.split_stereo(j, false).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(mono(&e, parts[0]), vec![9., 9., 9.]);
+        assert_eq!(mono(&e, parts[1]), vec![1., 2., 3.]);
+        let pans: Vec<f32> = parts
+            .iter()
+            .map(|p| e.session().track(*p).unwrap().pan)
+            .collect();
+        assert_eq!(pans, vec![-1.0, 1.0]);
+        assert!(e.session().track(j).is_none());
+        assert!(e.swap_channels(parts[0]).is_err());
+    }
+
+    #[test]
+    fn split_to_mono_centers_both_and_keeps_gaps() {
+        let mut e = Editor::new(Session::new(48_000), BTreeMap::new());
+        let st = e.add_track(vec![vec![1.0, 2.0], vec![3.0, 4.0]], 2, None);
+        let parts = e.split_stereo(st, true).unwrap();
+        assert_eq!(mono(&e, parts[1]), vec![0., 0., 3., 4.]);
+        assert!(
+            parts
+                .iter()
+                .all(|p| e.session().track(*p).unwrap().pan == 0.0)
+        );
+        e.set_track_color(parts[0], 3).unwrap();
+        assert_eq!(e.session().track(parts[0]).unwrap().color, 3);
     }
 
     #[test]

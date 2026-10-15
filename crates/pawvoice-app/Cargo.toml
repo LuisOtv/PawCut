@@ -18,6 +18,7 @@ rfd = "0.17"
 image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+rustfft = "6"
 winit = { version = "0.30", default-features = false, features = ["x11"] }
 
 [dev-dependencies]
