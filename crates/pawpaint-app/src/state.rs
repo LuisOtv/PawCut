@@ -413,6 +413,8 @@ pub struct State {
     /// A ferramenta acabou de mudar (o Transformar já solta a camada).
     pub tool_changed: bool,
     pub last_autosave: std::time::Instant,
+    /// Paleta rápida (botão direito na tela, como no Krita): onde ela abriu.
+    pub popup_palette: Option<egui::Pos2>,
 }
 
 pub enum DockCommand {

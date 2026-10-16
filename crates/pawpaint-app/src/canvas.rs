@@ -225,6 +225,13 @@ pub fn canvas_panel(st: &mut State, ui: &mut egui::Ui) {
         ui.id().with(("canvas", st.docs[cur].uid)),
         Sense::click_and_drag(),
     );
+    if resp.secondary_clicked()
+        && let Some(p) = resp.interact_pointer_pos()
+        && !matches!(st.tool, Tool::Text)
+    {
+        st.popup_palette = Some(p);
+    }
+    popup_palette(st, ui.ctx());
     // Roda do mouse: zoom em volta do cursor.
     if resp.hovered() {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y + (i.zoom_delta() - 1.0) * 300.0);
@@ -1159,3 +1166,107 @@ pub fn confirm(st: &mut State, apply: bool) {
 
 #[allow(dead_code)]
 fn unused(_: &Editor, _: GradientKind) {}
+
+/// Paleta rápida: pincéis e cores recentes perto do cursor, fecha ao escolher ou com Esc.
+fn popup_palette(st: &mut State, ctx: &egui::Context) {
+    let Some(at) = st.popup_palette else { return };
+    let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    let mut brush = None;
+    let mut color = None;
+    let screen = ctx.content_rect();
+    let pos = egui::pos2(
+        (at.x - 130.0).clamp(screen.left() + 8.0, screen.right() - 268.0),
+        (at.y - 20.0).clamp(screen.top() + 8.0, screen.bottom() - 260.0),
+    );
+    let area = egui::Area::new(egui::Id::new("popup-palette"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::same(10))
+                .show(ui, |ui| {
+                    ui.set_width(240.0);
+                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                    ui.label(
+                        egui::RichText::new("Pincéis")
+                            .small()
+                            .color(theme::TEXT_DIM),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        for (i, tex) in st.preset_thumbs.iter().enumerate() {
+                            let (r, resp) =
+                                ui.allocate_exact_size(egui::vec2(72.0, 22.0), Sense::click());
+                            let on = st.presets.get(i).is_some_and(|b| b.name == st.brush.name);
+                            if on {
+                                ui.painter().rect_filled(
+                                    r,
+                                    3.0,
+                                    theme::ACCENT.gamma_multiply(0.45),
+                                );
+                            } else if resp.hovered() {
+                                ui.painter().rect_filled(r, 3.0, theme::BAR_LIGHT);
+                            }
+                            ui.painter().image(
+                                tex.id(),
+                                r.shrink(2.0),
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                Color32::WHITE,
+                            );
+                            if let Some(b) = st.presets.get(i) {
+                                resp.clone().on_hover_text(&b.name);
+                            }
+                            if resp.clicked() {
+                                brush = Some(i);
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Cores recentes")
+                            .small()
+                            .color(theme::TEXT_DIM),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                        for c in st.prefs.recent.iter().take(20) {
+                            let (r, resp) =
+                                ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
+                            ui.painter()
+                                .rect_filled(r, 3.0, Color32::from_rgb(c[0], c[1], c[2]));
+                            if resp.clicked() {
+                                color = Some(*c);
+                            }
+                        }
+                        if st.prefs.recent.is_empty() {
+                            ui.label(
+                                egui::RichText::new("As cores que você usar aparecem aqui")
+                                    .small()
+                                    .color(theme::TEXT_DIM),
+                            );
+                        }
+                    });
+                });
+        });
+    if let Some(i) = brush {
+        st.brush = st.presets[i].clone();
+        if st.tool != Tool::Eraser && !st.tool.paints() {
+            crate::app::set_tool(st, Tool::Brush);
+        }
+        close = true;
+    }
+    if let Some(c) = color {
+        st.fg = c;
+        st.hsv = crate::state::rgb_to_hsv(c);
+        close = true;
+    }
+    let outside = ctx.input(|i| i.pointer.any_pressed())
+        && ctx
+            .pointer_interact_pos()
+            .is_some_and(|p| !area.response.rect.contains(p));
+    if close || outside {
+        st.popup_palette = None;
+    }
+}

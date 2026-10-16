@@ -292,6 +292,7 @@ impl PaintApp {
                 allow_close: false,
                 tool_changed: false,
                 last_autosave: std::time::Instant::now(),
+                popup_palette: None,
             },
             last_title: String::new(),
             last_layout: String::new(),
@@ -1346,6 +1347,19 @@ impl PaintApp {
         } else if hit(ctrl, Key::I) {
             quick_filter(st, Filter::Invert, "Inverter cores");
         }
+        // Como no Krita: Ctrl+PgUp/PgDn sobe e desce a camada ativa.
+        for (key, step) in [(Key::PageUp, 1isize), (Key::PageDown, -1)] {
+            if hit(ctrl, key)
+                && let Some(d) = st.doc_mut()
+            {
+                let ids: Vec<_> = d.ed.doc().layers.iter().map(|l| l.id).collect();
+                if let Some(i) = ids.iter().position(|id| *id == d.active)
+                    && let Some(next) = i.checked_add_signed(step).and_then(|n| ids.get(n))
+                {
+                    d.active = *next;
+                }
+            }
+        }
         if hit(ctrl, Key::J) {
             dup_layer(st);
         }
@@ -2215,6 +2229,54 @@ mod tests {
         assert_eq!(d.ed.undo_label(), Some("Pincel"));
         d.ed.undo();
         assert_eq!(h.px(140, 100), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn right_click_opens_the_quick_palette_and_picking_a_recent_color_closes_it() {
+        let mut h = Harness::new();
+        h.app.st.prefs.recent = vec![[10, 20, 30]];
+        h.app.st.tool = Tool::Brush;
+        h.mv(100.0, 100.0);
+        for pressed in [true, false] {
+            let pos = h.screen(100.0, 100.0);
+            h.frame(vec![Event::PointerButton {
+                pos,
+                button: PointerButton::Secondary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            }]);
+        }
+        h.frame(vec![]);
+        let at = h.app.st.popup_palette.expect("a paleta rápida abre");
+        // As cores recentes ficam abaixo dos pincéis; clica por tentativa no primeiro swatch.
+        let mut chosen = false;
+        for (dy, dx) in (20..260)
+            .step_by(4)
+            .flat_map(|dy| [22.0, 50.0, 78.0].map(|dx| (dy, dx)))
+        {
+            h.app.st.popup_palette = Some(at);
+            h.frame(vec![]);
+            h.frame(vec![]);
+            let p = Pos2::new(
+                (at.x - 130.0).max(8.0) + dx,
+                (at.y - 20.0).max(8.0) + dy as f32,
+            );
+            h.frame(vec![Event::PointerMoved(p)]);
+            for pressed in [true, false] {
+                h.frame(vec![Event::PointerButton {
+                    pos: p,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::NONE,
+                }]);
+            }
+            if h.app.st.fg == [10, 20, 30] {
+                chosen = true;
+                break;
+            }
+        }
+        assert!(chosen, "escolher a cor recente muda a cor da frente");
+        assert!(h.app.st.popup_palette.is_none());
     }
 
     #[test]
