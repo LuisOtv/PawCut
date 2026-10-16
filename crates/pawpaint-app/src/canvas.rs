@@ -303,6 +303,27 @@ pub fn canvas_panel(st: &mut State, ui: &mut egui::Ui) {
         egui::StrokeKind::Outside,
     );
 
+    // Grade de pixels quando o zoom é bem alto (dá para ver cada pixel).
+    if zoom >= 8.0 {
+        let vis = canvas.intersect(area);
+        let g = Stroke::new(1.0, Color32::from_black_alpha(55));
+        let (x0, x1) = (
+            ((vis.left() - origin.x) / zoom).floor() as i32,
+            ((vis.right() - origin.x) / zoom).ceil() as i32,
+        );
+        let (y0, y1) = (
+            ((vis.top() - origin.y) / zoom).floor() as i32,
+            ((vis.bottom() - origin.y) / zoom).ceil() as i32,
+        );
+        for x in x0..=x1 {
+            let sx = origin.x + x as f32 * zoom;
+            clip.line_segment([pos2(sx, vis.top()), pos2(sx, vis.bottom())], g);
+        }
+        for y in y0..=y1 {
+            let sy = origin.y + y as f32 * zoom;
+            clip.line_segment([pos2(vis.left(), sy), pos2(vis.right(), sy)], g);
+        }
+    }
     // Eixos do espelho.
     if st.mirror.0 {
         let x = canvas.center().x;
