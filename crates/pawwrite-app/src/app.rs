@@ -27,6 +27,8 @@ struct Settings {
     wpm: f32,
     font_size: f32,
     outline: bool,
+    /// Duração que o vídeo deve ter, em minutos (0 = sem meta).
+    target_min: f32,
 }
 
 impl Default for Settings {
@@ -35,6 +37,7 @@ impl Default for Settings {
             wpm: core::DEFAULT_WPM,
             font_size: 17.0,
             outline: true,
+            target_min: 0.0,
         }
     }
 }
@@ -896,6 +899,26 @@ impl WriteApp {
                         .color(theme::TEXT_DIM),
                 );
             }
+            if self.settings.target_min > 0.0 {
+                let diff = core::seconds(words, wpm) - self.settings.target_min * 60.0;
+                let (text, color) = if diff.abs() < 5.0 {
+                    (
+                        "na meta".to_string(),
+                        egui::Color32::from_rgb(110, 200, 130),
+                    )
+                } else if diff > 0.0 {
+                    (
+                        format!("{} acima da meta", core::format_duration(diff)),
+                        egui::Color32::from_rgb(240, 150, 90),
+                    )
+                } else {
+                    (
+                        format!("faltam {}", core::format_duration(-diff)),
+                        theme::TEXT_DIM,
+                    )
+                };
+                ui.label(RichText::new(text).small().color(color));
+            }
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(8.0);
                 if self.dirty() {
@@ -916,6 +939,23 @@ impl WriteApp {
                     self.save_settings();
                 }
                 ui.label(RichText::new("Ritmo").small().color(theme::TEXT_DIM));
+                ui.add_space(14.0);
+                let mut t = self.settings.target_min;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut t)
+                            .range(0.0..=180.0)
+                            .speed(0.1)
+                            .fixed_decimals(1)
+                            .suffix(" min"),
+                    )
+                    .on_hover_text("Duração que o vídeo deve ter (0 desliga a meta)")
+                    .changed()
+                {
+                    self.settings.target_min = t;
+                    self.save_settings();
+                }
+                ui.label(RichText::new("Meta").small().color(theme::TEXT_DIM));
             });
         });
     }
