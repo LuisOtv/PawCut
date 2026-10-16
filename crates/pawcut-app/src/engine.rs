@@ -219,13 +219,12 @@ impl AudioPlayer {
         self.playing.store(true, Ordering::SeqCst);
     }
 
-    /// Troca o projeto sem reiniciar (edição durante a reprodução).
+    /// Troca o projeto sem reiniciar (edição durante a reprodução). Não mexe na geração: o laço
+    /// de áudio continua do mesmo ponto, sem esvaziar o buffer da placa (isso repetia trechos e
+    /// picotava o som a cada ajuste de volume) e faz um crossfade curto entre os dois projetos.
     pub fn update_project(&self, project: Arc<Project>) {
         if let Ok(mut s) = self.state.lock() {
-            let resume = self.position.load(Ordering::SeqCst);
             s.project = Some(project);
-            s.start_sample = resume;
-            s.generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         }
     }
 
@@ -260,6 +259,18 @@ impl AudioPlayer {
     }
 }
 
+/// Mistura linear de `before` (some) com `after` (aparece) ao longo do trecho, in loco em `after`.
+/// Os dois são estéreo intercalado e têm o mesmo tamanho.
+fn crossfade(before: &[f32], after: &mut [f32]) {
+    let frames = after.len() / 2;
+    for (i, (b, a)) in before.chunks(2).zip(after.chunks_mut(2)).enumerate() {
+        let t = (i as f32 + 0.5) / frames as f32;
+        for (b, a) in b.iter().zip(a.iter_mut()) {
+            *a = *b * (1.0 - t) + *a * t;
+        }
+    }
+}
+
 fn audio_loop(
     sample_rate: u32,
     state: Arc<Mutex<AudioState>>,
@@ -269,6 +280,7 @@ fn audio_loop(
     levels: Arc<[AtomicU32; 2]>,
     stop_at: Arc<AtomicI64>,
 ) {
+    use libpulse_binding::def::BufferAttr;
     use libpulse_binding::sample::{Format, Spec};
     use libpulse_binding::stream::Direction;
     use libpulse_simple_binding::Simple;
@@ -278,6 +290,15 @@ fn audio_loop(
         channels: 2,
         rate: sample_rate,
     };
+    // Buffer curto (~100 ms): uma edição feita durante o play é ouvida quase na hora, sem
+    // precisar esvaziar a fila da placa. O padrão do PulseAudio guarda ~250 ms.
+    let attr = BufferAttr {
+        maxlength: u32::MAX,
+        tlength: (sample_rate as u64 * 100 / 1000) as u32 * 2 * 4,
+        prebuf: u32::MAX,
+        minreq: u32::MAX,
+        fragsize: u32::MAX,
+    };
     let device = Simple::new(
         None,
         "PawCut",
@@ -286,12 +307,14 @@ fn audio_loop(
         "Reprodução",
         &spec,
         None,
-        None,
+        Some(&attr),
     )
     .ok();
     has_device.store(device.is_some(), Ordering::SeqCst);
     let mut renderer = Renderer::new(MediaLibrary::new((2, 2), sample_rate, default_cache_dir()));
     let mut current_gen = u64::MAX;
+    // Projeto que gerou o último trecho: se mudou sem reinício, o trecho novo entra em crossfade.
+    let mut previous: Option<Arc<Project>> = None;
     let mut pos = 0i64;
     let chunk_time = Duration::from_secs_f64(AUDIO_CHUNK as f64 / sample_rate as f64);
     loop {
@@ -326,6 +349,7 @@ fn audio_loop(
                 }
                 current_gen = u64::MAX;
             }
+            previous = None;
             thread::sleep(Duration::from_millis(5));
             continue;
         }
@@ -337,14 +361,22 @@ fn audio_loop(
             thread::sleep(Duration::from_millis(5));
             continue;
         };
-        if generation != current_gen {
+        let restarted = generation != current_gen;
+        if restarted {
             if let Some(d) = &device {
                 let _ = d.flush();
             }
             current_gen = generation;
             pos = start;
         }
-        let samples = renderer.mix_audio(&project, pos, AUDIO_CHUNK);
+        let mut samples = renderer.mix_audio(&project, pos, AUDIO_CHUNK);
+        if !restarted && let Some(old) = previous.as_ref().filter(|p| !Arc::ptr_eq(p, &project)) {
+            // Edição durante o play (volume, corte, mudo...): passa do som antigo para o novo
+            // ao longo do trecho, em vez de dar um degrau (estalo).
+            let before = renderer.mix_audio(old, pos, AUDIO_CHUNK);
+            crossfade(&before, &mut samples);
+        }
+        previous = Some(project);
         for (ch, l) in levels.iter().enumerate() {
             let peak = samples
                 .iter()
@@ -546,5 +578,37 @@ impl ExportJob {
 
     pub fn finished(&self) -> Option<Result<(), String>> {
         self.result.lock().ok()?.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pawcut_core::ProjectSettings;
+
+    #[test]
+    fn crossfade_goes_from_old_to_new() {
+        let before = vec![1.0f32; 8];
+        let mut after = vec![0.0f32; 8];
+        crossfade(&before, &mut after);
+        // Começa quase todo no som antigo, termina quase todo no novo, sem degrau.
+        assert!(after[0] > 0.8 && after[7] < 0.2);
+        assert!(after.windows(2).all(|w| w[0] >= w[1]));
+    }
+
+    #[test]
+    fn editing_during_play_does_not_restart_the_audio() {
+        let p = Arc::new(Project::new(ProjectSettings::default()));
+        let player = AudioPlayer::spawn(48_000);
+        player.play(p.clone(), 4_800);
+        let g = player.generation.load(Ordering::SeqCst);
+        // Arrastar o volume manda um projeto novo por frame; nenhum pode reiniciar a reprodução.
+        for _ in 0..10 {
+            player.update_project(Arc::new(Project::new(ProjectSettings::default())));
+        }
+        assert_eq!(player.generation.load(Ordering::SeqCst), g);
+        let s = player.state.lock().unwrap();
+        assert_eq!(s.generation, g);
+        assert_eq!(s.start_sample, 4_800);
     }
 }

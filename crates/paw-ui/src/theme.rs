@@ -34,6 +34,8 @@ pub const ROW_H: f32 = 24.0;
 /// Colunas do Inspector.
 pub const LABEL_W: f32 = 104.0;
 pub const VALUE_W: f32 = 84.0;
+/// Largura de um campo numérico solto (fora do Inspector), com ou sem sufixo.
+pub const NUM_W: f32 = 64.0;
 
 pub fn mono(size: f32) -> FontId {
     FontId::monospace(size)
@@ -279,4 +281,21 @@ pub fn row(
     );
     ui.advance_cursor_after_rect(full);
     ui.add_space(2.0);
+}
+
+/// Roda `add` com largura mínima fixa para campos (`DragValue`, `TextEdit`, `ComboBox`).
+/// Sem isso o `DragValue` cresce e encolhe conforme os dígitos e o sufixo, e o layout pula
+/// enquanto o valor é arrastado ou digitado.
+pub fn fixed_width<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.x = width;
+        add(ui)
+    })
+    .inner
+}
+
+/// Largura para um campo de texto/combo: a desejada, mas nunca mais do que cabe no espaço
+/// que sobrou (em painéis estreitos o campo encolhe em vez de vazar para fora da linha).
+pub fn fit_width(ui: &egui::Ui, wanted: f32) -> f32 {
+    wanted.min(ui.available_width()).max(24.0)
 }

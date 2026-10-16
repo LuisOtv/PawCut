@@ -111,6 +111,15 @@ fn fit_fill_scales(p: &Project, clip: &Clip) -> Option<(f32, f32)> {
     Some(((pw / bw).min(ph / bh), (pw / bw).max(ph / bh)))
 }
 
+/// Quanto o valor muda por pixel arrastado, na unidade mostrada (% , px, °, dB). O valor
+/// antigo multiplicava pelo fator de escala, e Zoom/Opacidade (em %) saltavam 50 % por pixel.
+fn drag_speed(param: Param) -> f64 {
+    match param {
+        Param::VolumeDb => 0.2,
+        _ => 0.5,
+    }
+}
+
 fn default_of(param: Param) -> f32 {
     match param {
         Param::Scale | Param::Opacity => 1.0,
@@ -274,7 +283,7 @@ impl Workspace {
                     .add(
                         DragValue::new(&mut v)
                             .range(range)
-                            .speed(0.5 * mul.max(0.2))
+                            .speed(drag_speed(param))
                             .suffix(suffix),
                     )
                     .changed();
@@ -828,7 +837,7 @@ impl Workspace {
                             |ui| {
                                 let resp = ui.add(
                                     egui::TextEdit::singleline(&mut text)
-                                        .desired_width(theme::VALUE_W + 20.0)
+                                        .desired_width(theme::fit_width(ui, theme::VALUE_W + 20.0))
                                         .font(egui::TextStyle::Monospace),
                                 );
                                 if resp.changed() {
@@ -951,7 +960,7 @@ impl Workspace {
                                 "Curva do fade",
                                 |ui| {
                                     egui::ComboBox::from_id_salt(("fade-curve", id))
-                                        .width(theme::VALUE_W + 60.0)
+                                        .width(theme::fit_width(ui, theme::VALUE_W + 60.0))
                                         .selected_text(ease_label(curve))
                                         .show_ui(ui, |ui| {
                                             for e in pawcut_core::Ease::ALL {
@@ -1147,13 +1156,22 @@ impl Workspace {
         section(ui, "Título", |ui| {
             ui.horizontal(|ui| {
                 ui.add_space(theme::PAD);
-                changed |= ui
-                    .add(
-                        egui::TextEdit::multiline(&mut s.text)
-                            .desired_rows(2)
-                            .desired_width(ui.available_width() - theme::PAD),
-                    )
-                    .changed();
+                // Altura fixa com rolagem: o campo não cresce a cada linha digitada e o resto
+                // do Inspector não pula de lugar.
+                let width = (ui.available_width() - theme::PAD).max(40.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("title-text")
+                    .max_height(72.0)
+                    .max_width(width)
+                    .show(ui, |ui| {
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::multiline(&mut s.text)
+                                    .desired_rows(3)
+                                    .desired_width(width),
+                            )
+                            .changed();
+                    });
             });
             ui.add_space(4.0);
             row(
@@ -1161,7 +1179,10 @@ impl Workspace {
                 "Fonte",
                 |ui| {
                     changed |= ui
-                        .add(egui::TextEdit::singleline(&mut s.font).desired_width(140.0))
+                        .add(
+                            egui::TextEdit::singleline(&mut s.font)
+                                .desired_width(theme::fit_width(ui, 140.0)),
+                        )
                         .changed()
                 },
                 |_| {},

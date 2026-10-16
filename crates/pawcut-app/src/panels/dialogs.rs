@@ -352,9 +352,11 @@ impl Workspace {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut w).range(16..=8192));
-                    ui.label("×");
-                    ui.add(egui::DragValue::new(&mut h).range(16..=8192));
+                    crate::theme::fixed_width(ui, crate::theme::NUM_W, |ui| {
+                        ui.add(egui::DragValue::new(&mut w).range(16..=8192));
+                        ui.label("×");
+                        ui.add(egui::DragValue::new(&mut h).range(16..=8192));
+                    });
                 });
                 ui.label(
                     RichText::new(format!("FPS: {} (fixo depois de criado)", fps.as_f64()))
@@ -720,6 +722,8 @@ impl Workspace {
             .resizable(false)
             .default_width(560.0)
             .show(ctx, |ui| {
+                // Largura estável: trocar formato/resolução não faz a janela encolher e crescer.
+                ui.set_min_width(560.0);
                 let label = |ui: &mut egui::Ui, text: &str| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(RichText::new(text).color(crate::theme::TEXT_DIM));
@@ -789,17 +793,19 @@ impl Workspace {
                                         }
                                     });
                                 if RESOLUTIONS[d.opts.resolution].1 == Resolution::Custom {
-                                    ui.add(
-                                        egui::DragValue::new(&mut d.opts.custom.0)
-                                            .range(16..=8192)
-                                            .suffix(" L"),
-                                    );
-                                    ui.label("×");
-                                    ui.add(
-                                        egui::DragValue::new(&mut d.opts.custom.1)
-                                            .range(16..=8192)
-                                            .suffix(" A"),
-                                    );
+                                    crate::theme::fixed_width(ui, crate::theme::NUM_W, |ui| {
+                                        ui.add(
+                                            egui::DragValue::new(&mut d.opts.custom.0)
+                                                .range(16..=8192)
+                                                .suffix(" L"),
+                                        );
+                                        ui.label("×");
+                                        ui.add(
+                                            egui::DragValue::new(&mut d.opts.custom.1)
+                                                .range(16..=8192)
+                                                .suffix(" A"),
+                                        );
+                                    });
                                 } else {
                                     let (w, h) = d.opts.size(s.width, s.height);
                                     ui.label(RichText::new(format!("{w}×{h}")).weak());
@@ -1192,11 +1198,13 @@ impl Workspace {
                     });
                 ui.horizontal(|ui| {
                     ui.label("Resolução");
-                    ui.add(egui::DragValue::new(&mut d.width).range(16..=8192));
-                    ui.label("×");
-                    ui.add(egui::DragValue::new(&mut d.height).range(16..=8192));
-                    ui.label("FPS");
-                    ui.add(egui::DragValue::new(&mut d.fps).range(1..=120));
+                    crate::theme::fixed_width(ui, crate::theme::NUM_W, |ui| {
+                        ui.add(egui::DragValue::new(&mut d.width).range(16..=8192));
+                        ui.label("×");
+                        ui.add(egui::DragValue::new(&mut d.height).range(16..=8192));
+                        ui.label("FPS");
+                        ui.add(egui::DragValue::new(&mut d.fps).range(1..=120));
+                    });
                 });
                 ui.label(
                     RichText::new("Resolução e FPS não mudam depois de criado.")

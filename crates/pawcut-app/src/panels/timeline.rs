@@ -1830,41 +1830,50 @@ impl Workspace {
                     Rect::from_min_size(pos2(badge.right() + 8.0, y - 9.0), vec2(62.0, 18.0));
                 let pan_r =
                     Rect::from_min_size(pos2(vol_r.right() + 4.0, y - 9.0), vec2(44.0, 18.0));
-                let v = ui
-                    .put(
-                        vol_r,
-                        egui::DragValue::new(&mut vol)
-                            .range(-60.0..=12.0)
-                            .speed(0.2)
-                            .fixed_decimals(1)
-                            .suffix(" dB"),
-                    )
-                    .on_hover_text("Volume da faixa inteira");
-                let pn = ui
-                    .put(
-                        pan_r,
-                        egui::DragValue::new(&mut pan)
-                            .range(-1.0..=1.0)
-                            .speed(0.01)
-                            .custom_formatter(|v, _| match (v * 100.0).round() as i64 {
-                                0 => "C".into(),
-                                n if n < 0 => format!("E{}", -n),
-                                n => format!("D{n}"),
-                            })
-                            .custom_parser(|t| {
-                                let t = t.trim().to_uppercase();
-                                if t == "C" {
-                                    return Some(0.0);
-                                }
-                                let (sign, num) = match t.chars().next()? {
-                                    'E' | 'L' => (-1.0, &t[1..]),
-                                    'D' | 'R' => (1.0, &t[1..]),
-                                    _ => (1.0, t.as_str()),
-                                };
-                                num.parse::<f64>().ok().map(|n| sign * n / 100.0)
-                            }),
-                    )
-                    .on_hover_text("Pan (E = esquerda, D = direita, C = centro)");
+                // Campos do tamanho exato do retângulo: o padrão do DragValue (22 px de altura,
+                // largura que varia com os dígitos) vazava para fora da linha da faixa.
+                let mixer_field = |ui: &mut egui::Ui, r: Rect, add: egui::DragValue<'_>| {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
+                        ui.spacing_mut().interact_size = r.size();
+                        ui.add_sized(r.size(), add)
+                    })
+                    .inner
+                };
+                let v = mixer_field(
+                    ui,
+                    vol_r,
+                    egui::DragValue::new(&mut vol)
+                        .range(-60.0..=12.0)
+                        .speed(0.2)
+                        .fixed_decimals(1)
+                        .suffix(" dB"),
+                )
+                .on_hover_text("Volume da faixa inteira");
+                let pn = mixer_field(
+                    ui,
+                    pan_r,
+                    egui::DragValue::new(&mut pan)
+                        .range(-1.0..=1.0)
+                        .speed(0.01)
+                        .custom_formatter(|v, _| match (v * 100.0).round() as i64 {
+                            0 => "C".into(),
+                            n if n < 0 => format!("E{}", -n),
+                            n => format!("D{n}"),
+                        })
+                        .custom_parser(|t| {
+                            let t = t.trim().to_uppercase();
+                            if t == "C" {
+                                return Some(0.0);
+                            }
+                            let (sign, num) = match t.chars().next()? {
+                                'E' | 'L' => (-1.0, &t[1..]),
+                                'D' | 'R' => (1.0, &t[1..]),
+                                _ => (1.0, t.as_str()),
+                            };
+                            num.parse::<f64>().ok().map(|n| sign * n / 100.0)
+                        }),
+                )
+                .on_hover_text("Pan (E = esquerda, D = direita, C = centro)");
                 if v.changed() || pn.changed() {
                     self.st.apply_coalescing(
                         Edit::SetTrackMix {
