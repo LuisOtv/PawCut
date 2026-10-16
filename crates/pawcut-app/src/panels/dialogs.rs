@@ -332,6 +332,8 @@ impl Workspace {
         let mut open = true;
         let mut apply = false;
         Window::new("Configurações do projeto")
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -401,6 +403,8 @@ impl Workspace {
         let mut changed = false;
         let mut delete = false;
         Window::new(format!("Marcador {}", format_timecode(frame, fps)))
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -585,6 +589,8 @@ impl Workspace {
         let mut open = true;
         let mut jump = None;
         Window::new("Histórico")
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
             .open(&mut open)
             .default_size([300.0, 420.0])
             .default_pos(ctx.content_rect().right_top() + egui::vec2(-340.0, 80.0))
@@ -654,6 +660,8 @@ impl Workspace {
         let mut open = true;
         let mut restore = None;
         Window::new("Versões anteriores")
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
             .open(&mut open)
             .collapsible(false)
             .default_width(380.0)
@@ -717,6 +725,8 @@ impl Workspace {
         let mut still = false;
         let before = d.opts.clone();
         Window::new("Deliver — Exportar")
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -1105,6 +1115,8 @@ impl Workspace {
         }
         let mut open = true;
         Window::new("Preferences — Teclado")
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
             .open(&mut open)
             .default_size([520.0, 520.0])
             .show(ctx, |ui| {
@@ -1183,6 +1195,8 @@ impl Workspace {
         let mut open = true;
         let mut create = None;
         Window::new("Novo projeto")
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

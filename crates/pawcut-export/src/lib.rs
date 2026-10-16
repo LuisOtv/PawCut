@@ -170,7 +170,7 @@ pub fn export(
         return Err(ExportError::Offline { frame, path });
     }
     let work = tempfile::tempdir()?;
-    let audio = work.path().join("audio.f32");
+    let audio = work.path().join("audio.s16");
     let with_audio = settings.audio_only.is_some() || settings.audio_kbps.is_some();
     if with_audio {
         write_audio(project, renderer, from, total, &audio, cancel)?;
@@ -266,8 +266,11 @@ fn write_audio(
             return Err(ExportError::Cancelled);
         }
         let n = AUDIO_CHUNK.min((samples - pos) as usize);
+        // 16 bits bastam (o destino é AAC, MP3 ou WAV de 16 bits) e o arquivo temporário
+        // ocupa a metade do disco que ocuparia em float.
         for v in renderer.mix_audio(project, first + pos, n) {
-            out.write_all(&v.to_le_bytes())?;
+            let s = (v.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+            out.write_all(&s.to_le_bytes())?;
         }
         pos += n as i64;
     }
@@ -373,7 +376,7 @@ fn spawn_ffmpeg(
         (Some(audio), Some(kbps)) => {
             cmd.args([
                 "-f",
-                "f32le",
+                "s16le",
                 "-ar",
                 &s.sample_rate.to_string(),
                 "-ac",
@@ -428,7 +431,7 @@ fn spawn_audio_ffmpeg(
     cmd.args(["-v", "error", "-y"])
         .args([
             "-f",
-            "f32le",
+            "s16le",
             "-ar",
             &s.sample_rate.to_string(),
             "-ac",

@@ -85,3 +85,27 @@ fn peaks_find_min_and_max_per_bucket() {
     assert_eq!(peaks(&pcm, 2), vec![(-1.0, 1.0), (0.0, 0.5)]);
     assert!(peaks(&pcm, 0).is_empty());
 }
+
+#[test]
+fn decodes_16_bit_wav_whose_decoder_reports_no_channel_layout() {
+    // O WAV de 16 bits (o padrão do ffmpeg) vinha sem layout no ffmpeg 6/7 e a decodificação falhava.
+    let dir = tempfile::tempdir().unwrap();
+    for channels in ["1", "2"] {
+        let wav = dir.path().join(format!("s16-{channels}.wav"));
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=1000:duration=1")
+            .args(["-ac", channels, "-ar", "44100", "-c:a", "pcm_s16le"])
+            .arg(&wav)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let pcm = decode_audio(&wav, 48_000, 1.0).unwrap();
+        assert!(
+            pcm.frames().abs_diff(48_000) <= 200,
+            "frames = {}",
+            pcm.frames()
+        );
+    }
+}
