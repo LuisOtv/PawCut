@@ -283,6 +283,8 @@ zero.
 | PawVoice: Ganho, Pan e envelope só valiam no próximo play, e apertar play numa sessão longa travava a janela | 6.1: mixagem ao vivo por `MixSource` |
 | PawVoice: aplicar efeito em narração de vários minutos congelava a janela | 6.9: efeito em outra thread |
 | PawVoice: confirmar o campo de seleção sem digitar arredondava a seleção para o milissegundo | campo de texto só aplica o que foi editado |
+| PawVoice: abrir outro projeto (Ctrl+O, recentes, arrastar arquivo) descartava as mudanças sem perguntar | 7: qualquer caminho que troca o projeto pergunta antes se há mudanças (`ConfirmDiscard`) |
+| Trocar a saída de áudio deixava a thread do player antigo rodando para sempre | todo `Player` termina a thread quando é descartado |
 | PawVoice: Esc em diálogo, renomear faixa e campo de seleção não cancelava | 4.10 vale para todo campo e diálogo; Esc nunca descarta trabalho (recuperação) |
 
 ## 11. Checklist para uma tela nova

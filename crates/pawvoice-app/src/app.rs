@@ -145,15 +145,39 @@ enum Purpose {
 /// Janelinhas de parâmetros e confirmações.
 enum Dialog {
     Gain(f32),
-    Gate { threshold: f32, reduction: f32 },
+    Gate {
+        threshold: f32,
+        reduction: f32,
+    },
     Compressor(Compression),
-    Silences { threshold: f32, min: f32 },
-    NoiseReduction { reduction: f32, sensitivity: f32 },
-    BassTreble { bass: f32, treble: f32 },
+    Silences {
+        threshold: f32,
+        min: f32,
+    },
+    NoiseReduction {
+        reduction: f32,
+        sensitivity: f32,
+    },
+    BassTreble {
+        bass: f32,
+        treble: f32,
+    },
     Limiter(f32),
-    DeEss { threshold: f32, reduction: f32 },
+    DeEss {
+        threshold: f32,
+        reduction: f32,
+    },
     ConfirmClose,
+    /// Novo projeto ou abrir outro com mudanças não salvas: pergunta antes de descartar.
+    ConfirmDiscard(AfterDiscard),
     Recover(Vec<PathBuf>),
+}
+
+/// O que fazer depois que o usuário aceitar descartar o projeto atual.
+#[derive(Clone)]
+enum AfterDiscard {
+    New,
+    Open(PathBuf),
 }
 
 /// O que um arrasto no painel das faixas está fazendo.
@@ -1161,19 +1185,13 @@ impl VoiceApp {
             .unwrap_or("")
             .to_lowercase();
         match ext.as_str() {
-            "pawvoice" => match pawvoice_core::load_session(path) {
-                Ok(ed) => {
-                    self.stop();
-                    self.ed = ed;
-                    self.path = Some(path.to_path_buf());
-                    remember_project(path);
-                    self.cache.clear();
-                    self.select_none();
-                    self.cursor = 0;
-                    self.fit();
-                }
-                Err(e) => self.warn(format!("Não deu para abrir: {e}")),
-            },
+            "pawvoice" if self.ed.is_dirty() => {
+                // Abrir por cima descartaria o que não foi salvo: pergunta antes.
+                self.dialog = Some(Dialog::ConfirmDiscard(AfterDiscard::Open(
+                    path.to_path_buf(),
+                )));
+            }
+            "pawvoice" => self.open_project(path),
             "txt" | "md" => {
                 if let Ok(text) = std::fs::read_to_string(path) {
                     // Do roteiro do PawWrite vai só a fala (sem títulos, [notas] e // comentários).
@@ -1183,6 +1201,31 @@ impl VoiceApp {
                 }
             }
             _ => self.import(vec![path.to_path_buf()]),
+        }
+    }
+
+    fn new_project(&mut self) {
+        self.stop();
+        self.ed = Editor::new(Session::new(RATE), Default::default());
+        self.path = None;
+        self.cache.clear();
+        self.select_none();
+        self.cursor = 0;
+    }
+
+    fn open_project(&mut self, path: &Path) {
+        match pawvoice_core::load_session(path) {
+            Ok(ed) => {
+                self.stop();
+                self.ed = ed;
+                self.path = Some(path.to_path_buf());
+                remember_project(path);
+                self.cache.clear();
+                self.select_none();
+                self.cursor = 0;
+                self.fit();
+            }
+            Err(e) => self.warn(format!("Não deu para abrir: {e}")),
         }
     }
 
@@ -1491,14 +1534,9 @@ impl VoiceApp {
                 if item(ui, "Novo", "", true) {
                     ui.close();
                     if self.ed.is_dirty() {
-                        self.warn("Salve o projeto atual antes (Ctrl+S)");
+                        self.dialog = Some(Dialog::ConfirmDiscard(AfterDiscard::New));
                     } else {
-                        self.stop();
-                        self.ed = Editor::new(Session::new(RATE), Default::default());
-                        self.path = None;
-                        self.cache.clear();
-                        self.select_none();
-                        self.cursor = 0;
+                        self.new_project();
                     }
                 }
                 if item(ui, "Abrir…", "Ctrl+O", true) {
@@ -4001,11 +4039,12 @@ impl VoiceApp {
             Dialog::Limiter(_) => "Limitador",
             Dialog::DeEss { .. } => "De-esser",
             Dialog::ConfirmClose => "Sair sem salvar?",
+            Dialog::ConfirmDiscard(_) => "Descartar as mudanças?",
             Dialog::Recover(_) => "Recuperação automática",
         };
         let noise_info = self.noise.as_ref().map(|(_, secs)| *secs);
         let (is_confirm, is_recover) = (
-            matches!(dialog, Dialog::ConfirmClose),
+            matches!(dialog, Dialog::ConfirmClose | Dialog::ConfirmDiscard(_)),
             matches!(dialog, Dialog::Recover(_)),
         );
         let ready = !matches!(dialog, Dialog::NoiseReduction { .. }) || noise_info.is_some();
@@ -4129,7 +4168,7 @@ impl VoiceApp {
                         ui.add(egui::Slider::new(threshold, -50.0..=-15.0).text("limiar").suffix(" dB"));
                         ui.add(egui::Slider::new(reduction, 3.0..=24.0).text("redução máxima").suffix(" dB"));
                     }
-                    Dialog::ConfirmClose => {
+                    Dialog::ConfirmClose | Dialog::ConfirmDiscard(_) => {
                         ui.label("O projeto tem mudanças que não foram salvas.");
                     }
                     Dialog::Recover(files) => {
@@ -4144,6 +4183,7 @@ impl VoiceApp {
                 ui.horizontal(|ui| {
                     let (ok, cancel) = match dialog {
                         Dialog::ConfirmClose => ("Sair sem salvar", "Cancelar"),
+                        Dialog::ConfirmDiscard(_) => ("Descartar e continuar", "Cancelar"),
                         Dialog::Recover(_) => ("Recuperar", "Descartar"),
                         _ => ("Aplicar", "Cancelar"),
                     };
@@ -4226,6 +4266,8 @@ impl VoiceApp {
                 self.allow_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+            Some(Dialog::ConfirmDiscard(AfterDiscard::New)) => self.new_project(),
+            Some(Dialog::ConfirmDiscard(AfterDiscard::Open(path))) => self.open_project(&path),
             Some(Dialog::Recover(files)) => {
                 for f in files {
                     if let Ok(p) = read_spill(&f)
@@ -4455,6 +4497,30 @@ mod tests {
         // Desfazer volta ao áudio de antes.
         app.undo();
         assert!((mono(&app, id)[1000] - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn opening_a_project_over_unsaved_changes_asks_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("outro.pawvoice");
+        let (saved, _) = app_with(vec![0.5; 100]);
+        pawvoice_core::save_session(&saved.ed, &other).unwrap();
+
+        let (mut app, id) = app_with(vec![0.1; 1000]);
+        assert!(app.ed.is_dirty());
+        app.open_any(&other);
+        assert!(
+            matches!(app.dialog, Some(Dialog::ConfirmDiscard(_))),
+            "devia perguntar antes de descartar"
+        );
+        assert_eq!(mono(&app, id).len(), 1000, "nada foi descartado ainda");
+        // Depois de salvar (não sujo), abre direto.
+        app.dialog = None;
+        app.ed.mark_saved();
+        app.open_any(&other);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.ed.session().tracks.len(), 1);
+        assert_eq!(app.ed.session().len(), 100);
     }
 
     #[test]
