@@ -321,6 +321,7 @@ pub enum Dialog {
     LayerProps(LayerId),
     ConfirmClose(usize),
     ConfirmQuit,
+    Recover(Vec<PathBuf>),
 }
 
 /// O que o mouse está fazendo na tela, entre apertar e soltar.
@@ -398,6 +399,7 @@ pub struct State {
     pub allow_close: bool,
     /// A ferramenta acabou de mudar (o Transformar já solta a camada).
     pub tool_changed: bool,
+    pub last_autosave: std::time::Instant,
 }
 
 pub enum DockCommand {

@@ -75,6 +75,59 @@ pub fn save_brush_preset(st: &mut State, ctx: &egui::Context) {
     st.say("Pincel salvo");
 }
 
+// ---------------------------------------------------------------- recuperação automática
+
+fn autosave_dir() -> PathBuf {
+    if cfg!(test) {
+        return std::env::temp_dir().join("pawpaint-test-autosave");
+    }
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("pawpaint")
+        .join("autosave")
+}
+
+fn autosave_file(uid: u64) -> PathBuf {
+    autosave_dir().join(format!("{}-{uid}.pawpaint", std::process::id()))
+}
+
+/// Guarda uma cópia dos documentos com mudanças, para recuperar se o app fechar de repente.
+fn autosave(st: &mut State) {
+    st.last_autosave = std::time::Instant::now();
+    let _ = std::fs::create_dir_all(autosave_dir());
+    for d in &st.docs {
+        let f = autosave_file(d.uid);
+        if d.ed.is_dirty() && d.float.is_none() {
+            let _ = file::save_project(&d.ed, &f);
+        } else if !d.ed.is_dirty() {
+            let _ = std::fs::remove_file(&f);
+        }
+    }
+}
+
+/// Cópias de um app que não está mais rodando (as de instâncias vivas não são mexidas).
+fn leftovers() -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(autosave_dir()) else {
+        return Vec::new();
+    };
+    let mut v: Vec<PathBuf> = rd
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "pawpaint"))
+        .filter(|p| {
+            let pid = p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.split('-').next())
+                .and_then(|s| s.parse::<u32>().ok());
+            pid.is_none_or(|pid| !Path::new(&format!("/proc/{pid}")).exists())
+        })
+        .collect();
+    v.sort();
+    v
+}
+
 // ---------------------------------------------------------------- layout dos dockers
 
 pub fn default_layout() -> DockState<Panel> {
@@ -181,6 +234,10 @@ impl PaintApp {
         for p in args {
             open_path(&mut app.st, &p);
         }
+        let left = leftovers();
+        if !left.is_empty() {
+            app.st.dialog = Some(Dialog::Recover(left));
+        }
         app
     }
 
@@ -221,6 +278,7 @@ impl PaintApp {
                 dock_commands: Vec::new(),
                 allow_close: false,
                 tool_changed: false,
+                last_autosave: std::time::Instant::now(),
             },
             last_title: String::new(),
             last_layout: String::new(),
@@ -263,7 +321,8 @@ pub fn request_close_doc(st: &mut State, i: usize) {
 
 fn close_doc(st: &mut State, i: usize) {
     if i < st.docs.len() {
-        st.docs.remove(i);
+        let removed = st.docs.remove(i);
+        let _ = std::fs::remove_file(autosave_file(removed.uid));
         st.cur = st.cur.min(st.docs.len().saturating_sub(1));
         st.interaction = None;
     }
@@ -282,6 +341,19 @@ fn add_doc(st: &mut State, ed: Editor, path: Option<PathBuf>) {
     st.docs.push(DocView::new(uid, ed, path));
     st.cur = st.docs.len() - 1;
     st.interaction = None;
+}
+
+fn new_from_clipboard(st: &mut State) {
+    match system_clipboard_image() {
+        Some(img) if img.width() <= 8192 && img.height() <= 8192 => {
+            add_doc(st, Editor::from_image(&img, "Colada"), None);
+            if let Some(d) = st.doc_mut() {
+                d.name = "Da área de transferência".into();
+            }
+        }
+        Some(_) => st.warn("Imagem grande demais (limite 8192 px)"),
+        None => st.warn("Não há imagem na área de transferência"),
+    }
 }
 
 fn open_path(st: &mut State, p: &Path) {
@@ -560,6 +632,15 @@ impl PaintApp {
                         bg: 0,
                         color: [255, 255, 255],
                     });
+                }
+                if item(
+                    ui,
+                    "Nova a partir da área de transferência",
+                    "Ctrl+Shift+V",
+                    true,
+                ) {
+                    ui.close();
+                    new_from_clipboard(st);
                 }
                 if item(ui, "Abrir…", "Ctrl+O", true) {
                     ui.close();
@@ -1085,9 +1166,27 @@ fn merge_down(st: &mut State) {
 fn edit_copy(st: &mut State, merged: bool) {
     let Some(d) = st.doc() else { return };
     st.clipboard = d.ed.copy(d.active, merged);
-    if st.clipboard.is_some() {
+    if let Some(c) = &st.clipboard {
+        set_system_clipboard(c);
         st.say("Copiado");
     }
+}
+
+/// Também põe a imagem na área de transferência do sistema (para colar em outros programas).
+fn set_system_clipboard(c: &pawpaint_core::Clip) {
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        let _ = cb.set_image(arboard::ImageData {
+            width: c.image.width() as usize,
+            height: c.image.height() as usize,
+            bytes: std::borrow::Cow::Borrowed(c.image.as_raw()),
+        });
+    }
+}
+
+/// Imagem da área de transferência do sistema (um print, por exemplo), se houver.
+fn system_clipboard_image() -> Option<image::RgbaImage> {
+    let img = arboard::Clipboard::new().ok()?.get_image().ok()?;
+    image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned())
 }
 
 fn edit_cut(st: &mut State) {
@@ -1100,10 +1199,22 @@ fn edit_cut(st: &mut State) {
 }
 
 fn edit_paste(st: &mut State) {
-    let Some(c) = st.clipboard.clone() else {
-        return;
+    let system = system_clipboard_image();
+    // Se a imagem do sistema é a que copiamos daqui, cola no lugar de origem.
+    let same = match (&system, &st.clipboard) {
+        (Some(s), Some(c)) => {
+            s.dimensions() == c.image.dimensions() && s.as_raw() == c.image.as_raw()
+        }
+        _ => false,
     };
-    if let Some(d) = st.doc_mut() {
+    let Some(d) = st.doc_mut() else { return };
+    if let (Some(img), false) = (system, same) {
+        d.active = d.ed.import_layer(&img, "Colada");
+        return;
+    }
+    if let Some(c) = st.clipboard.clone()
+        && let Some(d) = st.doc_mut()
+    {
         d.active = d.ed.paste(&c, None);
     }
 }
@@ -1155,6 +1266,9 @@ impl PaintApp {
         }
         if hit(ctrl, Key::O) {
             ask(st, Purpose::Open);
+        }
+        if hit(cs, Key::V) {
+            new_from_clipboard(st);
         }
         if hit(cs, Key::S) {
             ask(st, Purpose::SaveAs);
@@ -1315,6 +1429,7 @@ impl PaintApp {
             Dialog::Grow(_) => "Expandir ou contrair seleção",
             Dialog::LayerProps(_) => "Propriedades da camada",
             Dialog::ConfirmClose(_) | Dialog::ConfirmQuit => "Mudanças não salvas",
+            Dialog::Recover(_) => "Recuperação automática",
         };
         egui::Window::new(title)
             .collapsible(false)
@@ -1645,6 +1760,40 @@ impl PaintApp {
                         }
                     });
                 }
+                Dialog::Recover(files) => {
+                    ui.label(format!(
+                        "{} documento(s) não foram salvos da última vez que o app fechou.",
+                        files.len()
+                    ));
+                    let files = files.clone();
+                    ui.horizontal(|ui| {
+                        if ui.button("Recuperar").clicked() {
+                            keep = false;
+                            let files = files.clone();
+                            then = Some(Box::new(move |st| {
+                                for f in files {
+                                    if let Ok(ed) = file::load_project(&f) {
+                                        add_doc(st, ed, None);
+                                        if let Some(d) = st.doc_mut() {
+                                            d.name = "Recuperado".into();
+                                            d.ed.end_change();
+                                        }
+                                    }
+                                    let _ = std::fs::remove_file(&f);
+                                }
+                                st.say("Documentos recuperados. Salve com Ctrl+S.");
+                            }));
+                        }
+                        if ui.button("Descartar").clicked() {
+                            keep = false;
+                            then = Some(Box::new(move |_| {
+                                for f in &files {
+                                    let _ = std::fs::remove_file(f);
+                                }
+                            }));
+                        }
+                    });
+                }
                 Dialog::ConfirmQuit => {
                     ui.label("Há documentos com mudanças que não foram salvas.");
                     ui.horizontal(|ui| {
@@ -1701,6 +1850,13 @@ impl PaintApp {
             }
         }
         if ctx.input(|i| i.viewport().close_requested())
+            && (self.st.allow_close || !self.st.docs.iter().any(|d| d.ed.is_dirty()))
+        {
+            for d in &self.st.docs {
+                let _ = std::fs::remove_file(autosave_file(d.uid));
+            }
+        }
+        if ctx.input(|i| i.viewport().close_requested())
             && !self.st.allow_close
             && self.st.docs.iter().any(|d| d.ed.is_dirty())
         {
@@ -1743,6 +1899,9 @@ impl PaintApp {
                 .show_inside(ui, &mut Viewer { st: &mut self.st });
         });
         self.apply_dock_commands();
+        if self.st.last_autosave.elapsed().as_secs() >= 45 {
+            autosave(&mut self.st);
+        }
         self.dialogs(&ctx);
         self.st.toasts.tick(&ctx);
         self.st.toasts.ui(&ctx);
@@ -1999,6 +2158,31 @@ mod tests {
         canvas::confirm(&mut h.app.st, false);
         assert!(h.app.st.doc().unwrap().float.is_none());
         assert_eq!(h.px(70, 50), [200, 0, 0, 255]);
+    }
+
+    #[test]
+    fn autosave_keeps_dirty_documents_and_leaves_live_instances_alone() {
+        let mut h = Harness::new();
+        let uid = h.app.st.doc().unwrap().uid;
+        let d = h.app.st.doc_mut().unwrap();
+        let id = d.active;
+        d.ed.fill_selection(id, [1, 2, 3]).unwrap();
+        autosave(&mut h.app.st);
+        let mine = autosave_file(uid);
+        assert!(mine.exists());
+        assert!(
+            leftovers().iter().all(|p| p != &mine),
+            "instância viva não é sobra"
+        );
+        let dead = autosave_dir().join("4000000-7.pawpaint");
+        std::fs::copy(&mine, &dead).unwrap();
+        assert!(leftovers().contains(&dead));
+        let ed = file::load_project(&dead).unwrap();
+        assert_eq!(ed.doc().layers[0].pixels.pixel(5, 5), [1, 2, 3, 255]);
+        let _ = std::fs::remove_file(&dead);
+        h.app.st.doc_mut().unwrap().ed.mark_saved();
+        autosave(&mut h.app.st);
+        assert!(!mine.exists());
     }
 
     #[test]
