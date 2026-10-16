@@ -22,6 +22,8 @@ pub enum EditError {
     NoLayer,
     #[error("a camada está travada")]
     Locked,
+    #[error("isto é uma pasta: escolha uma camada de dentro")]
+    IsGroup,
     #[error("não há nada selecionado")]
     NoSelection,
     #[error("não há camada para unir")]
@@ -261,6 +263,9 @@ impl Editor {
 
     fn layer_checked(&self, id: LayerId) -> Result<&Layer, EditError> {
         let l = self.doc.layer(id).ok_or(EditError::NoLayer)?;
+        if l.is_group {
+            return Err(EditError::IsGroup);
+        }
         if l.locked {
             return Err(EditError::Locked);
         }
@@ -274,10 +279,14 @@ impl Editor {
         self.checkpoint("Nova camada");
         let id = self.doc.fresh();
         let name = name.unwrap_or_else(|| format!("Camada {}", self.doc.layers.len() + 1));
-        let layer = Layer::new(id, name, self.doc.width, self.doc.height);
+        let mut layer = Layer::new(id, name, self.doc.width, self.doc.height);
         let at = above
             .and_then(|a| self.doc.index_of(a))
             .map_or(self.doc.layers.len(), |i| i + 1);
+        // Fica na mesma pasta da camada de referência (ou dentro dela, se for uma pasta).
+        if let Some(r) = above.and_then(|a| self.doc.layer(a)) {
+            layer.parent = if r.is_group { Some(r.id) } else { r.parent };
+        }
         self.doc.layers.insert(at, layer);
         self.dirty_all();
         id
@@ -294,14 +303,45 @@ impl Editor {
             .index_of(id)
             .map_or(self.doc.layers.len(), |i| i + 1);
         let new_id = copy.id;
+        let is_group = copy.is_group;
         self.doc.layers.insert(at, copy);
+        // Uma pasta leva as camadas de dentro (e as pastas dentro dela) junto.
+        if is_group {
+            self.copy_children(id, new_id, at + 1);
+        }
         self.dirty_all();
         Ok(new_id)
     }
 
+    fn copy_children(&mut self, from: LayerId, to: LayerId, mut at: usize) -> usize {
+        let kids: Vec<Layer> = self
+            .doc
+            .layers
+            .iter()
+            .filter(|l| l.parent == Some(from))
+            .cloned()
+            .collect();
+        for mut k in kids {
+            let old = k.id;
+            k.id = self.doc.fresh();
+            k.parent = Some(to);
+            let (new, grp) = (k.id, k.is_group);
+            self.doc.layers.insert(at, k);
+            at += 1;
+            if grp {
+                at = self.copy_children(old, new, at);
+            }
+        }
+        at
+    }
+
     pub fn delete_layer(&mut self, id: LayerId) -> Result<(), EditError> {
-        self.doc.layer(id).ok_or(EditError::NoLayer)?;
+        let parent = self.doc.layer(id).ok_or(EditError::NoLayer)?.parent;
         self.checkpoint("Apagar camada");
+        // O que estava dentro de uma pasta apagada sobe para onde a pasta estava.
+        for l in self.doc.layers.iter_mut().filter(|l| l.parent == Some(id)) {
+            l.parent = parent;
+        }
         self.doc.layers.retain(|l| l.id != id);
         self.dirty_all();
         Ok(())
@@ -311,16 +351,22 @@ impl Editor {
         let Some(i) = self.doc.index_of(id) else {
             return;
         };
-        let last = self.doc.layers.len() - 1;
-        let j = match to {
-            MoveTo::Up => (i + 1).min(last),
-            MoveTo::Down => i.saturating_sub(1),
-            MoveTo::Top => last,
+        // Só conta quem está na mesma pasta: subir/descer troca com a vizinha de verdade.
+        let parent = self.doc.layers[i].parent;
+        let siblings: Vec<usize> = (0..self.doc.layers.len())
+            .filter(|k| self.doc.layers[*k].parent == parent)
+            .collect();
+        let pos = siblings.iter().position(|k| *k == i).unwrap_or(0);
+        let target_pos = match to {
+            MoveTo::Up => (pos + 1).min(siblings.len() - 1),
+            MoveTo::Down => pos.saturating_sub(1),
+            MoveTo::Top => siblings.len() - 1,
             MoveTo::Bottom => 0,
         };
-        if i == j {
+        if target_pos == pos {
             return;
         }
+        let j = siblings[target_pos];
         self.checkpoint("Mover camada");
         let l = self.doc.layers.remove(i);
         self.doc.layers.insert(j, l);
@@ -356,6 +402,11 @@ impl Editor {
     pub fn merge_down(&mut self, id: LayerId) -> Result<LayerId, EditError> {
         let i = self.doc.index_of(id).ok_or(EditError::NoLayer)?;
         if i == 0 {
+            return Err(EditError::NothingBelow);
+        }
+        let below = &self.doc.layers[i - 1];
+        let this = &self.doc.layers[i];
+        if this.is_group || below.is_group || this.parent != below.parent {
             return Err(EditError::NothingBelow);
         }
         self.checkpoint("Unir com a de baixo");
@@ -412,6 +463,48 @@ impl Editor {
         l.pixels = TiledImage::from_rgba(&img);
         self.doc.layers = vec![l];
         self.dirty_all();
+    }
+
+    /// Pasta nova (acima de `above`), vazia.
+    pub fn add_group(&mut self, above: Option<LayerId>) -> LayerId {
+        self.checkpoint("Nova pasta");
+        let id = self.doc.fresh();
+        let n = self.doc.layers.iter().filter(|l| l.is_group).count() + 1;
+        let mut g = Layer::new(id, format!("Pasta {n}"), self.doc.width, self.doc.height);
+        g.is_group = true;
+        let (parent, at) = match above.and_then(|a| self.doc.index_of(a)) {
+            Some(i) => (self.doc.layers[i].parent, i + 1),
+            None => (None, self.doc.layers.len()),
+        };
+        g.parent = parent;
+        self.doc.layers.insert(at, g);
+        self.dirty_all();
+        id
+    }
+
+    /// Põe a camada dentro da pasta `group` (ou fora de qualquer pasta com `None`). Pasta dentro
+    /// dela mesma não vale.
+    pub fn set_parent(&mut self, id: LayerId, group: Option<LayerId>) -> Result<(), EditError> {
+        self.doc.layer(id).ok_or(EditError::NoLayer)?;
+        if let Some(g) = group {
+            let mut cur = Some(g);
+            while let Some(c) = cur {
+                if c == id {
+                    return Err(EditError::NoLayer);
+                }
+                cur = self.doc.layer(c).and_then(|l| l.parent);
+            }
+            if !self.doc.layer(g).is_some_and(|l| l.is_group) {
+                return Err(EditError::NoLayer);
+            }
+        }
+        if self.doc.layer(id).is_some_and(|l| l.parent == group) {
+            return Ok(());
+        }
+        self.checkpoint("Mover para pasta");
+        self.doc.layer_mut(id).expect("existe").parent = group;
+        self.dirty_all();
+        Ok(())
     }
 
     /// Põe uma máscara (vazia: tudo visível) na camada.
@@ -1405,6 +1498,51 @@ mod tests {
         assert!(px.pixel(30, 15)[0] > 200);
         assert_eq!(px.pixel(70, 60), [0, 255, 0, 255]);
         assert!(e.doc().selection.as_ref().unwrap().value(35, 20) > 200);
+    }
+
+    #[test]
+    fn groups_composite_together_and_move_with_their_children() {
+        let mut e = Editor::new(100, 80, Background::Color([255, 255, 255]));
+        let red = e.add_layer(None, None);
+        e.fill_selection(red, [255, 0, 0]).unwrap();
+        let g = e.add_group(Some(red));
+        e.set_parent(red, Some(g)).unwrap();
+        // a pasta inteira some/aparece e muda de opacidade junto
+        assert_eq!(
+            composite::flatten(e.doc()).get_pixel(5, 5).0,
+            [255, 0, 0, 255]
+        );
+        e.edit_layer(g, "o", "o", |l| l.opacity = 0.5);
+        assert_eq!(
+            composite::flatten(e.doc()).get_pixel(5, 5).0,
+            [255, 128, 128, 255]
+        );
+        e.edit_layer(g, "v", "v", |l| l.visible = false);
+        assert_eq!(
+            composite::flatten(e.doc()).get_pixel(5, 5).0,
+            [255, 255, 255, 255]
+        );
+        e.edit_layer(g, "v2", "v", |l| l.visible = true);
+        // pasta dentro dela mesma não vale; unir pasta não vale
+        assert!(e.set_parent(g, Some(g)).is_err());
+        assert!(e.set_parent(red, Some(red)).is_err());
+        assert!(e.merge_down(g).is_err());
+        // duplicar leva os filhos
+        let g2 = e.duplicate_layer(g).unwrap();
+        assert_eq!(
+            e.doc()
+                .layers
+                .iter()
+                .filter(|l| l.parent == Some(g2))
+                .count(),
+            1
+        );
+        assert_eq!(e.doc().layers.len(), 5);
+        // apagar a pasta solta os filhos
+        e.delete_layer(g).unwrap();
+        assert_eq!(e.doc().layer(red).unwrap().parent, None);
+        e.undo();
+        assert_eq!(e.doc().layer(red).unwrap().parent, Some(g));
     }
 
     #[test]

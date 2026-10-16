@@ -104,10 +104,10 @@ Editor de imagens no estilo do Krita: pintura, camadas, seleções, filtros e do
   ou BMP, e *JPG com até 2 MB* para thumbnails do YouTube.
 - **Desfazer:** guarda o documento inteiro a cada passo sem gastar memória (os blocos de pixels são compartilhados).
 
-- **Mais:** máscaras de camada (preto esconde, branco revela), pintura com espelho, borrão, curvas, colar prints da
+- **Mais:** pastas de camadas, máscaras de camada (preto esconde, branco revela), pintura com espelho, borrão, curvas, colar prints da
   área de transferência do sistema, recuperação automática se o app fechar de repente.
 
-Ainda não tem: mesa digitalizadora com pressão, camadas de grupo e vetoriais, histograma.
+Ainda não tem: mesa digitalizadora com pressão, camadas vetoriais e histograma.
 
 ---
 

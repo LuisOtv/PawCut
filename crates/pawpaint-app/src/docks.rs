@@ -189,17 +189,7 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
         .max_height(h)
         .auto_shrink(false)
         .show(ui, |ui| {
-            let ids: Vec<u64> = st.docs[st.cur]
-                .ed
-                .doc()
-                .layers
-                .iter()
-                .rev()
-                .map(|l| l.id)
-                .collect();
-            for id in ids {
-                layer_row(st, ui, id);
-            }
+            layer_tree(st, ui, None, 0);
         });
     ui.add_space(2.0);
     ui.horizontal(|ui| {
@@ -207,6 +197,7 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
         let mut act: Option<&str> = None;
         for (key, tip) in [
             ("new", "Nova camada"),
+            ("group", "Nova pasta"),
             ("dup", "Duplicar (Ctrl+J)"),
             ("del", "Apagar"),
             ("merge", "Unir com a de baixo (Ctrl+E)"),
@@ -230,6 +221,17 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
                 "new" => {
                     p.line_segment([c - vec2(5.0, 0.0), c + vec2(5.0, 0.0)], st1);
                     p.line_segment([c - vec2(0.0, 5.0), c + vec2(0.0, 5.0)], st1);
+                }
+                "group" => {
+                    let f = Rect::from_center_size(c, vec2(14.0, 10.0));
+                    p.rect_stroke(f, 1.0, st1, egui::StrokeKind::Middle);
+                    p.line_segment(
+                        [
+                            f.left_top() - vec2(0.0, 2.0),
+                            f.left_top() + vec2(5.0, -2.0),
+                        ],
+                        st1,
+                    );
                 }
                 "dup" => {
                     p.rect_stroke(
@@ -271,6 +273,11 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
         let ed = &mut st.docs[cur].ed;
         match act {
             Some("new") => st.docs[cur].active = ed.add_layer(None, Some(active)),
+            Some("group") => {
+                let g = ed.add_group(Some(active));
+                let _ = ed.set_parent(active, Some(g));
+                st.docs[cur].active = g;
+            }
             Some("dup") => {
                 if let Ok(n) = ed.duplicate_layer(active) {
                     st.docs[cur].active = n;
@@ -292,12 +299,32 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
     });
 }
 
-fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64) {
+/// A lista de camadas como árvore: pastas mostram (ou escondem) as camadas de dentro.
+fn layer_tree(st: &mut State, ui: &mut egui::Ui, parent: Option<u64>, depth: usize) {
+    let kids: Vec<(u64, bool, bool)> = st.docs[st.cur]
+        .ed
+        .doc()
+        .layers
+        .iter()
+        .rev()
+        .filter(|l| l.parent == parent)
+        .map(|l| (l.id, l.is_group, l.expanded))
+        .collect();
+    for (id, is_group, expanded) in kids {
+        layer_row(st, ui, id, depth);
+        if is_group && expanded {
+            layer_tree(st, ui, Some(id), depth + 1);
+        }
+    }
+}
+
+fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64, depth: usize) {
     let cur = st.cur;
     let Some(l) = st.docs[cur].ed.doc().layer(id).cloned() else {
         return;
     };
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+    let (full, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+    let rect = Rect::from_min_max(full.min + vec2(depth as f32 * 16.0, 0.0), full.max);
     let selected = st.docs[cur].active == id;
     let p = ui.painter();
     if selected {
@@ -305,8 +332,32 @@ fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64) {
     } else if resp.hovered() {
         p.rect_filled(rect, 3.0, theme::BAR_LIGHT);
     }
+    // Pasta: seta para abrir/fechar e ícone de pasta no lugar da miniatura.
+    let mut toggle_group = false;
+    if l.is_group {
+        let arrow = Rect::from_min_size(rect.min + vec2(24.0, 4.0), vec2(18.0, 20.0));
+        let ar = ui.interact(arrow, ui.id().with(("arrow", id)), Sense::click());
+        let c = arrow.center();
+        let st1 = Stroke::new(1.6, theme::TEXT);
+        let p = ui.painter();
+        if l.expanded {
+            p.line_segment([c + vec2(-4.0, -2.0), c + vec2(0.0, 3.0)], st1);
+            p.line_segment([c + vec2(4.0, -2.0), c + vec2(0.0, 3.0)], st1);
+        } else {
+            p.line_segment([c + vec2(-2.0, -4.0), c + vec2(3.0, 0.0)], st1);
+            p.line_segment([c + vec2(-2.0, 4.0), c + vec2(3.0, 0.0)], st1);
+        }
+        let folder = Rect::from_min_size(rect.min + vec2(44.0, 7.0), vec2(20.0, 14.0));
+        p.rect_filled(folder, 2.0, Color32::from_rgb(0xc9, 0xa2, 0x4d));
+        p.rect_filled(
+            Rect::from_min_size(folder.min - vec2(0.0, 3.0), vec2(8.0, 4.0)),
+            1.0,
+            Color32::from_rgb(0xc9, 0xa2, 0x4d),
+        );
+        toggle_group = ar.clicked();
+    }
     // Miniatura: amostra a camada com passo fixo (rápido, mesmo em telas grandes).
-    {
+    if !l.is_group {
         let rev = st.docs[cur].ed.pixel_rev();
         if st.docs[cur].thumbs.get(&id).is_none_or(|(r, _)| *r != rev) {
             let (w, h) = (l.pixels.width().max(1), l.pixels.height().max(1));
@@ -421,7 +472,14 @@ fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64) {
             );
         }
     }
-    if eye_resp.clicked() {
+    if toggle_group {
+        st.docs[cur]
+            .ed
+            .edit_layer(id, "expand", "Abrir/fechar pasta", |x| {
+                x.expanded = !x.expanded
+            });
+        st.docs[cur].ed.end_change();
+    } else if eye_resp.clicked() {
         st.docs[cur]
             .ed
             .edit_layer(id, "vis", "Mostrar/esconder", |l| l.visible = !l.visible);
@@ -437,6 +495,28 @@ fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64) {
         if ui.button("Renomear").clicked() {
             ui.close();
             st.renaming = Some((id, l.name.clone()));
+        }
+        let groups: Vec<(u64, String)> = st.docs[cur]
+            .ed
+            .doc()
+            .layers
+            .iter()
+            .filter(|g| g.is_group && g.id != id)
+            .map(|g| (g.id, g.name.clone()))
+            .collect();
+        if !groups.is_empty() || l.parent.is_some() {
+            ui.menu_button("Mover para a pasta", |ui| {
+                if l.parent.is_some() && ui.button("(fora de pastas)").clicked() {
+                    ui.close();
+                    let _ = st.docs[cur].ed.set_parent(id, None);
+                }
+                for (gid, name) in groups {
+                    if ui.button(name).clicked() {
+                        ui.close();
+                        let _ = st.docs[cur].ed.set_parent(id, Some(gid));
+                    }
+                }
+            });
         }
         if ui.button("Propriedades…").clicked() {
             ui.close();

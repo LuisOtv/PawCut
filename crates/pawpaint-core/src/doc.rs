@@ -20,6 +20,12 @@ pub struct Layer {
     pub pixels: TiledImage,
     /// Máscara da camada: o alfa de cada pixel é o quanto dela fica escondido (vazia = tudo visível).
     pub mask: Option<TiledImage>,
+    /// Pasta: não tem pixels, só junta as camadas que têm esta como `parent`.
+    pub is_group: bool,
+    /// Pasta onde a camada está (`None` = no topo).
+    pub parent: Option<LayerId>,
+    /// Só para pastas: mostrando as camadas de dentro na lista.
+    pub expanded: bool,
 }
 
 impl Layer {
@@ -34,6 +40,9 @@ impl Layer {
             mode: BlendMode::Normal,
             pixels: TiledImage::new(w, h),
             mask: None,
+            is_group: false,
+            parent: None,
+            expanded: true,
         }
     }
 }

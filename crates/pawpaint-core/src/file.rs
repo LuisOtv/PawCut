@@ -40,6 +40,16 @@ struct LayerMeta {
     file: String,
     #[serde(default)]
     mask: Option<String>,
+    #[serde(default)]
+    is_group: bool,
+    #[serde(default)]
+    parent: Option<u64>,
+    #[serde(default = "yes")]
+    expanded: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize)]
@@ -88,6 +98,9 @@ pub fn save_project(ed: &Editor, path: &Path) -> Result<(), FileError> {
                 mode: l.mode,
                 file: name,
                 mask: mask_name,
+                is_group: l.is_group,
+                parent: l.parent,
+                expanded: l.expanded,
             });
         }
         let meta = DocMeta {
@@ -129,6 +142,9 @@ pub fn load_project(path: &Path) -> Result<Editor, FileError> {
         l.alpha_lock = m.alpha_lock;
         l.opacity = m.opacity;
         l.mode = m.mode;
+        l.is_group = m.is_group;
+        l.parent = m.parent;
+        l.expanded = m.expanded;
         l.pixels = TiledImage::from_rgba(&img);
         if let Some(mn) = &m.mask {
             let mut mb = Vec::new();

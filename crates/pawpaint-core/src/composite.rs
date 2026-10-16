@@ -20,8 +20,38 @@ pub struct Live<'a> {
 
 /// O bloco (`tx`, `ty`) com todas as camadas visíveis, sobre transparente (pré-multiplicado).
 pub fn composite_tile(doc: &Doc, tx: usize, ty: usize, live: Option<&Live>) -> Vec<u8> {
+    composite_level(doc, None, tx, ty, live)
+}
+
+/// As camadas (e pastas, recursivamente) que estão dentro de `parent`.
+fn composite_level(
+    doc: &Doc,
+    parent: Option<LayerId>,
+    tx: usize,
+    ty: usize,
+    live: Option<&Live>,
+) -> Vec<u8> {
     let mut out = vec![0u8; TILE_BYTES];
-    for layer in doc.layers.iter().filter(|l| l.visible) {
+    for layer in doc
+        .layers
+        .iter()
+        .filter(|l| l.visible && l.parent == parent)
+    {
+        if layer.is_group {
+            let inner = composite_level(doc, Some(layer.id), tx, ty, live);
+            for p in 0..TILE * TILE {
+                let i = p * 4;
+                if inner[i + 3] != 0 {
+                    blend_over(
+                        &mut out[i..i + 4],
+                        &inner[i..i + 4],
+                        layer.opacity,
+                        layer.mode,
+                    );
+                }
+            }
+            continue;
+        }
         let base = layer.pixels.tile(tx, ty);
         let stroke = live
             .filter(|l| l.layer == layer.id)

@@ -2245,6 +2245,39 @@ mod tests {
     }
 
     #[test]
+    fn layer_tree_and_folder_buttons_render() {
+        let mut h = Harness::new();
+        {
+            let d = h.app.st.doc_mut().unwrap();
+            let id = d.active;
+            let g = d.ed.add_group(Some(id));
+            d.ed.set_parent(id, Some(g)).unwrap();
+            let n = d.ed.add_layer(None, Some(g));
+            d.active = n;
+            assert_eq!(d.ed.doc().layer(n).unwrap().parent, Some(g));
+        }
+        h.frame(vec![]);
+        h.frame(vec![]);
+        // pintar numa pasta dá aviso em vez de travar
+        let g = h
+            .app
+            .st
+            .doc()
+            .unwrap()
+            .ed
+            .doc()
+            .layers
+            .iter()
+            .find(|l| l.is_group)
+            .unwrap()
+            .id;
+        h.app.st.doc_mut().unwrap().active = g;
+        h.app.st.tool = Tool::Brush;
+        h.drag((50.0, 100.0), (100.0, 100.0));
+        assert!(h.app.st.doc().unwrap().ed.undo_label() != Some("Pincel"));
+    }
+
+    #[test]
     fn painting_on_a_mask_hides_dark_and_reveals_light() {
         let mut h = Harness::new();
         {
