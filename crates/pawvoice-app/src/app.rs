@@ -220,9 +220,10 @@ pub struct VoiceApp {
     /// Rótulo sendo escrito: (faixa de rótulos, índice, texto).
     label_edit: Option<(u64, usize, String)>,
     player: Player,
-    /// Mixagem tocando e em que amostra da timeline ela começa.
-    play_buf: Option<Arc<Vec<f32>>>,
-    play_offset: usize,
+    /// Uma reprodução foi iniciada e ainda não foi vista terminar (para repetir em loop).
+    play_active: bool,
+    /// Revisão da sessão que o player está tocando: se mudar, troca a mixagem ao vivo.
+    play_rev: u64,
     pub looping: bool,
     recorder: Recorder,
     audio: AudioSettings,
@@ -344,6 +345,15 @@ fn read_spill(path: &Path) -> std::io::Result<Planar> {
         .collect())
 }
 
+/// A mixagem da sessão como fonte do player (uma foto: depois de editar, tire outra).
+struct LiveMix(pawvoice_core::Mixer);
+
+impl paw_audio::mix::MixSource for LiveMix {
+    fn mix(&self, from: usize, frames: usize) -> Vec<f32> {
+        self.0.mix(from, from + frames)
+    }
+}
+
 /// Lê um arquivo de áudio qualquer (pelo ffmpeg) em estéreo na taxa do projeto; se os dois
 /// lados forem iguais, vira mono.
 fn decode(path: &Path) -> Result<Planar, String> {
@@ -412,8 +422,8 @@ impl VoiceApp {
             empty_menu: None,
             label_edit: None,
             player: Player::spawn(RATE, 2),
-            play_buf: None,
-            play_offset: 0,
+            play_active: false,
+            play_rev: 0,
             looping: false,
             recorder: Recorder::new(RATE),
             audio: AudioSettings::default(),
@@ -825,7 +835,7 @@ impl VoiceApp {
             return r.at + self.recorder.len();
         }
         if self.is_playing() {
-            self.play_offset + self.player.position()
+            self.player.position()
         } else {
             self.cursor
         }
@@ -836,10 +846,19 @@ impl VoiceApp {
         if from >= to {
             return;
         }
-        let mix = Arc::new(self.ed.mix(from, to));
-        self.play_offset = from;
-        self.play_buf = Some(mix.clone());
-        self.player.play(mix, 0, to - from);
+        // Mixagem ao vivo: ganho, pan, mudo, solo e envelope mexidos durante o play valem na hora.
+        self.play_active = true;
+        self.play_rev = self.ed.revision();
+        self.player
+            .play_live(Arc::new(LiveMix(self.ed.mixer())), from, to);
+    }
+
+    /// Se a sessão mudou durante o play, troca a mixagem sem reiniciar o som.
+    fn refresh_live_mix(&mut self) {
+        if self.is_playing() && self.ed.revision() != self.play_rev {
+            self.play_rev = self.ed.revision();
+            self.player.update_live(Arc::new(LiveMix(self.ed.mixer())));
+        }
     }
 
     /// Espaço: toca a seleção (ou do cursor até o fim) / para.
@@ -866,7 +885,7 @@ impl VoiceApp {
             self.finish_recording();
         }
         self.player.stop();
-        self.play_buf = None;
+        self.play_active = false;
     }
 
     /// P / Pausa: para e deixa o cursor onde estava tocando.
@@ -907,17 +926,16 @@ impl VoiceApp {
         // Overdub: as outras faixas tocam enquanto grava.
         let len = self.ed.session().len();
         if self.overdub && at < len {
-            let mix = Arc::new(self.ed.mix(at, len));
-            self.play_offset = at;
-            self.player.play(mix.clone(), 0, len - at);
-            self.play_buf = Some(mix);
+            self.play_rev = self.ed.revision();
+            self.player
+                .play_live(Arc::new(LiveMix(self.ed.mixer())), at, len);
         }
     }
 
     fn finish_recording(&mut self) {
         let planar = self.recorder.stop();
         self.player.stop();
-        self.play_buf = None;
+        self.play_active = false;
         self.rec_since = None;
         let target = self.rec.take();
         let len = planar.first().map_or(0, Vec::len);
@@ -954,8 +972,8 @@ impl VoiceApp {
         if (self.is_playing() || self.recorder.is_recording()) && at > right {
             self.view_start = at - 30.0 * self.spp;
         }
-        if !self.is_playing() && self.play_buf.is_some() && !self.recorder.is_recording() {
-            self.play_buf = None;
+        if !self.is_playing() && self.play_active && !self.recorder.is_recording() {
+            self.play_active = false;
             if self.looping {
                 let len = self.ed.session().len();
                 let (a, b) = self.sel.unwrap_or((self.cursor.min(len), len));
@@ -2100,21 +2118,11 @@ impl VoiceApp {
 
     /// Pico da saída de cada lado perto da posição que está tocando.
     fn play_levels(&self) -> [f32; 2] {
-        let (Some(buf), true) = (&self.play_buf, self.is_playing()) else {
-            return [0.0; 2];
-        };
-        let at = self.player.position() * 2;
-        let w = (RATE as usize / 20) * 2;
-        let s = buf
-            .get(at.min(buf.len())..(at + w).min(buf.len()))
-            .unwrap_or(&[]);
-        let side = |c: usize| {
-            s.iter()
-                .skip(c)
-                .step_by(2)
-                .fold(0.0f32, |m, v| m.max(v.abs()))
-        };
-        [side(0), side(1)]
+        if self.is_playing() {
+            self.player.levels()
+        } else {
+            [0.0; 2]
+        }
     }
 
     // ---------------------------------------------------------------- faixas
@@ -4144,6 +4152,7 @@ impl VoiceApp {
             self.open_any(&p);
         }
         self.shortcuts(&ctx);
+        self.refresh_live_mix();
         self.follow();
         if ctx.input(|i| i.viewport().close_requested()) {
             if self.recorder.is_recording() {

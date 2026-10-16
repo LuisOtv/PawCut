@@ -16,6 +16,8 @@ use libpulse_binding::sample::{Format, Spec};
 use libpulse_binding::stream::Direction;
 use libpulse_simple_binding::Simple;
 
+use crate::mix::{BufferSource, MixSource, crossfade};
+
 /// Quadros por pedaço lido/escrito.
 const CHUNK: usize = 480;
 
@@ -33,18 +35,22 @@ fn bytes_for(ms: u32, rate: u32, channels: u8) -> u32 {
 }
 
 struct PlayState {
-    buffer: Option<Arc<Vec<f32>>>,
+    source: Option<Arc<dyn MixSource>>,
     start: usize,
     end: usize,
     generation: u64,
 }
 
-/// Toca um trecho de um buffer intercalado (`channels` canais). As posições são em quadros.
+/// Toca um trecho `[from, to)` pedindo o som aos poucos a uma `MixSource` (um buffer pronto ou
+/// uma mixagem ao vivo). As posições são em quadros. Trocar a fonte durante o play
+/// (`update_live`) não reinicia nada: o som antigo passa para o novo em um crossfade curto.
 pub struct Player {
     channels: usize,
     state: Arc<Mutex<PlayState>>,
     playing: Arc<AtomicBool>,
     position: Arc<AtomicUsize>,
+    /// Pico recente de cada canal (bits de f32), para o medidor de saída.
+    levels: Arc<[AtomicU32; 2]>,
     pub has_device: Arc<AtomicBool>,
 }
 
@@ -56,7 +62,7 @@ impl Player {
     /// Como `spawn`, mas tocando na saída `device` (nome do PulseAudio; `None` = padrão).
     pub fn spawn_on(rate: u32, channels: u8, device: Option<String>) -> Self {
         let state = Arc::new(Mutex::new(PlayState {
-            buffer: None,
+            source: None,
             start: 0,
             end: 0,
             generation: 0,
@@ -64,11 +70,13 @@ impl Player {
         let playing = Arc::new(AtomicBool::new(false));
         let position = Arc::new(AtomicUsize::new(0));
         let has_device = Arc::new(AtomicBool::new(false));
-        let (st, pl, pos, dev) = (
+        let levels = Arc::new([AtomicU32::new(0), AtomicU32::new(0)]);
+        let (st, pl, pos, dev, lv) = (
             state.clone(),
             playing.clone(),
             position.clone(),
             has_device.clone(),
+            levels.clone(),
         );
         let ch = channels as usize;
         thread::Builder::new()
@@ -96,6 +104,8 @@ impl Player {
                 let chunk_time = Duration::from_secs_f64(CHUNK as f64 / rate as f64);
                 let mut current = u64::MAX;
                 let mut cursor = 0usize;
+                // Fonte que gerou o último bloco: se mudou sem reinício, o bloco novo entra em crossfade.
+                let mut previous: Option<Arc<dyn MixSource>> = None;
                 loop {
                     if !pl.load(Ordering::SeqCst) {
                         if current != u64::MAX {
@@ -104,40 +114,62 @@ impl Player {
                             }
                             current = u64::MAX;
                         }
+                        previous = None;
+                        for l in lv.iter() {
+                            l.store(0f32.to_bits(), Ordering::Relaxed);
+                        }
                         thread::sleep(Duration::from_millis(3));
                         continue;
                     }
-                    let (buf, start, end, generation) = {
+                    let (source, start, end, generation) = {
                         let s = st.lock().expect("estado do player");
-                        (s.buffer.clone(), s.start, s.end, s.generation)
+                        (s.source.clone(), s.start, s.end, s.generation)
                     };
-                    let Some(buf) = buf else {
+                    let Some(source) = source else {
                         pl.store(false, Ordering::SeqCst);
                         continue;
                     };
-                    if generation != current {
+                    let restarted = generation != current;
+                    if restarted {
                         if let Some(d) = &device {
                             let _ = d.flush();
                         }
                         current = generation;
                         cursor = start;
                     }
-                    let end = end.min(buf.len() / ch);
                     if cursor >= end {
                         // Espera o que está no buffer da placa terminar de tocar.
                         if let Some(d) = &device {
                             let _ = d.drain();
                         }
-                        pos.store(end, Ordering::SeqCst);
-                        pl.store(false, Ordering::SeqCst);
+                        // Se outro play começou durante a espera, ele manda: não o apague.
+                        if st.lock().expect("estado do player").generation == current {
+                            pos.store(end, Ordering::SeqCst);
+                            pl.store(false, Ordering::SeqCst);
+                        }
                         continue;
                     }
                     let to = (cursor + CHUNK).min(end);
-                    let bytes: Vec<u8> = buf[cursor * ch..to * ch]
-                        .iter()
-                        .flat_map(|v| v.to_le_bytes())
-                        .collect();
+                    let n = to - cursor;
+                    let mut samples = source.mix(cursor, n);
+                    if !restarted
+                        && let Some(old) = previous.as_ref().filter(|p| !Arc::ptr_eq(p, &source))
+                    {
+                        let before = old.mix(cursor, n);
+                        crossfade(&before, &mut samples, ch);
+                    }
+                    previous = Some(source);
+                    for (c, l) in lv.iter().enumerate() {
+                        let peak = samples
+                            .iter()
+                            .skip(c.min(ch - 1))
+                            .step_by(ch)
+                            .fold(0.0f32, |m, v| m.max(v.abs()));
+                        let old = f32::from_bits(l.load(Ordering::Relaxed));
+                        l.store(peak.max(old * 0.85).to_bits(), Ordering::Relaxed);
+                    }
                     cursor = to;
+                    let bytes: Vec<u8> = samples.iter().flat_map(|v| v.to_le_bytes()).collect();
                     match &device {
                         Some(d) => {
                             let _ = d.write(&bytes);
@@ -160,6 +192,7 @@ impl Player {
             state,
             playing,
             position,
+            levels,
             has_device,
         }
     }
@@ -170,13 +203,28 @@ impl Player {
 
     /// Toca os quadros `[from, to)` de `buffer` (intercalado).
     pub fn play(&self, buffer: Arc<Vec<f32>>, from: usize, to: usize) {
+        let source = Arc::new(BufferSource {
+            buffer,
+            channels: self.channels,
+        });
+        self.play_live(source, from, to);
+    }
+
+    /// Toca os quadros `[from, to)` pedindo o som a `source` (posições da timeline).
+    pub fn play_live(&self, source: Arc<dyn MixSource>, from: usize, to: usize) {
         let mut s = self.state.lock().expect("estado do player");
-        s.buffer = Some(buffer);
+        s.source = Some(source);
         s.start = from;
         s.end = to;
         s.generation += 1;
         self.position.store(from, Ordering::SeqCst);
         self.playing.store(true, Ordering::SeqCst);
+    }
+
+    /// Troca a fonte no meio do play (edição): continua do mesmo ponto, sem esvaziar a fila da
+    /// placa nem repetir trechos.
+    pub fn update_live(&self, source: Arc<dyn MixSource>) {
+        self.state.lock().expect("estado do player").source = Some(source);
     }
 
     pub fn stop(&self) {
@@ -190,6 +238,19 @@ impl Player {
     /// Quadro saindo da caixa de som agora.
     pub fn position(&self) -> usize {
         self.position.load(Ordering::SeqCst)
+    }
+
+    /// Pico recente (0..1) da saída, de cada lado; zera quando para.
+    pub fn levels(&self) -> [f32; 2] {
+        [
+            f32::from_bits(self.levels[0].load(Ordering::Relaxed)),
+            f32::from_bits(self.levels[1].load(Ordering::Relaxed)),
+        ]
+    }
+
+    /// Geração atual do play (cada `play` soma um; `update_live` não mexe). Para testes.
+    pub fn generation(&self) -> u64 {
+        self.state.lock().expect("estado do player").generation
     }
 }
 
@@ -429,5 +490,66 @@ impl Recorder {
 impl Drop for Recorder {
     fn drop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    /// Fonte que só conta quantas vezes foi chamada.
+    struct Counting(Arc<AtomicUsize>);
+
+    impl MixSource for Counting {
+        fn mix(&self, _from: usize, frames: usize) -> Vec<f32> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            vec![0.0; frames * 2]
+        }
+    }
+
+    fn wait_until(what: &str, cond: impl Fn() -> bool) {
+        let start = std::time::Instant::now();
+        while !cond() {
+            assert!(start.elapsed() < Duration::from_secs(5), "{what}");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn swapping_the_live_source_keeps_playing_without_restarting() {
+        let player = Player::spawn(48_000, 2);
+        let (a, b) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        player.play_live(Arc::new(Counting(a.clone())), 1_000, 10_000_000);
+        wait_until("a fonte antiga nunca tocou", || {
+            a.load(Ordering::SeqCst) > 3
+        });
+        let (generation, at) = (player.generation(), player.position());
+        // Vários ajustes seguidos (arrastar um slider) não podem reiniciar a reprodução.
+        for _ in 0..5 {
+            player.update_live(Arc::new(Counting(b.clone())));
+        }
+        wait_until("a fonte nova nunca tocou", || b.load(Ordering::SeqCst) > 3);
+        assert_eq!(player.generation(), generation, "não pode reiniciar");
+        assert!(player.position() >= at, "a posição não pode voltar");
+        let before = a.load(Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(60));
+        assert!(
+            a.load(Ordering::SeqCst) <= before + 1,
+            "a fonte antiga continuou tocando"
+        );
+        player.stop();
+    }
+
+    #[test]
+    fn a_play_stops_by_itself_at_the_end_of_the_range() {
+        let player = Player::spawn(48_000, 2);
+        let n = Arc::new(AtomicUsize::new(0));
+        player.play_live(Arc::new(Counting(n.clone())), 0, 4_800);
+        wait_until("o play não terminou sozinho", || !player.is_playing());
+        assert_eq!(player.position(), 4_800);
+        // Tocar de novo depois do fim funciona.
+        player.play_live(Arc::new(Counting(n)), 0, 4_800);
+        wait_until("o segundo play não terminou", || !player.is_playing());
     }
 }

@@ -329,18 +329,6 @@ impl AudioLoader {
     }
 }
 
-/// Mistura linear de `before` (some) com `after` (aparece) ao longo do trecho, in loco em `after`.
-/// Os dois são estéreo intercalado e têm o mesmo tamanho.
-fn crossfade(before: &[f32], after: &mut [f32]) {
-    let frames = after.len() / 2;
-    for (i, (b, a)) in before.chunks(2).zip(after.chunks_mut(2)).enumerate() {
-        let t = (i as f32 + 0.5) / frames as f32;
-        for (b, a) in b.iter().zip(a.iter_mut()) {
-            *a = *b * (1.0 - t) + *a * t;
-        }
-    }
-}
-
 fn audio_loop(
     sample_rate: u32,
     state: Arc<Mutex<AudioState>>,
@@ -444,7 +432,7 @@ fn audio_loop(
             // Edição durante o play (volume, corte, mudo...): passa do som antigo para o novo
             // ao longo do trecho, em vez de dar um degrau (estalo).
             let before = renderer.mix_audio_resident(old, pos, AUDIO_CHUNK);
-            crossfade(&before, &mut samples);
+            paw_audio::mix::crossfade(&before, &mut samples, 2);
         }
         previous = Some(project);
         for (ch, l) in levels.iter().enumerate() {
@@ -665,16 +653,6 @@ impl ExportJob {
 mod tests {
     use super::*;
     use pawcut_core::ProjectSettings;
-
-    #[test]
-    fn crossfade_goes_from_old_to_new() {
-        let before = vec![1.0f32; 8];
-        let mut after = vec![0.0f32; 8];
-        crossfade(&before, &mut after);
-        // Começa quase todo no som antigo, termina quase todo no novo, sem degrau.
-        assert!(after[0] > 0.8 && after[7] < 0.2);
-        assert!(after.windows(2).all(|w| w[0] >= w[1]));
-    }
 
     #[test]
     fn a_new_clip_is_silent_until_the_loader_delivers_it_and_never_blocks_the_mix() {
