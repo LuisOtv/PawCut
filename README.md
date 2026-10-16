@@ -53,7 +53,8 @@ Gravador e editor de voz com a interface e o jeito de usar do Audacity.
   - **Melhorar voz (1 clique)**;
   - **Redução de ruído** com perfil (como no Audacity: pegue o perfil num trecho só de chiado e aplique);
   - normalizar loudness (LUFS) ou pico, amplificar, compressor, limitador, fades;
-  - noise gate, passa-altas, graves e agudos, truncar silêncio e inverter.
+  - noise gate, passa-altas, graves e agudos, **de-esser** (tira o chiado do S), truncar silêncio e inverter;
+  - Arquivo → *Exportar para vídeo* já ajusta o loudness para o alvo (−14 LUFS no YouTube).
 - **Roteiro e teleprompter** (Ver → Roteiro): a letra grande rola sozinha enquanto você grava.
 - **Arquivos:**
   - o projeto fica em `nome.pawvoice`, com os áudios em `nome.pawvoice-audio/` (WAV, mono ou estéreo);
