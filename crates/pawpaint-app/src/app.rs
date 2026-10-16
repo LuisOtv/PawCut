@@ -41,6 +41,8 @@ fn config_dir() -> PathBuf {
 struct PrefsFile {
     recent: Vec<[u8; 3]>,
     brushes: Vec<Brush>,
+    #[serde(default)]
+    files: Vec<PathBuf>,
 }
 
 pub fn save_prefs(st: &State) {
@@ -48,6 +50,7 @@ pub fn save_prefs(st: &State) {
     let file = PrefsFile {
         recent: st.prefs.recent.clone(),
         brushes: user,
+        files: st.prefs.files.clone(),
     };
     let _ = std::fs::create_dir_all(config_dir());
     if let Ok(t) = serde_json::to_string(&file) {
@@ -165,6 +168,7 @@ impl PaintApp {
             && let Ok(p) = serde_json::from_str::<PrefsFile>(&t)
         {
             app.st.prefs.recent = p.recent;
+            app.st.prefs.files = p.files;
             app.st.user_presets = p.brushes.len();
             app.st.presets.extend(p.brushes);
         }
@@ -198,6 +202,7 @@ impl PaintApp {
                 bg: [255, 255, 255],
                 hsv: (0.0, 0.0, 0.0),
                 blend: BlendMode::Normal,
+                mirror: (false, false),
                 opts: ToolOpts::default(),
                 clipboard: None,
                 toasts: Toasts::default(),
@@ -205,7 +210,10 @@ impl PaintApp {
                 file: None,
                 text_raster: TextRaster::new(),
                 fonts: Vec::new(),
-                prefs: Prefs { recent: Vec::new() },
+                prefs: Prefs {
+                    recent: Vec::new(),
+                    files: Vec::new(),
+                },
                 interaction: None,
                 text_input: None,
                 renaming: None,
@@ -261,6 +269,13 @@ fn close_doc(st: &mut State, i: usize) {
     }
 }
 
+fn remember_file(st: &mut State, p: &Path) {
+    st.prefs.files.retain(|f| f != p);
+    st.prefs.files.insert(0, p.to_path_buf());
+    st.prefs.files.truncate(10);
+    save_prefs(st);
+}
+
 fn add_doc(st: &mut State, ed: Editor, path: Option<PathBuf>) {
     let uid = st.next_uid;
     st.next_uid += 1;
@@ -276,7 +291,10 @@ fn open_path(st: &mut State, p: &Path) {
         .map(str::to_lowercase);
     if ext.as_deref() == Some("pawpaint") {
         match file::load_project(p) {
-            Ok(ed) => add_doc(st, ed, Some(p.to_path_buf())),
+            Ok(ed) => {
+                add_doc(st, ed, Some(p.to_path_buf()));
+                remember_file(st, p);
+            }
             Err(e) => st.warn(e.to_string()),
         }
         return;
@@ -430,7 +448,8 @@ fn save_to(st: &mut State, path: PathBuf) {
         match file::save_project(&d.ed, &path) {
             Ok(()) => {
                 d.ed.mark_saved();
-                d.path = Some(path);
+                d.path = Some(path.clone());
+                remember_file(st, &path);
                 st.say("Projeto salvo");
             }
             Err(e) => st.warn(e.to_string()),
@@ -546,6 +565,23 @@ impl PaintApp {
                     ui.close();
                     ask(st, Purpose::Open);
                 }
+                ui.add_enabled_ui(!st.prefs.files.is_empty(), |ui| {
+                    ui.menu_button("Abrir recente", |ui| {
+                        for f in st.prefs.files.clone() {
+                            let name = f
+                                .file_name()
+                                .map_or(String::new(), |n| n.to_string_lossy().into_owned());
+                            if ui
+                                .button(name)
+                                .on_hover_text(f.display().to_string())
+                                .clicked()
+                            {
+                                ui.close();
+                                open_path(st, &f);
+                            }
+                        }
+                    });
+                });
                 if item(ui, "Importar como camada…", "", has_doc) {
                     ui.close();
                     ask(st, Purpose::ImportLayer);
@@ -700,6 +736,15 @@ impl PaintApp {
                             keep: true,
                             ratio: w as f32 / h as f32,
                         });
+                    }
+                }
+                if item(ui, "Cortar ao conteúdo", "", has_doc) {
+                    ui.close();
+                    if let Some(d) = st.doc_mut() {
+                        commit_if_floating(d);
+                        if d.ed.crop_to_content() {
+                            d.fit = true;
+                        }
                     }
                 }
                 if item(ui, "Cortar para a seleção", "", has_sel) {
@@ -921,6 +966,11 @@ impl PaintApp {
                 );
                 st.brush.flow = f / 100.0;
                 ui.separator();
+                ui.separator();
+                ui.toggle_value(&mut st.mirror.0, "Espelho ↔")
+                    .on_hover_text("Pinta também refletido na vertical (eixo no meio)");
+                ui.toggle_value(&mut st.mirror.1, "Espelho ↕")
+                    .on_hover_text("Pinta também refletido na horizontal (eixo no meio)");
                 let mut erasing = st.tool == Tool::Eraser;
                 if ui
                     .toggle_value(&mut erasing, "Borracha")

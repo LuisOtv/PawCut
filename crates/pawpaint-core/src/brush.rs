@@ -176,6 +176,8 @@ pub struct Stroker {
     pub brush: Brush,
     pub color: [u8; 3],
     pub erase: bool,
+    /// Espelho: também carimba refletido na vertical (eixo no meio) e/ou na horizontal.
+    pub mirror: (bool, bool),
     pub buf: StrokeBuffer,
     w: usize,
     h: usize,
@@ -191,6 +193,7 @@ impl Stroker {
             brush: Brush::basic(),
             color: [0, 0, 0],
             erase: false,
+            mirror: (false, false),
             buf: StrokeBuffer::new(),
             w,
             h,
@@ -268,6 +271,20 @@ impl Stroker {
     }
 
     fn stamp(&mut self, cx: f32, cy: f32) {
+        let (w, h) = (self.w as f32, self.h as f32);
+        self.stamp_one(cx, cy);
+        if self.mirror.0 {
+            self.stamp_one(w - cx, cy);
+        }
+        if self.mirror.1 {
+            self.stamp_one(cx, h - cy);
+        }
+        if self.mirror.0 && self.mirror.1 {
+            self.stamp_one(w - cx, h - cy);
+        }
+    }
+
+    fn stamp_one(&mut self, cx: f32, cy: f32) {
         let b = self.brush.clone();
         let (mut cx, mut cy) = (cx, cy);
         if b.scatter > 0.0 {
@@ -563,6 +580,28 @@ mod tests {
         commit_stroke(&mut base, &s.buf, 1.0, false, BlendMode::Normal, None, true);
         assert_eq!(base.pixel(50, 50), [255, 0, 0, 255]);
         assert_eq!(base.pixel(51, 50), [0; 4]);
+    }
+
+    #[test]
+    fn mirror_stamps_the_reflections() {
+        let mut s = Stroker::new(100, 60);
+        s.begin(
+            Brush {
+                size: 8.0,
+                hardness: 1.0,
+                ..Brush::basic()
+            },
+            [255, 0, 0],
+            false,
+        );
+        s.mirror = (true, true);
+        s.add_point(20.0, 10.0);
+        let mut img = TiledImage::new(100, 60);
+        commit_stroke(&mut img, &s.buf, 1.0, false, BlendMode::Normal, None, false);
+        for (x, y) in [(20, 10), (80, 10), (20, 50), (80, 50)] {
+            assert_eq!(img.pixel(x, y)[3], 255, "{x},{y}");
+        }
+        assert_eq!(img.pixel(50, 30)[3], 0);
     }
 
     #[test]

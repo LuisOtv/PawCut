@@ -275,6 +275,52 @@ fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64) {
     } else if resp.hovered() {
         p.rect_filled(rect, 3.0, theme::BAR_LIGHT);
     }
+    // Miniatura: amostra a camada com passo fixo (rápido, mesmo em telas grandes).
+    {
+        let rev = st.docs[cur].ed.pixel_rev();
+        if st.docs[cur].thumbs.get(&id).is_none_or(|(r, _)| *r != rev) {
+            let (w, h) = (l.pixels.width().max(1), l.pixels.height().max(1));
+            let k = (w.max(h) as f32 / 36.0).max(1.0);
+            let (tw, th) = (
+                ((w as f32 / k) as usize).max(1),
+                ((h as f32 / k) as usize).max(1),
+            );
+            let mut img = egui::ColorImage::filled([tw, th], Color32::TRANSPARENT);
+            for y in 0..th {
+                for x in 0..tw {
+                    let p = l
+                        .pixels
+                        .pixel((x as f32 * k) as usize, (y as f32 * k) as usize);
+                    img.pixels[y * tw + x] =
+                        Color32::from_rgba_premultiplied(p[0], p[1], p[2], p[3]);
+                }
+            }
+            let tex = ui.ctx().load_texture(
+                format!("lt{}-{id}", st.docs[cur].uid),
+                img,
+                egui::TextureOptions::NEAREST,
+            );
+            st.docs[cur].thumbs.insert(id, (rev, tex));
+        }
+        if let Some((_, tex)) = st.docs[cur].thumbs.get(&id) {
+            let box_r = Rect::from_min_size(rect.min + vec2(24.0, 2.0), vec2(36.0, 24.0));
+            let s = (box_r.width() / tex.size_vec2().x).min(box_r.height() / tex.size_vec2().y);
+            let r = Rect::from_center_size(box_r.center(), tex.size_vec2() * s);
+            ui.painter().rect_filled(r, 0.0, Color32::from_gray(170));
+            ui.painter().image(
+                tex.id(),
+                r,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            ui.painter().rect_stroke(
+                r,
+                0.0,
+                Stroke::new(1.0, Color32::BLACK),
+                egui::StrokeKind::Outside,
+            );
+        }
+    }
     let eye = Rect::from_min_size(rect.min + vec2(2.0, 4.0), vec2(20.0, 20.0));
     let eye_resp = ui.interact(eye, ui.id().with(("eye", id)), Sense::click());
     let p = ui.painter();
@@ -289,7 +335,7 @@ fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64) {
         let mut done = false;
         if let Some((_, text)) = &mut st.renaming {
             let r = ui.put(
-                Rect::from_min_size(rect.min + vec2(26.0, 3.0), vec2(rect.width() - 30.0, 22.0)),
+                Rect::from_min_size(rect.min + vec2(66.0, 3.0), vec2(rect.width() - 70.0, 22.0)),
                 egui::TextEdit::singleline(text),
             );
             r.request_focus();
@@ -312,7 +358,7 @@ fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64) {
             l.name
         );
         ui.painter().with_clip_rect(rect).text(
-            rect.min + vec2(28.0, 14.0),
+            rect.min + vec2(68.0, 14.0),
             Align2::LEFT_CENTER,
             tag,
             theme::text(12.5),

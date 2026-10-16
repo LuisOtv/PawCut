@@ -303,6 +303,21 @@ pub fn canvas_panel(st: &mut State, ui: &mut egui::Ui) {
         egui::StrokeKind::Outside,
     );
 
+    // Eixos do espelho.
+    if st.mirror.0 {
+        let x = canvas.center().x;
+        clip.line_segment(
+            [pos2(x, canvas.top()), pos2(x, canvas.bottom())],
+            Stroke::new(1.0, Color32::from_rgb(255, 80, 200)),
+        );
+    }
+    if st.mirror.1 {
+        let y = canvas.center().y;
+        clip.line_segment(
+            [pos2(canvas.left(), y), pos2(canvas.right(), y)],
+            Stroke::new(1.0, Color32::from_rgb(255, 80, 200)),
+        );
+    }
     // Corte em andamento: escurece o que sai.
     if let Some((x0, y0, x1, y1)) = d.crop {
         let r = Rect::from_two_pos(to_screen(x0, y0), to_screen(x1, y1));
@@ -671,6 +686,7 @@ fn start_interaction(
                 st.blend
             };
             let (brush, color) = (st.brush.clone(), st.fg);
+            st.docs[cur].ed.set_mirror(st.mirror.0, st.mirror.1);
             match st.docs[cur]
                 .ed
                 .begin_stroke(active, brush, color, erase, mode)
@@ -993,6 +1009,7 @@ fn commit_shape(st: &mut State, tool: Tool, a: (f32, f32), b: (f32, f32)) {
         }
     }
     let (brush, color, mode) = (st.brush.clone(), st.fg, st.blend);
+    st.docs[cur].ed.set_mirror(st.mirror.0, st.mirror.1);
     match st.docs[cur]
         .ed
         .begin_stroke(active, brush, color, false, mode)

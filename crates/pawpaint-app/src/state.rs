@@ -231,6 +231,8 @@ pub struct DocView {
     /// Canto de cima à esquerda da imagem na janela (último quadro).
     pub view_origin: egui::Pos2,
     pub name: String,
+    /// Miniaturas das camadas: (versão dos pixels, textura).
+    pub thumbs: std::collections::HashMap<LayerId, (u64, TextureHandle)>,
 }
 
 impl DocView {
@@ -252,6 +254,7 @@ impl DocView {
             cursor: None,
             view_origin: egui::Pos2::ZERO,
             name: "Sem título".to_string(),
+            thumbs: Default::default(),
         }
     }
 
@@ -359,6 +362,7 @@ pub enum Interaction {
 
 pub struct Prefs {
     pub recent: Vec<[u8; 3]>,
+    pub files: Vec<PathBuf>,
 }
 
 pub struct State {
@@ -375,6 +379,8 @@ pub struct State {
     /// Matiz, saturação e valor da cor da frente (guardados para o seletor não "perder" o matiz).
     pub hsv: (f32, f32, f32),
     pub blend: BlendMode,
+    /// Pintura com espelho: (eixo vertical no meio, eixo horizontal no meio).
+    pub mirror: (bool, bool),
     pub opts: ToolOpts,
     pub clipboard: Option<Clip>,
     pub toasts: Toasts,

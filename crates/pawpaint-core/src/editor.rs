@@ -89,6 +89,8 @@ pub struct Editor {
     saved_revision: u64,
     dirty: Dirty,
     stroke: Option<ActiveStroke>,
+    mirror: (bool, bool),
+    pixel_rev: u64,
 }
 
 impl Editor {
@@ -121,6 +123,8 @@ impl Editor {
             saved_revision: 0,
             dirty: Dirty::All,
             stroke: None,
+            mirror: (false, false),
+            pixel_rev: 0,
         }
     }
 
@@ -140,6 +144,19 @@ impl Editor {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Sobe quando os pixels mudam (inclusive ao fim de um traço), para miniaturas.
+    pub fn pixel_rev(&self) -> u64 {
+        self.revision + self.pixel_rev
+    }
+
+    pub fn set_mirror(&mut self, horizontal_axis: bool, vertical_axis: bool) {
+        self.mirror = (horizontal_axis, vertical_axis);
+    }
+
+    pub fn mirror(&self) -> (bool, bool) {
+        self.mirror
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -400,6 +417,7 @@ impl Editor {
         let mut stroker = Stroker::new(self.doc.width, self.doc.height);
         let opacity = brush.opacity;
         stroker.begin(brush, color, erase);
+        stroker.mirror = self.mirror;
         self.stroke = Some(ActiveStroke {
             layer,
             stroker,
@@ -452,6 +470,7 @@ impl Editor {
         }
         let tiles: Vec<_> = s.stroker.buf.tile_keys().collect();
         self.dirty_tiles(tiles);
+        self.pixel_rev += 1;
     }
 
     /// O traço em andamento, para mostrar na tela antes de aplicar.
@@ -964,6 +983,26 @@ impl Editor {
         });
     }
 
+    /// Corta a tela para caber só no que tem tinta (em qualquer camada visível).
+    pub fn crop_to_content(&mut self) -> bool {
+        let mut b: Option<(usize, usize, usize, usize)> = None;
+        for l in self.doc.layers.iter().filter(|l| l.visible) {
+            if let Some((a, bb, c, d)) = l.pixels.content_bounds() {
+                b = Some(match b {
+                    None => (a, bb, c, d),
+                    Some((x0, y0, x1, y1)) => (x0.min(a), y0.min(bb), x1.max(c), y1.max(d)),
+                });
+            }
+        }
+        match b {
+            Some((x0, y0, x1, y1)) if (x1 - x0, y1 - y0) != (self.doc.width, self.doc.height) => {
+                self.crop(x0, y0, x1, y1);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Muda o tamanho da tela sem esticar a imagem; (`dx`, `dy`) é onde a imagem antiga fica.
     pub fn resize_canvas(&mut self, w: usize, h: usize, dx: i64, dy: i64) {
         let (w, h) = (w.clamp(1, 16384), h.clamp(1, 16384));
@@ -1241,6 +1280,34 @@ mod tests {
         assert!(px.pixel(30, 15)[0] > 200);
         assert_eq!(px.pixel(70, 60), [0, 255, 0, 255]);
         assert!(e.doc().selection.as_ref().unwrap().value(35, 20) > 200);
+    }
+
+    #[test]
+    fn mirrored_strokes_and_crop_to_content() {
+        let mut e = Editor::new(100, 80, Background::Transparent);
+        let id = e.doc().layers[0].id;
+        e.set_mirror(true, false);
+        let rev = e.pixel_rev();
+        e.begin_stroke(
+            id,
+            Brush {
+                size: 6.0,
+                hardness: 1.0,
+                ..Brush::basic()
+            },
+            [0, 0, 0],
+            false,
+            BlendMode::Normal,
+        )
+        .unwrap();
+        e.stroke_point(20.0, 40.0);
+        e.end_stroke(20.0, 40.0);
+        assert!(e.pixel_rev() > rev);
+        let px = &e.doc().layer(id).unwrap().pixels;
+        assert_eq!(px.pixel(80, 40)[3], 255);
+        assert!(e.crop_to_content());
+        assert_eq!((e.doc().width, e.doc().height), (66, 6));
+        assert!(!e.crop_to_content());
     }
 
     #[test]
