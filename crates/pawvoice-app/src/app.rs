@@ -266,6 +266,36 @@ fn data_dir() -> PathBuf {
         .join("pawvoice")
 }
 
+fn recent_path() -> PathBuf {
+    settings_path().with_file_name("recent.json")
+}
+
+/// Projetos abertos ou salvos há pouco (do mais novo para o mais antigo).
+fn recent_projects() -> Vec<PathBuf> {
+    std::fs::read_to_string(recent_path())
+        .ok()
+        .and_then(|t| serde_json::from_str::<Vec<PathBuf>>(&t).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| p.exists())
+        .collect()
+}
+
+fn remember_project(path: &Path) {
+    // Os testes não mexem nas configurações de verdade.
+    if cfg!(test) {
+        return;
+    }
+    let mut list = recent_projects();
+    list.retain(|p| p != path);
+    list.insert(0, path.to_path_buf());
+    list.truncate(10);
+    let _ = std::fs::create_dir_all(settings_path().parent().unwrap_or(Path::new(".")));
+    if let Ok(t) = serde_json::to_string(&list) {
+        let _ = std::fs::write(recent_path(), t);
+    }
+}
+
 fn settings_path() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -1033,6 +1063,7 @@ impl VoiceApp {
                     self.stop();
                     self.ed = ed;
                     self.path = Some(path.to_path_buf());
+                    remember_project(path);
                     self.cache.clear();
                     self.select_none();
                     self.cursor = 0;
@@ -1123,6 +1154,7 @@ impl VoiceApp {
         match pawvoice_core::save_session(&self.ed, &path) {
             Ok(()) => {
                 self.ed.mark_saved();
+                remember_project(&path);
                 self.path = Some(path);
                 self.say("Projeto salvo");
             }
@@ -1370,6 +1402,24 @@ impl VoiceApp {
                     ui.close();
                     self.open_dialog();
                 }
+                let recent = recent_projects();
+                ui.add_enabled_ui(!recent.is_empty(), |ui| {
+                    ui.menu_button("Abrir recente", |ui| {
+                        for f in recent {
+                            let name = f
+                                .file_name()
+                                .map_or(String::new(), |n| n.to_string_lossy().into_owned());
+                            if ui
+                                .button(name)
+                                .on_hover_text(f.display().to_string())
+                                .clicked()
+                            {
+                                ui.close();
+                                self.open_any(&f);
+                            }
+                        }
+                    });
+                });
                 ui.separator();
                 if item(ui, "Salvar projeto", "Ctrl+S", true) {
                     ui.close();
