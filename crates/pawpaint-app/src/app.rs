@@ -135,10 +135,10 @@ pub fn default_layout() -> DockState<Panel> {
     let tree = dock.main_surface_mut();
     let [canvas, right] =
         tree.split_right(NodeIndex::root(), 0.79, vec![Panel::Color, Panel::Palette]);
-    let [_, layers] = tree.split_below(right, 0.42, vec![Panel::Layers]);
+    let [_, layers] = tree.split_below(right, 0.36, vec![Panel::Layers]);
     tree.split_below(
         layers,
-        0.45,
+        0.62,
         vec![
             Panel::BrushPresets,
             Panel::BrushEditor,

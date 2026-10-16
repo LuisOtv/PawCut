@@ -133,7 +133,7 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
         let mut lock = layer.locked;
         let mut alock = layer.alpha_lock;
         if ui
-            .toggle_value(&mut lock, "Travar")
+            .toggle_value(&mut lock, "Trava")
             .on_hover_text("Não aceita pintura nem filtros")
             .changed()
         {
@@ -143,8 +143,8 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
             st.docs[st.cur].ed.end_change();
         }
         if ui
-            .toggle_value(&mut alock, "Travar alfa")
-            .on_hover_text("Só muda a cor de onde já tem tinta")
+            .toggle_value(&mut alock, "α")
+            .on_hover_text("Travar alfa: só muda a cor de onde já tem tinta")
             .changed()
         {
             st.docs[st.cur]
@@ -152,11 +152,9 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
                 .edit_layer(active, "alock", "Travar alfa", |l| l.alpha_lock = alock);
             st.docs[st.cur].ed.end_change();
         }
-    });
-    // Máscara da camada.
-    let has_mask = layer.mask.is_some();
-    ui.horizontal(|ui| {
+        ui.separator();
         let cur = st.cur;
+        let has_mask = layer.mask.is_some();
         if has_mask {
             let mut on = st.docs[cur].edit_mask;
             if ui
@@ -178,7 +176,7 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
                 let _ = st.docs[cur].ed.remove_mask(active, false);
                 st.docs[cur].edit_mask = false;
             }
-        } else if ui.button("Adicionar máscara").clicked() {
+        } else if ui.button("+ Máscara").clicked() {
             let _ = st.docs[cur].ed.add_mask(active);
             st.docs[cur].edit_mask = true;
         }

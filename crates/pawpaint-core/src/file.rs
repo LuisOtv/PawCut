@@ -268,3 +268,84 @@ mod tests {
         assert!(bytes.len() <= 90_000 && q >= 30, "{} q{q}", bytes.len());
     }
 }
+
+#[cfg(test)]
+mod demo {
+    use super::*;
+    use crate::brush::Brush;
+    use crate::editor::Background;
+
+    /// Gera um projeto de exemplo em `$PAW_DEMO_OUT` (para testes visuais da interface).
+    #[test]
+    #[ignore]
+    fn make_demo_project() {
+        let Some(out) = std::env::var_os("PAW_DEMO_OUT") else {
+            return;
+        };
+        let mut e = Editor::new(1200, 800, Background::Color([240, 236, 226]));
+        let sky = e.add_layer(Some("Céu".into()), None);
+        e.edit_layer(sky, "n", "n", |_| {});
+        let sel = crate::selection::Selection::rect(1200, 800, 0, 0, 1200, 420);
+        e.set_selection(Some(sel), "s");
+        e.fill_selection(sky, [120, 180, 235]).unwrap();
+        e.deselect();
+        let sun = e.add_layer(Some("Sol".into()), None);
+        e.begin_stroke(
+            sun,
+            Brush {
+                size: 160.0,
+                hardness: 0.9,
+                ..Brush::basic()
+            },
+            [255, 205, 60],
+            false,
+            crate::BlendMode::Normal,
+        )
+        .unwrap();
+        e.stroke_point(900.0, 180.0);
+        e.end_stroke(900.0, 180.0);
+        let hills = e.add_layer(Some("Colinas".into()), None);
+        e.add_mask(hills).unwrap();
+        e.begin_stroke(
+            hills,
+            Brush {
+                size: 340.0,
+                hardness: 0.3,
+                flow: 0.8,
+                ..Brush::basic()
+            },
+            [60, 140, 80],
+            false,
+            crate::BlendMode::Normal,
+        )
+        .unwrap();
+        for i in 0..40 {
+            e.stroke_point(i as f32 * 30.0, 600.0 + (i as f32 * 0.4).sin() * 60.0);
+        }
+        e.end_stroke(1170.0, 600.0);
+        let g = e.add_group(Some(hills));
+        e.set_parent(sun, Some(g)).unwrap();
+        e.set_parent(hills, Some(g)).unwrap();
+        e.edit_layer(g, "n", "n", |l| l.name = "Paisagem".into());
+        let txt = e.add_layer(Some("Traços".into()), None);
+        e.begin_stroke(
+            txt,
+            Brush {
+                size: 10.0,
+                hardness: 1.0,
+                smoothing: 0.5,
+                ..Brush::basic()
+            },
+            [30, 30, 60],
+            false,
+            crate::BlendMode::Normal,
+        )
+        .unwrap();
+        for i in 0..60 {
+            let t = i as f32 / 59.0;
+            e.stroke_point(150.0 + t * 500.0, 300.0 + (t * 14.0).sin() * 40.0);
+        }
+        e.end_stroke(650.0, 300.0);
+        save_project(&e, std::path::Path::new(&out)).unwrap();
+    }
+}
