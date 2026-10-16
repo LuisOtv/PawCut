@@ -135,10 +135,10 @@ pub fn default_layout() -> DockState<Panel> {
     let tree = dock.main_surface_mut();
     let [canvas, right] =
         tree.split_right(NodeIndex::root(), 0.79, vec![Panel::Color, Panel::Palette]);
-    let [_, layers] = tree.split_below(right, 0.36, vec![Panel::Layers]);
+    let [_, layers] = tree.split_below(right, 0.33, vec![Panel::Layers]);
     tree.split_below(
         layers,
-        0.62,
+        0.68,
         vec![
             Panel::BrushPresets,
             Panel::BrushEditor,
@@ -163,7 +163,7 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn title(&mut self, tab: &mut Panel) -> egui::WidgetText {
-        tab.title().into()
+        format!("  {}  ", tab.title()).into()
     }
 
     fn is_closeable(&self, tab: &Panel) -> bool {
@@ -180,18 +180,31 @@ impl TabViewer for Viewer<'_> {
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Panel) {
         let st = &mut *self.st;
-        match tab {
-            Panel::Canvas => canvas::canvas_panel(st, ui),
-            Panel::Toolbox => docks::toolbox(st, ui),
-            Panel::Layers => docks::layers(st, ui),
-            Panel::BrushPresets => docks::brush_presets(st, ui),
-            Panel::BrushEditor => docks::brush_editor(st, ui),
-            Panel::ToolOptions => docks::tool_options(st, ui),
-            Panel::Color => docks::color(st, ui),
-            Panel::Palette => docks::palette(st, ui),
-            Panel::Overview => docks::overview(st, ui),
-            Panel::History => docks::history(st, ui),
+        if *tab == Panel::Canvas {
+            canvas::canvas_panel(st, ui);
+            return;
         }
+        // Os dockers respiram: margem em volta e o conteúdo ocupa o resto.
+        const PAD: f32 = 8.0;
+        let size = ui.available_size();
+        egui::Frame::new()
+            .inner_margin(egui::Margin::symmetric(PAD as i8, PAD as i8))
+            .show(ui, |ui| {
+                ui.set_min_size(size - egui::vec2(PAD * 2.0, PAD * 2.0));
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                match tab {
+                    Panel::Canvas => {}
+                    Panel::Toolbox => docks::toolbox(st, ui),
+                    Panel::Layers => docks::layers(st, ui),
+                    Panel::BrushPresets => docks::brush_presets(st, ui),
+                    Panel::BrushEditor => docks::brush_editor(st, ui),
+                    Panel::ToolOptions => docks::tool_options(st, ui),
+                    Panel::Color => docks::color(st, ui),
+                    Panel::Palette => docks::palette(st, ui),
+                    Panel::Overview => docks::overview(st, ui),
+                    Panel::History => docks::history(st, ui),
+                }
+            });
     }
 }
 
@@ -211,7 +224,7 @@ impl PaintApp {
         theme::apply(ctx);
         let mut app = Self::empty();
         app.screenshot = std::env::var_os("PAWPAINT_SCREENSHOT").map(PathBuf::from);
-        if let Ok(t) = std::fs::read_to_string(config_dir().join("layout.json"))
+        if let Ok(t) = std::fs::read_to_string(config_dir().join("layout-v2.json"))
             && let Ok(d) = serde_json::from_str::<DockState<Panel>>(&t)
             && d.find_tab(&Panel::Canvas).is_some()
         {
@@ -2007,7 +2020,7 @@ impl PaintApp {
         let bar = |fill| {
             egui::Frame::new()
                 .fill(fill)
-                .inner_margin(egui::Margin::symmetric(6, 0))
+                .inner_margin(egui::Margin::symmetric(10, 0))
         };
         egui::Panel::top("menu")
             .frame(bar(theme::BG_DARK))
@@ -2061,7 +2074,7 @@ impl PaintApp {
             && t != self.last_layout
         {
             let _ = std::fs::create_dir_all(config_dir());
-            let _ = std::fs::write(config_dir().join("layout.json"), &t);
+            let _ = std::fs::write(config_dir().join("layout-v2.json"), &t);
             self.last_layout = t;
         }
     }

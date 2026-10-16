@@ -589,12 +589,16 @@ fn square_to(start: (f32, f32), cur: (f32, f32)) -> (f32, f32) {
 }
 
 fn doc_tabs(st: &mut State, ui: &mut egui::Ui) {
+    if st.docs.is_empty() {
+        return;
+    }
     let mut close = None;
     let mut select = None;
     egui::Frame::new()
         .fill(theme::BAR)
-        .inner_margin(egui::Margin::symmetric(6, 2))
+        .inner_margin(egui::Margin::symmetric(10, 4))
         .show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 for (i, d) in st.docs.iter().enumerate() {
                     let selected = i == st.cur;

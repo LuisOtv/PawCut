@@ -870,11 +870,10 @@ fn hue_color(h: f32) -> Color32 {
 }
 
 pub fn color(st: &mut State, ui: &mut egui::Ui) {
-    ui.add_space(4.0);
-    let w = (ui.available_width() - 8.0).clamp(120.0, 260.0);
+    let w = ui.available_width().clamp(120.0, 360.0);
     let (mut h, mut s, mut v) = st.hsv;
     // Quadrado de saturação e valor.
-    let (sq, resp) = ui.allocate_exact_size(vec2(w, w * 0.6), Sense::click_and_drag());
+    let (sq, resp) = ui.allocate_exact_size(vec2(w, (w * 0.6).min(120.0)), Sense::click_and_drag());
     let mut mesh = Mesh::default();
     mesh.colored_vertex(sq.left_top(), Color32::WHITE);
     mesh.colored_vertex(sq.right_top(), hue_color(h));
