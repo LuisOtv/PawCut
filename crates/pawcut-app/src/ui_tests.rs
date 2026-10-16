@@ -1,7 +1,7 @@
 //! Testes da interface com mouse e teclado simulados (egui_kittest).
 
 use egui::{Event, Modifiers, PointerButton, Pos2};
-use egui_kittest::Harness;
+use egui_kittest::{Harness, kittest::Queryable};
 use pawcut_core::*;
 
 use crate::panels::DragPayload;
@@ -785,4 +785,43 @@ fn keyboard_markers_ripple_trim_and_paste() {
     h.key_press_modifiers(Modifiers::CTRL, egui::Key::V);
     h.run_steps(2);
     assert_eq!(v1_spans(&h), vec![(0, 110), (200, 310)]);
+}
+
+/// Larguras dos campos numéricos do diálogo "Novo projeto" para uma resolução e FPS.
+fn new_project_field_widths(width: u32, height: u32, fps: u32) -> Vec<f32> {
+    let st = AppState::new(Project::new(ProjectSettings::default()));
+    let ctx = egui::Context::default();
+    let mut ws = Workspace::new(&ctx, st);
+    ws.recovery.clear();
+    ws.new_project = Some(crate::panels::dialogs::NewProjectDialog {
+        width,
+        height,
+        fps,
+        ..Default::default()
+    });
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(800.0, 400.0))
+        .build_ui_state(
+            |ui, ws: &mut Workspace| {
+                let ctx = ui.ctx().clone();
+                ws.dialogs_ui(&ctx);
+            },
+            ws,
+        );
+    h.run_steps(3);
+    h.get_all_by_role(egui::accesskit::Role::SpinButton)
+        .map(|n| n.rect().width())
+        .collect()
+}
+
+#[test]
+fn numeric_fields_keep_their_width_whatever_the_value() {
+    let short = new_project_field_widths(16, 16, 1);
+    let long = new_project_field_widths(8192, 8192, 120);
+    assert_eq!(short.len(), 3, "largura, altura e FPS");
+    assert_eq!(short, long, "o campo não pode crescer com os dígitos");
+    assert!(
+        short.iter().all(|w| *w == crate::theme::NUM_W),
+        "largura fixa do tema: {short:?}"
+    );
 }

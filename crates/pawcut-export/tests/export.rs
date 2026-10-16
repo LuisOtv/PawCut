@@ -195,6 +195,36 @@ fn offline_audio_also_stops_the_export() {
     assert!(!out.exists());
 }
 
+#[test]
+fn offline_media_in_a_disabled_clip_does_not_stop_the_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ed = editor();
+    put(
+        &mut ed,
+        TrackKind::Video,
+        ClipSource::SolidColor(Rgba::new(0, 0, 255, 255)),
+        0,
+        30,
+    );
+    let info = MediaInfo {
+        path: "/nao/existe.wav".into(),
+        kind: MediaKind::Audio,
+        duration: Some(60),
+        width: 0,
+        height: 0,
+    };
+    let m = ed.apply(Edit::AddMedia(info)).unwrap().media.unwrap();
+    let clip = put(&mut ed, TrackKind::Audio, ClipSource::Media(m), 5, 20);
+    ed.apply(Edit::SetClip {
+        clip,
+        change: ClipChange::Enabled(false),
+    })
+    .unwrap();
+    let out = dir.path().join("desligado.mp4");
+    run(&ed, &out, false).expect("clipe desligado não conta como mídia offline");
+    assert!(out.exists());
+}
+
 fn run_with(ed: &Editor, settings: ExportSettings) -> Result<(), ExportError> {
     export(
         ed.project(),

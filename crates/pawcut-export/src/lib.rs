@@ -526,6 +526,8 @@ fn first_missing_media(project: &Project) -> Option<(Frame, PathBuf)> {
     project
         .all_tracks()
         .flat_map(|t| t.clips.iter())
+        // Clipe desligado não aparece nem soa: o arquivo dele sumir não deve travar a exportação.
+        .filter(|c| c.enabled)
         .filter_map(|c| match &c.source {
             ClipSource::Media(id) => project
                 .media(*id)
