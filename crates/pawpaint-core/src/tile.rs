@@ -73,6 +73,16 @@ impl TiledImage {
         Arc::make_mut(t).as_mut_slice()
     }
 
+    /// Enche a imagem toda com um pixel (pré-multiplicado), bloco por bloco: bem mais rápido
+    /// que pixel a pixel (usado no fundo de documentos novos).
+    pub fn fill_solid(&mut self, px: [u8; 4]) {
+        let tile: Vec<u8> = px.iter().copied().cycle().take(TILE_BYTES).collect();
+        let shared = Arc::new(tile);
+        for t in &mut self.tiles {
+            *t = Some(shared.clone());
+        }
+    }
+
     pub fn clear_tile(&mut self, tx: usize, ty: usize) {
         self.tiles[ty * self.tx + tx] = None;
     }

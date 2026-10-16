@@ -112,8 +112,7 @@ impl Editor {
             Background::Transparent => None,
         };
         if let Some(c) = color {
-            let mask = vec![255u8; width * height];
-            fill::fill_mask(&mut layer.pixels, &mask, c, 1.0, None, false);
+            layer.pixels.fill_solid([c[0], c[1], c[2], 255]);
         } else {
             layer.name = "Camada 1".into();
         }
@@ -1595,5 +1594,50 @@ mod tests {
         assert_eq!(e.doc().layers[1].id, dup);
         e.jump_to(0);
         assert_eq!(e.doc().layers.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod perf_probe {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore]
+    fn big_canvas_timings() {
+        let t = Instant::now();
+        let mut e = Editor::new(4096, 4096, Background::White);
+        println!("new 4096²: {:?}", t.elapsed());
+        let id = e.add_layer(None, None);
+        let t = Instant::now();
+        let b = Brush {
+            size: 60.0,
+            hardness: 0.5,
+            ..Brush::basic()
+        };
+        e.begin_stroke(id, b, [10, 20, 30], false, BlendMode::Normal)
+            .unwrap();
+        for i in 0..200 {
+            e.stroke_point(
+                100.0 + i as f32 * 10.0,
+                2000.0 + (i as f32 * 0.2).sin() * 300.0,
+            );
+        }
+        e.end_stroke(2100.0, 2000.0);
+        println!("stroke of 200 points: {:?}", t.elapsed());
+        let t = Instant::now();
+        let mut n = 0;
+        for ty in 0..64 {
+            for tx in 0..64 {
+                n += composite::composite_tile(e.doc(), tx, ty, None).len();
+            }
+        }
+        println!("full composite 4096² ({n} bytes): {:?}", t.elapsed());
+        let t = Instant::now();
+        e.checkpoint("x");
+        println!("checkpoint: {:?}", t.elapsed());
+        let t = Instant::now();
+        e.apply_filter(id, &Filter::GaussianBlur(8.0), "b").unwrap();
+        println!("blur: {:?}", t.elapsed());
     }
 }
