@@ -9,7 +9,7 @@ bibliotecas:
 | **PawCut** | editor de vídeo | pronto |
 | **PawVoice** | gravar e editar narração | primeira versão |
 | **PawWrite** | roteiros (no lugar do Word) | primeira versão |
-| **PawPaint** | thumbnails (no lugar do Krita) | primeira versão |
+| **PawPaint** | imagens e pintura (no lugar do Krita) | primeira versão |
 
 ```bash
 scripts/install.sh            # compila e instala todos (menu de aplicativos + ~/.local/bin)
@@ -77,20 +77,29 @@ Editor de roteiros para vídeo: texto limpo e o tempo de fala sempre à vista.
 
 ## PawPaint
 
-Editor de thumbnails para YouTube: camadas, texto com contorno e exportação que cabe no limite do site.
+Editor de imagens no estilo do Krita: pintura, camadas, seleções, filtros e dockers que você arruma como quiser.
 
-- **Tela:** 1280×720 por padrão (Arquivo → Nova também faz Shorts 1080×1920, quadrado ou o tamanho que quiser).
-- **Camadas:** imagem (Ctrl+I, arrastar arquivo para a janela ou Ctrl+V com um print), texto (T), retângulo e elipse.
-  - arrastar move (com ímã no centro; Shift desliga), os cantos escalam, a bolinha de cima gira (Shift = de 15 em 15°);
-  - setas movem 1 px (Shift: 10 px); `[` e `]` mudam a ordem; Ctrl+D duplica;
-  - olho esconde, cadeado trava, duplo clique renomeia.
-- **Efeitos em qualquer camada:** contorno de adesivo (o branco ou preto grosso das thumbnails), sombra,
-  brilho, contraste e saturação. Em imagens também dá para **tirar uma cor** (fundo verde ou branco).
-- **Texto:** qualquer fonte instalada, negrito, itálico, alinhamento e entrelinha; já nasce com contorno e sombra.
-- **Como vai aparecer:** a thumbnail em dois tamanhos pequenos, com o selo de duração do YouTube por cima.
-  A tecla G mostra o canto que o selo cobre e as linhas de terços.
-- **Exportar:** Ctrl+E gera um JPG com a melhor qualidade que cabe nos **2 MB** do YouTube; Ctrl+Shift+E gera PNG.
-- **Projeto:** `nome.pawpaint` com as imagens em `nome.pawpaint-assets/`; tudo desfaz com Ctrl+Z.
+- **Dockers:** Ferramentas, Camadas, Pincéis, Editor de pincel, Opções da ferramenta, Cor, Paleta, Visão geral e
+  Histórico. Arraste uma aba para outro lugar, junte em abas, solte numa janela, feche; Configurações → Dockers
+  mostra de novo, e o layout fica salvo. Vários documentos abertos em abas.
+- **Pincéis:** motor de carimbos com tamanho, dureza, opacidade (teto do traço), fluxo (soma), espaçamento, ângulo,
+  achatamento, grão, dispersão e estabilizador. Vêm 7 prontos (Básico, Aerógrafo, Lápis, Tinta, Marcador, Giz,
+  Aquarela) e dá para salvar os seus. `[` e `]` mudam o tamanho; Ctrl+clique pega a cor.
+- **Ferramentas:** pincel (B), borracha (E), balde de tinta (F), degradê (G), conta-gotas (P), seleção retangular (J),
+  elíptica (K), laço (L) e varinha mágica (W), mover (T), transformar (Ctrl+T), cortar (C), linha (I),
+  retângulo (U), elipse (O) e texto (Q). X troca frente e fundo, D volta ao preto e branco.
+- **Camadas:** pixels, 13 modos de mistura, opacidade, travar e travar alfa, mostrar/esconder, duplicar, unir,
+  reordenar, importar imagem como camada. Copiar, recortar e colar entre documentos.
+- **Seleções:** somar (Shift), subtrair (Alt), inverter, suavizar a borda, expandir/contrair; limitam pincel,
+  preenchimento, filtros e transformação.
+- **Filtros:** brilho/contraste, matiz/saturação, níveis, limiar, posterizar, inverter, dessaturar, desfoque,
+  nitidez, pixelar, ruído e detecção de bordas, com prévia.
+- **Imagem:** tamanho da tela, escalar, cortar, girar e espelhar, achatar.
+- **Arquivos:** abre PNG, JPG, WebP e BMP; salva `.pawpaint` (um zip com uma camada por PNG); exporta PNG, JPG, WebP
+  ou BMP, e *JPG com até 2 MB* para thumbnails do YouTube.
+- **Desfazer:** guarda o documento inteiro a cada passo sem gastar memória (os blocos de pixels são compartilhados).
+
+Ainda não tem: mesa digitalizadora com pressão, camadas de grupo/vetor/máscara, curvas e histograma.
 
 ---
 

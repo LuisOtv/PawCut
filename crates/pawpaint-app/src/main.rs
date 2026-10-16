@@ -1,6 +1,10 @@
-//! PawPaint: editor de thumbnails da suíte Paw (camadas, texto, contorno e exportação para o YouTube).
+//! PawPaint: editor de imagens da suíte Paw (pintura, camadas, seleções, filtros e dockers).
 
 mod app;
+mod canvas;
+mod docks;
+mod icons;
+mod state;
 
 use std::path::PathBuf;
 
@@ -10,7 +14,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("PawPaint")
             .with_app_id("pawpaint")
-            .with_inner_size([1480.0, 860.0])
+            .with_inner_size([1480.0, 880.0])
             .with_min_inner_size([960.0, 600.0])
             .with_drag_and_drop(true),
         // Igual aos outros apps: X11 para soltar arquivos na janela (PAW_WAYLAND=1 usa Wayland).

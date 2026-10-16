@@ -1,0 +1,996 @@
+//! Conteúdo de cada docker: ferramentas, camadas, pincéis, cor, paleta, visão geral, histórico.
+
+use egui::{Align2, Color32, Mesh, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, pos2, vec2};
+use paw_ui::theme;
+use pawpaint_core::brush::{Brush, Stroker, Tip, commit_stroke};
+use pawpaint_core::fill::GradientKind;
+use pawpaint_core::selection::SelOp;
+use pawpaint_core::{BlendMode, MoveTo, TiledImage};
+
+use crate::icons;
+use crate::state::{Dialog, State, Tool, hsv_to_rgb, rgb_to_hsv};
+
+fn label(ui: &mut egui::Ui, text: &str) {
+    ui.label(RichText::new(text).small().color(theme::TEXT_DIM));
+}
+
+fn rgb(c: [u8; 3]) -> Color32 {
+    Color32::from_rgb(c[0], c[1], c[2])
+}
+
+// ---------------------------------------------------------------- ferramentas
+
+pub fn toolbox(st: &mut State, ui: &mut egui::Ui) {
+    ui.add_space(4.0);
+    let cell = 34.0;
+    let cols = ((ui.available_width() - 4.0) / (cell + 3.0))
+        .floor()
+        .max(1.0) as usize;
+    let mut clicked = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+        let _ = cols;
+        for tool in Tool::ALL {
+            let (rect, resp) = ui.allocate_exact_size(vec2(cell, cell), Sense::click());
+            let on = st.tool == tool;
+            let p = ui.painter();
+            if on {
+                p.rect_filled(rect, 4.0, theme::ACCENT.gamma_multiply(0.45));
+            } else if resp.hovered() {
+                p.rect_filled(rect, 4.0, theme::BAR_LIGHT);
+            }
+            icons::paint_tool(
+                p,
+                rect.shrink(7.0),
+                tool,
+                if on { Color32::WHITE } else { theme::TEXT },
+            );
+            if resp
+                .on_hover_text(format!("{} ({})", tool.label(), tool.key()))
+                .clicked()
+            {
+                clicked = Some(tool);
+            }
+        }
+    });
+    if let Some(t) = clicked {
+        crate::app::set_tool(st, t);
+    }
+    ui.add_space(8.0);
+    // Cores da frente e do fundo.
+    let (rect, _) = ui.allocate_exact_size(vec2(cell * 2.0 + 3.0, 46.0), Sense::hover());
+    let bg = Rect::from_min_size(rect.min + vec2(18.0, 14.0), vec2(30.0, 30.0));
+    let fg = Rect::from_min_size(rect.min + vec2(0.0, 0.0), vec2(30.0, 30.0));
+    ui.painter().rect_filled(bg, 2.0, rgb(st.bg));
+    ui.painter().rect_stroke(
+        bg,
+        2.0,
+        Stroke::new(1.0, Color32::BLACK),
+        egui::StrokeKind::Outside,
+    );
+    ui.painter().rect_filled(fg, 2.0, rgb(st.fg));
+    ui.painter().rect_stroke(
+        fg,
+        2.0,
+        Stroke::new(1.0, Color32::WHITE),
+        egui::StrokeKind::Outside,
+    );
+    let swap = ui
+        .interact(rect, ui.id().with("swap"), Sense::click())
+        .on_hover_text("Trocar frente e fundo (X)");
+    if swap.clicked() {
+        crate::app::swap_colors(st);
+    }
+}
+
+// ---------------------------------------------------------------- camadas
+
+pub fn layers(st: &mut State, ui: &mut egui::Ui) {
+    let Some(d) = st.doc() else {
+        ui.label(RichText::new("Nenhum documento aberto").weak());
+        return;
+    };
+    let active = d.active;
+    let Some(layer) = d.ed.doc().layer(active).cloned() else {
+        return;
+    };
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let mut mode = layer.mode;
+        egui::ComboBox::from_id_salt("layer-blend")
+            .selected_text(mode.label())
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for m in BlendMode::ALL {
+                    ui.selectable_value(&mut mode, m, m.label());
+                }
+            });
+        if mode != layer.mode {
+            st.docs[st.cur]
+                .ed
+                .edit_layer(active, "mode", "Modo de mistura", |l| l.mode = mode);
+        }
+    });
+    ui.horizontal(|ui| {
+        label(ui, "Opacidade");
+        let mut o = layer.opacity * 100.0;
+        if ui
+            .add(
+                egui::Slider::new(&mut o, 0.0..=100.0)
+                    .suffix("%")
+                    .trailing_fill(true),
+            )
+            .changed()
+        {
+            st.docs[st.cur]
+                .ed
+                .edit_layer(active, "opacity", "Opacidade da camada", |l| {
+                    l.opacity = o / 100.0
+                });
+        }
+    });
+    ui.horizontal(|ui| {
+        let mut lock = layer.locked;
+        let mut alock = layer.alpha_lock;
+        if ui
+            .toggle_value(&mut lock, "Travar")
+            .on_hover_text("Não aceita pintura nem filtros")
+            .changed()
+        {
+            st.docs[st.cur]
+                .ed
+                .edit_layer(active, "lock", "Travar camada", |l| l.locked = lock);
+            st.docs[st.cur].ed.end_change();
+        }
+        if ui
+            .toggle_value(&mut alock, "Travar alfa")
+            .on_hover_text("Só muda a cor de onde já tem tinta")
+            .changed()
+        {
+            st.docs[st.cur]
+                .ed
+                .edit_layer(active, "alock", "Travar alfa", |l| l.alpha_lock = alock);
+            st.docs[st.cur].ed.end_change();
+        }
+    });
+    ui.add_space(4.0);
+    let h = (ui.available_height() - 36.0).max(60.0);
+    egui::ScrollArea::vertical()
+        .max_height(h)
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            let ids: Vec<u64> = st.docs[st.cur]
+                .ed
+                .doc()
+                .layers
+                .iter()
+                .rev()
+                .map(|l| l.id)
+                .collect();
+            for id in ids {
+                layer_row(st, ui, id);
+            }
+        });
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        let cur = st.cur;
+        let mut act: Option<&str> = None;
+        for (key, tip) in [
+            ("new", "Nova camada"),
+            ("dup", "Duplicar (Ctrl+J)"),
+            ("del", "Apagar"),
+            ("merge", "Unir com a de baixo (Ctrl+E)"),
+            ("up", "Subir"),
+            ("down", "Descer"),
+        ] {
+            let (r, resp) = ui.allocate_exact_size(vec2(28.0, 24.0), Sense::click());
+            let p = ui.painter();
+            p.rect_filled(
+                r,
+                3.0,
+                if resp.hovered() {
+                    theme::BAR_LIGHT.gamma_multiply(1.4)
+                } else {
+                    theme::BAR_LIGHT
+                },
+            );
+            let c = r.center();
+            let st1 = Stroke::new(1.6, theme::TEXT);
+            match key {
+                "new" => {
+                    p.line_segment([c - vec2(5.0, 0.0), c + vec2(5.0, 0.0)], st1);
+                    p.line_segment([c - vec2(0.0, 5.0), c + vec2(0.0, 5.0)], st1);
+                }
+                "dup" => {
+                    p.rect_stroke(
+                        Rect::from_center_size(c + vec2(-2.0, -2.0), vec2(9.0, 9.0)),
+                        1.0,
+                        st1,
+                        egui::StrokeKind::Middle,
+                    );
+                    p.rect_stroke(
+                        Rect::from_center_size(c + vec2(2.0, 2.0), vec2(9.0, 9.0)),
+                        1.0,
+                        st1,
+                        egui::StrokeKind::Middle,
+                    );
+                }
+                "del" => {
+                    p.line_segment([c - vec2(5.0, 5.0), c + vec2(5.0, 5.0)], st1);
+                    p.line_segment([c - vec2(5.0, -5.0), c + vec2(5.0, -5.0)], st1);
+                }
+                "merge" => {
+                    p.line_segment([c + vec2(0.0, -6.0), c + vec2(0.0, 4.0)], st1);
+                    p.line_segment([c + vec2(-4.0, 0.0), c + vec2(0.0, 4.0)], st1);
+                    p.line_segment([c + vec2(4.0, 0.0), c + vec2(0.0, 4.0)], st1);
+                    p.line_segment([c + vec2(-5.0, 7.0), c + vec2(5.0, 7.0)], st1);
+                }
+                "up" => {
+                    p.line_segment([c + vec2(-5.0, 3.0), c + vec2(0.0, -3.0)], st1);
+                    p.line_segment([c + vec2(5.0, 3.0), c + vec2(0.0, -3.0)], st1);
+                }
+                _ => {
+                    p.line_segment([c + vec2(-5.0, -3.0), c + vec2(0.0, 3.0)], st1);
+                    p.line_segment([c + vec2(5.0, -3.0), c + vec2(0.0, 3.0)], st1);
+                }
+            }
+            if resp.on_hover_text(tip).clicked() {
+                act = Some(key);
+            }
+        }
+        let ed = &mut st.docs[cur].ed;
+        match act {
+            Some("new") => st.docs[cur].active = ed.add_layer(None, Some(active)),
+            Some("dup") => {
+                if let Ok(n) = ed.duplicate_layer(active) {
+                    st.docs[cur].active = n;
+                }
+            }
+            Some("del") => {
+                if ed.doc().layers.len() > 1 && ed.delete_layer(active).is_ok() {
+                    st.docs[cur].active = st.docs[cur].ed.doc().layers.last().map_or(0, |l| l.id);
+                }
+            }
+            Some("merge") => match ed.merge_down(active) {
+                Ok(n) => st.docs[cur].active = n,
+                Err(e) => st.warn(e.to_string()),
+            },
+            Some("up") => ed.move_layer(active, MoveTo::Up),
+            Some("down") => ed.move_layer(active, MoveTo::Down),
+            _ => {}
+        }
+    });
+}
+
+fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64) {
+    let cur = st.cur;
+    let Some(l) = st.docs[cur].ed.doc().layer(id).cloned() else {
+        return;
+    };
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+    let selected = st.docs[cur].active == id;
+    let p = ui.painter();
+    if selected {
+        p.rect_filled(rect, 3.0, theme::ACCENT.gamma_multiply(0.35));
+    } else if resp.hovered() {
+        p.rect_filled(rect, 3.0, theme::BAR_LIGHT);
+    }
+    let eye = Rect::from_min_size(rect.min + vec2(2.0, 4.0), vec2(20.0, 20.0));
+    let eye_resp = ui.interact(eye, ui.id().with(("eye", id)), Sense::click());
+    let p = ui.painter();
+    if l.visible {
+        p.circle_filled(eye.center(), 5.0, theme::TEXT);
+    } else {
+        p.circle_stroke(eye.center(), 5.0, Stroke::new(1.5, theme::TEXT_DIM));
+    }
+    // Miniatura pequena: quadrado com a cor média não vale o custo; mostra o modo se não for Normal.
+    let renaming = matches!(&st.renaming, Some((rid, _)) if *rid == id);
+    if renaming {
+        let mut done = false;
+        if let Some((_, text)) = &mut st.renaming {
+            let r = ui.put(
+                Rect::from_min_size(rect.min + vec2(26.0, 3.0), vec2(rect.width() - 30.0, 22.0)),
+                egui::TextEdit::singleline(text),
+            );
+            r.request_focus();
+            done = r.lost_focus();
+        }
+        if done && let Some((rid, text)) = st.renaming.take() {
+            let name = text.trim().to_string();
+            if !name.is_empty() {
+                st.docs[cur]
+                    .ed
+                    .edit_layer(rid, "name", "Renomear camada", |l| l.name = name);
+                st.docs[cur].ed.end_change();
+            }
+        }
+    } else {
+        let tag = format!(
+            "{}{}{}",
+            if l.locked { "🔒 " } else { "" },
+            if l.alpha_lock { "α " } else { "" },
+            l.name
+        );
+        ui.painter().with_clip_rect(rect).text(
+            rect.min + vec2(28.0, 14.0),
+            Align2::LEFT_CENTER,
+            tag,
+            theme::text(12.5),
+            if l.visible {
+                theme::TEXT
+            } else {
+                theme::TEXT_DIM
+            },
+        );
+        if l.mode != BlendMode::Normal || l.opacity < 1.0 {
+            ui.painter().text(
+                rect.right_center() - vec2(6.0, 0.0),
+                Align2::RIGHT_CENTER,
+                format!(
+                    "{}{}",
+                    if l.mode != BlendMode::Normal {
+                        "◐ "
+                    } else {
+                        ""
+                    },
+                    if l.opacity < 1.0 {
+                        format!("{:.0}%", l.opacity * 100.0)
+                    } else {
+                        String::new()
+                    }
+                ),
+                theme::text(10.5),
+                theme::TEXT_DIM,
+            );
+        }
+    }
+    if eye_resp.clicked() {
+        st.docs[cur]
+            .ed
+            .edit_layer(id, "vis", "Mostrar/esconder", |l| l.visible = !l.visible);
+        st.docs[cur].ed.end_change();
+    } else if resp.clicked() {
+        st.docs[cur].active = id;
+    }
+    if resp.double_clicked() {
+        st.renaming = Some((id, l.name.clone()));
+    }
+    resp.context_menu(|ui| {
+        st.docs[cur].active = id;
+        if ui.button("Renomear").clicked() {
+            ui.close();
+            st.renaming = Some((id, l.name.clone()));
+        }
+        if ui.button("Propriedades…").clicked() {
+            ui.close();
+            st.dialog = Some(Dialog::LayerProps(id));
+        }
+        if ui.button("Duplicar").clicked() {
+            ui.close();
+            if let Ok(n) = st.docs[cur].ed.duplicate_layer(id) {
+                st.docs[cur].active = n;
+            }
+        }
+        if ui.button("Espelhar horizontalmente").clicked() {
+            ui.close();
+            let _ = st.docs[cur].ed.flip_layer(id, true);
+        }
+        if ui.button("Limpar").clicked() {
+            ui.close();
+            let _ = st.docs[cur].ed.clear_layer(id);
+        }
+        if ui.button("Apagar").clicked() {
+            ui.close();
+            if st.docs[cur].ed.doc().layers.len() > 1 {
+                let _ = st.docs[cur].ed.delete_layer(id);
+                st.docs[cur].active = st.docs[cur].ed.doc().layers.last().map_or(0, |l| l.id);
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------- pincéis
+
+/// Miniatura do traço do pincel (uma onda sobre fundo escuro).
+pub fn brush_thumb(ctx: &egui::Context, brush: &Brush, name: &str) -> TextureHandle {
+    let (w, h) = (150usize, 38usize);
+    let mut s = Stroker::new(w, h);
+    let mut b = brush.clone();
+    b.size = b.size.min(26.0);
+    b.opacity = 1.0;
+    s.begin(b, [235, 235, 235], false);
+    for i in 0..=60 {
+        let t = i as f32 / 60.0;
+        s.add_point(
+            12.0 + t * (w as f32 - 24.0),
+            h as f32 / 2.0 + (t * std::f32::consts::TAU).sin() * 8.0,
+        );
+    }
+    s.finish(w as f32 - 12.0, h as f32 / 2.0);
+    let mut px = TiledImage::new(w, h);
+    commit_stroke(&mut px, &s.buf, 1.0, false, BlendMode::Normal, None, false);
+    let mut img = egui::ColorImage::filled([w, h], Color32::from_rgb(0x26, 0x26, 0x2a));
+    for y in 0..h {
+        for x in 0..w {
+            let p = px.pixel(x, y);
+            if p[3] == 0 {
+                continue;
+            }
+            let k = 1.0 - p[3] as f32 / 255.0;
+            let bgc = img.pixels[y * w + x];
+            let m = |c: u8, bgv: u8| (c as f32 + bgv as f32 * k).round().min(255.0) as u8;
+            img.pixels[y * w + x] =
+                Color32::from_rgb(m(p[0], bgc.r()), m(p[1], bgc.g()), m(p[2], bgc.b()));
+        }
+    }
+    ctx.load_texture(format!("thumb-{name}"), img, egui::TextureOptions::LINEAR)
+}
+
+pub fn brush_presets(st: &mut State, ui: &mut egui::Ui) {
+    ui.add_space(4.0);
+    let mut pick = None;
+    let mut delete = None;
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            for (i, b) in st.presets.iter().enumerate() {
+                let selected = st.brush.name == b.name;
+                let Some(tex) = st.preset_thumbs.get(i) else {
+                    continue;
+                };
+                let w = ui.available_width() - 4.0;
+                let (rect, resp) = ui.allocate_exact_size(vec2(w, 46.0), Sense::click());
+                let p = ui.painter();
+                if selected {
+                    p.rect_filled(rect, 3.0, theme::ACCENT.gamma_multiply(0.35));
+                } else if resp.hovered() {
+                    p.rect_filled(rect, 3.0, theme::BAR_LIGHT);
+                }
+                p.image(
+                    tex.id(),
+                    Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(150.0, 38.0)),
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                p.text(
+                    rect.min + vec2(162.0, 23.0),
+                    Align2::LEFT_CENTER,
+                    &b.name,
+                    theme::text(12.5),
+                    theme::TEXT,
+                );
+                if resp.clicked() {
+                    pick = Some(i);
+                }
+                if i >= st.presets.len() - st.user_presets {
+                    resp.context_menu(|ui| {
+                        if ui.button("Apagar pincel").clicked() {
+                            ui.close();
+                            delete = Some(i);
+                        }
+                    });
+                }
+            }
+        });
+    if let Some(i) = pick {
+        st.brush = st.presets[i].clone();
+        if st.tool != Tool::Eraser && !st.tool.paints() {
+            crate::app::set_tool(st, Tool::Brush);
+        }
+    }
+    if let Some(i) = delete {
+        st.presets.remove(i);
+        let _ = st.preset_thumbs.remove(i);
+        st.user_presets -= 1;
+        crate::app::save_prefs(st);
+    }
+}
+
+pub fn brush_editor(st: &mut State, ui: &mut egui::Ui) {
+    ui.add_space(4.0);
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            let b = &mut st.brush;
+            egui::Grid::new("brush-grid").num_columns(2).show(ui, |ui| {
+                let slider = |ui: &mut egui::Ui,
+                              name: &str,
+                              v: &mut f32,
+                              r: std::ops::RangeInclusive<f32>,
+                              suffix: &str| {
+                    ui.label(name);
+                    ui.add(egui::Slider::new(v, r).suffix(suffix));
+                    ui.end_row();
+                };
+                slider(ui, "Tamanho", &mut b.size, 1.0..=500.0, " px");
+                let mut h = b.hardness * 100.0;
+                slider(ui, "Dureza", &mut h, 0.0..=100.0, "%");
+                b.hardness = h / 100.0;
+                let mut o = b.opacity * 100.0;
+                slider(ui, "Opacidade", &mut o, 1.0..=100.0, "%");
+                b.opacity = o / 100.0;
+                let mut f = b.flow * 100.0;
+                slider(ui, "Fluxo", &mut f, 1.0..=100.0, "%");
+                b.flow = f / 100.0;
+                let mut sp = b.spacing * 100.0;
+                slider(ui, "Espaçamento", &mut sp, 2.0..=200.0, "%");
+                b.spacing = sp / 100.0;
+                slider(ui, "Ângulo", &mut b.angle, 0.0..=180.0, "°");
+                let mut r = b.roundness * 100.0;
+                slider(ui, "Achatamento", &mut r, 5.0..=100.0, "%");
+                b.roundness = r / 100.0;
+                let mut g = b.grain * 100.0;
+                slider(ui, "Grão", &mut g, 0.0..=100.0, "%");
+                b.grain = g / 100.0;
+                let mut sc = b.scatter * 100.0;
+                slider(ui, "Dispersão", &mut sc, 0.0..=100.0, "%");
+                b.scatter = sc / 100.0;
+                let mut sm = b.smoothing * 100.0;
+                slider(ui, "Estabilizador", &mut sm, 0.0..=100.0, "%");
+                b.smoothing = sm / 100.0;
+                ui.label("Ponta");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut b.tip, Tip::Round, "Redonda");
+                    ui.selectable_value(&mut b.tip, Tip::Square, "Quadrada");
+                });
+                ui.end_row();
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut st.brush_name_edit)
+                        .hint_text("Nome do pincel")
+                        .desired_width(130.0),
+                );
+                if ui
+                    .button("Salvar como novo")
+                    .on_hover_text("Guarda estes ajustes na lista de pincéis")
+                    .clicked()
+                {
+                    crate::app::save_brush_preset(st, ui.ctx());
+                }
+            });
+        });
+}
+
+// ---------------------------------------------------------------- opções da ferramenta
+
+pub fn tool_options(st: &mut State, ui: &mut egui::Ui) {
+    ui.add_space(4.0);
+    ui.label(RichText::new(st.tool.label()).strong());
+    ui.add_space(4.0);
+    let tool = st.tool;
+    let o = &mut st.opts;
+    match tool {
+        Tool::Brush | Tool::Eraser => {
+            label(ui, "Modo de mistura do pincel");
+            egui::ComboBox::from_id_salt("brush-blend")
+                .selected_text(st.blend.label())
+                .show_ui(ui, |ui| {
+                    for m in BlendMode::ALL {
+                        ui.selectable_value(&mut st.blend, m, m.label());
+                    }
+                });
+            ui.label(
+                RichText::new("Ctrl+clique pega a cor. [ e ] mudam o tamanho.")
+                    .weak()
+                    .small(),
+            );
+        }
+        Tool::Fill => {
+            ui.add(egui::Slider::new(&mut o.fill_tolerance, 0.0..=1.0).text("Tolerância"));
+            let mut op = o.fill_opacity * 100.0;
+            ui.add(
+                egui::Slider::new(&mut op, 1.0..=100.0)
+                    .suffix("%")
+                    .text("Opacidade"),
+            );
+            o.fill_opacity = op / 100.0;
+            ui.checkbox(&mut o.contiguous, "Só a região ligada");
+            ui.checkbox(&mut o.sample_merged, "Olhar todas as camadas");
+        }
+        Tool::Gradient => {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut o.gradient_kind, GradientKind::Linear, "Linear");
+                ui.selectable_value(&mut o.gradient_kind, GradientKind::Radial, "Radial");
+            });
+            ui.checkbox(
+                &mut o.gradient_transparent,
+                "Da cor da frente até transparente",
+            );
+            let mut op = o.gradient_opacity * 100.0;
+            ui.add(
+                egui::Slider::new(&mut op, 1.0..=100.0)
+                    .suffix("%")
+                    .text("Opacidade"),
+            );
+            o.gradient_opacity = op / 100.0;
+            ui.label(
+                RichText::new("Arraste na tela do começo ao fim do degradê.")
+                    .weak()
+                    .small(),
+            );
+        }
+        Tool::SelRect | Tool::SelEllipse | Tool::Lasso | Tool::Wand => {
+            label(ui, "Modo (Shift soma, Alt subtrai)");
+            ui.horizontal(|ui| {
+                for (op, name) in [
+                    (SelOp::Replace, "Novo"),
+                    (SelOp::Add, "Somar"),
+                    (SelOp::Subtract, "Subtrair"),
+                    (SelOp::Intersect, "Cruzar"),
+                ] {
+                    ui.selectable_value(&mut o.sel_op, op, name);
+                }
+            });
+            if tool == Tool::Wand {
+                ui.add(egui::Slider::new(&mut o.wand_tolerance, 0.0..=1.0).text("Tolerância"));
+                ui.checkbox(&mut o.contiguous, "Só a região ligada");
+                ui.checkbox(&mut o.sample_merged, "Olhar todas as camadas");
+            } else {
+                ui.add(egui::Slider::new(&mut o.feather, 0..=60).text("Suavizar borda"));
+            }
+        }
+        Tool::Line | Tool::Rect | Tool::Ellipse => {
+            if tool != Tool::Line {
+                ui.checkbox(&mut o.shape_fill, "Preencher com a cor de fundo");
+            }
+            ui.label(
+                RichText::new("Usa o pincel atual para o contorno. Shift deixa quadrado/redondo.")
+                    .weak()
+                    .small(),
+            );
+        }
+        Tool::Text => {
+            if st.fonts.is_empty() {
+                st.fonts = st.text_raster.families();
+            }
+            let t = &mut o.text;
+            ui.add(
+                egui::TextEdit::singleline(&mut t.font)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Fonte"),
+            );
+            egui::ComboBox::from_id_salt("text-font")
+                .selected_text("Escolher fonte")
+                .show_ui(ui, |ui| {
+                    for f in ["sans-serif", "serif", "monospace"] {
+                        ui.selectable_value(&mut t.font, f.to_string(), f);
+                    }
+                    ui.separator();
+                    for f in &st.fonts {
+                        ui.selectable_value(&mut t.font, f.clone(), f);
+                    }
+                });
+            ui.add(egui::Slider::new(&mut t.size, 6.0..=400.0).text("Tamanho"));
+            ui.horizontal(|ui| {
+                ui.toggle_value(&mut t.bold, "Negrito");
+                ui.toggle_value(&mut t.italic, "Itálico");
+            });
+            ui.horizontal(|ui| {
+                for (a, name) in [(0u8, "Esq."), (1, "Centro"), (2, "Dir.")] {
+                    ui.selectable_value(&mut t.align, a, name);
+                }
+            });
+            ui.label(
+                RichText::new("Clique na tela, digite e use Ctrl+Enter. Usa a cor da frente.")
+                    .weak()
+                    .small(),
+            );
+        }
+        Tool::Move => {
+            ui.label(
+                RichText::new("Arraste para mover a camada (ou só a seleção).")
+                    .weak()
+                    .small(),
+            );
+        }
+        Tool::Transform => {
+            ui.label(RichText::new("Arraste os cantos para escalar e a bolinha para girar (Shift = 15°). Enter aplica, Esc cancela.").weak().small());
+        }
+        Tool::Crop => {
+            ui.label(
+                RichText::new("Arraste a área que fica. Enter corta, Esc cancela.")
+                    .weak()
+                    .small(),
+            );
+        }
+        Tool::Picker => {
+            ui.label(
+                RichText::new("Clique pega a cor da frente; Shift+clique, a do fundo.")
+                    .weak()
+                    .small(),
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------- cor
+
+fn hue_color(h: f32) -> Color32 {
+    rgb(hsv_to_rgb(h, 1.0, 1.0))
+}
+
+pub fn color(st: &mut State, ui: &mut egui::Ui) {
+    ui.add_space(4.0);
+    let w = (ui.available_width() - 8.0).clamp(120.0, 260.0);
+    let (mut h, mut s, mut v) = st.hsv;
+    // Quadrado de saturação e valor.
+    let (sq, resp) = ui.allocate_exact_size(vec2(w, w * 0.6), Sense::click_and_drag());
+    let mut mesh = Mesh::default();
+    mesh.colored_vertex(sq.left_top(), Color32::WHITE);
+    mesh.colored_vertex(sq.right_top(), hue_color(h));
+    mesh.colored_vertex(sq.right_bottom(), Color32::BLACK);
+    mesh.colored_vertex(sq.left_bottom(), Color32::BLACK);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().add(egui::Shape::mesh(mesh));
+    let mut changed = false;
+    if (resp.dragged() || resp.clicked())
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        s = ((p.x - sq.left()) / sq.width()).clamp(0.0, 1.0);
+        v = 1.0 - ((p.y - sq.top()) / sq.height()).clamp(0.0, 1.0);
+        changed = true;
+    }
+    let marker = pos2(
+        sq.left() + s * sq.width(),
+        sq.top() + (1.0 - v) * sq.height(),
+    );
+    ui.painter()
+        .circle_stroke(marker, 5.0, Stroke::new(1.5, Color32::WHITE));
+    ui.painter()
+        .circle_stroke(marker, 6.5, Stroke::new(1.0, Color32::BLACK));
+    ui.add_space(4.0);
+    // Barra de matiz.
+    let (bar, resp) = ui.allocate_exact_size(vec2(w, 16.0), Sense::click_and_drag());
+    let mut mesh = Mesh::default();
+    for i in 0..=6 {
+        let x = bar.left() + bar.width() * i as f32 / 6.0;
+        let c = hue_color(i as f32 * 60.0);
+        mesh.colored_vertex(pos2(x, bar.top()), c);
+        mesh.colored_vertex(pos2(x, bar.bottom()), c);
+        if i > 0 {
+            let k = (i as u32 - 1) * 2;
+            mesh.add_triangle(k, k + 1, k + 2);
+            mesh.add_triangle(k + 1, k + 3, k + 2);
+        }
+    }
+    ui.painter().add(egui::Shape::mesh(mesh));
+    if (resp.dragged() || resp.clicked())
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        h = ((p.x - bar.left()) / bar.width()).clamp(0.0, 1.0) * 359.99;
+        changed = true;
+    }
+    let hx = bar.left() + bar.width() * h / 360.0;
+    ui.painter().rect_stroke(
+        Rect::from_center_size(pos2(hx, bar.center().y), vec2(5.0, 20.0)),
+        1.0,
+        Stroke::new(1.5, Color32::WHITE),
+        egui::StrokeKind::Outside,
+    );
+    if changed {
+        st.hsv = (h, s, v);
+        st.fg = hsv_to_rgb(h, s, v);
+    }
+    ui.add_space(6.0);
+    // Valores numéricos.
+    let mut c = st.fg;
+    let mut rgb_changed = false;
+    ui.horizontal(|ui| {
+        for (name, i) in [("R", 0usize), ("G", 1), ("B", 2)] {
+            ui.label(name);
+            let mut val = c[i] as u32;
+            if ui
+                .add(egui::DragValue::new(&mut val).range(0..=255))
+                .changed()
+            {
+                c[i] = val as u8;
+                rgb_changed = true;
+            }
+        }
+    });
+    let mut hex = format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+    ui.horizontal(|ui| {
+        ui.label("Hex");
+        let r = ui.add(egui::TextEdit::singleline(&mut hex).desired_width(80.0));
+        if r.changed()
+            && let Some(parsed) = parse_hex(&hex)
+        {
+            c = parsed;
+            rgb_changed = true;
+        }
+    });
+    if rgb_changed {
+        st.fg = c;
+        st.hsv = rgb_to_hsv(c);
+    }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let (r1, _) = ui.allocate_exact_size(vec2(36.0, 24.0), Sense::hover());
+        ui.painter().rect_filled(r1, 2.0, rgb(st.fg));
+        let (r2, resp) = ui.allocate_exact_size(vec2(36.0, 24.0), Sense::click());
+        ui.painter().rect_filled(r2, 2.0, rgb(st.bg));
+        if resp
+            .on_hover_text("Clique para usar a cor de fundo como cor da frente")
+            .clicked()
+        {
+            crate::app::swap_colors(st);
+        }
+        ui.label(
+            RichText::new("frente · fundo")
+                .small()
+                .color(theme::TEXT_DIM),
+        );
+    });
+}
+
+pub fn parse_hex(s: &str) -> Option<[u8; 3]> {
+    let s = s.trim().trim_start_matches('#');
+    if s.len() != 6 {
+        return None;
+    }
+    let v = u32::from_str_radix(s, 16).ok()?;
+    Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
+}
+
+// ---------------------------------------------------------------- paleta
+
+const PALETTE: [[u8; 3]; 28] = [
+    [0, 0, 0],
+    [64, 64, 64],
+    [128, 128, 128],
+    [192, 192, 192],
+    [255, 255, 255],
+    [96, 56, 24],
+    [150, 96, 48],
+    [220, 40, 40],
+    [240, 100, 40],
+    [250, 190, 40],
+    [250, 240, 60],
+    [150, 220, 50],
+    [40, 170, 70],
+    [30, 150, 140],
+    [40, 190, 230],
+    [40, 110, 220],
+    [30, 50, 170],
+    [110, 60, 200],
+    [180, 70, 200],
+    [240, 100, 170],
+    [250, 190, 200],
+    [255, 224, 189],
+    [234, 192, 134],
+    [198, 134, 66],
+    [141, 85, 36],
+    [90, 56, 37],
+    [60, 40, 30],
+    [20, 30, 60],
+];
+
+pub fn palette(st: &mut State, ui: &mut egui::Ui) {
+    ui.add_space(4.0);
+    let mut pick: Option<([u8; 3], bool)> = None;
+    let mut swatch = |ui: &mut egui::Ui, c: [u8; 3]| {
+        let (r, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+        ui.painter().rect_filled(r, 2.0, rgb(c));
+        ui.painter().rect_stroke(
+            r,
+            2.0,
+            Stroke::new(1.0, Color32::from_black_alpha(120)),
+            egui::StrokeKind::Inside,
+        );
+        if resp.clicked() {
+            pick = Some((c, false));
+        }
+        if resp.secondary_clicked() {
+            pick = Some((c, true));
+        }
+    };
+    label(ui, "Clique: frente · botão direito: fundo");
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+        for c in PALETTE {
+            swatch(ui, c);
+        }
+    });
+    if !st.prefs.recent.is_empty() {
+        ui.add_space(8.0);
+        label(ui, "Usadas há pouco");
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+            for c in st.prefs.recent.clone() {
+                swatch(ui, c);
+            }
+        });
+    }
+    if let Some((c, bg)) = pick {
+        if bg {
+            st.bg = c;
+        } else {
+            st.fg = c;
+            st.hsv = rgb_to_hsv(c);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- visão geral e histórico
+
+pub fn overview(st: &mut State, ui: &mut egui::Ui) {
+    let Some(d) = st.doc_mut() else { return };
+    let Some(tex) = d.tex.clone() else { return };
+    let avail = ui.available_size() - vec2(8.0, 8.0);
+    let (iw, ih) = (d.tex_size.0 as f32, d.tex_size.1 as f32);
+    let k = (avail.x / iw).min(avail.y / ih).max(0.01);
+    let (rect, resp) = ui.allocate_exact_size(vec2(iw * k, ih * k), Sense::click_and_drag());
+    ui.painter().rect_filled(rect, 0.0, Color32::from_gray(190));
+    ui.painter().image(
+        tex.id(),
+        rect,
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    // A janela que o canvas mostra agora: o centro do canvas na imagem, com o pan atual.
+    if (resp.dragged() || resp.clicked())
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        let (fx, fy) = (
+            (p.x - rect.left()) / rect.width() - 0.5,
+            (p.y - rect.top()) / rect.height() - 0.5,
+        );
+        d.pan = -vec2(fx * iw, fy * ih) * d.zoom;
+        d.fit = false;
+    }
+    let (cx, cy) = (0.5 - d.pan.x / d.zoom / iw, 0.5 - d.pan.y / d.zoom / ih);
+    let view = Rect::from_center_size(
+        pos2(
+            rect.left() + cx * rect.width(),
+            rect.top() + cy * rect.height(),
+        ),
+        vec2(
+            rect.width() / d.zoom.max(0.05) * 0.5,
+            rect.height() / d.zoom.max(0.05) * 0.5,
+        ),
+    )
+    .intersect(rect);
+    ui.painter().rect_stroke(
+        view,
+        0.0,
+        Stroke::new(1.5, theme::ACCENT),
+        egui::StrokeKind::Inside,
+    );
+}
+
+pub fn history(st: &mut State, ui: &mut egui::Ui) {
+    let Some(d) = st.doc_mut() else { return };
+    let (undo, redo) = d.ed.history();
+    let steps = undo.len();
+    let mut jump = None;
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            if ui
+                .selectable_label(steps == 0, "Documento aberto")
+                .clicked()
+            {
+                jump = Some(0);
+            }
+            for (i, l) in undo.iter().enumerate() {
+                if ui.selectable_label(i + 1 == steps, *l).clicked() {
+                    jump = Some(i + 1);
+                }
+            }
+            for (i, l) in redo.iter().enumerate() {
+                let text = RichText::new(*l).color(theme::TEXT_DIM);
+                if ui.selectable_label(false, text).clicked() {
+                    jump = Some(steps + i + 1);
+                }
+            }
+        });
+    if let Some(n) = jump {
+        d.ed.jump_to(n);
+    }
+}
+
+#[allow(dead_code)]
+fn unused(_: Pos2) {}

@@ -1,14 +1,34 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
+//! O documento com histórico de desfazer e todas as operações de edição.
+
+use std::collections::HashSet;
 
 use image::RgbaImage;
 
-use crate::model::*;
+use crate::blend::BlendMode;
+use crate::brush::{Brush, Stroker, commit_stroke};
+use crate::composite::{self, Live};
+use crate::doc::{Doc, Layer, LayerId};
+use crate::fill::{self, GradientKind};
+use crate::filters::{self, Filter};
+use crate::selection::{SelOp, Selection};
+use crate::tile::{TILE, TiledImage, premultiply, unpremultiply};
+use crate::transform::{self, Affine};
 
-/// Quantos passos de desfazer ficam guardados.
-const HISTORY: usize = 100;
-/// Lado maior (em pixels) das imagens importadas: fotos de câmera não precisam de mais.
-pub const MAX_IMPORT: u32 = 2560;
+const HISTORY: usize = 60;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum EditError {
+    #[error("a camada não existe")]
+    NoLayer,
+    #[error("a camada está travada")]
+    Locked,
+    #[error("não há nada selecionado")]
+    NoSelection,
+    #[error("não há camada para unir")]
+    NothingBelow,
+    #[error("não há nada para mover")]
+    NothingToMove,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoveTo {
@@ -18,44 +38,106 @@ pub enum MoveTo {
     Bottom,
 }
 
-/// O documento, as imagens dele e o histórico de desfazer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Background {
+    White,
+    Transparent,
+    Color([u8; 3]),
+}
+
+/// O que mudou desde a última leitura (para redesenhar só o necessário).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Dirty {
+    #[default]
+    Nothing,
+    Tiles(HashSet<(usize, usize)>),
+    All,
+}
+
+/// Pedaço copiado: pixels (alfa direto) e onde estavam.
+#[derive(Debug, Clone)]
+pub struct Clip {
+    pub image: RgbaImage,
+    pub x: i64,
+    pub y: i64,
+}
+
+/// Parte da camada que está sendo movida ou transformada (a camada fica só com o resto até
+/// `finish_float`, e a interface desenha o pedaço solto por cima).
+pub struct Floating {
+    pub layer: LayerId,
+    pub pixels: TiledImage,
+    rest: TiledImage,
+    original: TiledImage,
+    pub bounds: (usize, usize, usize, usize),
+    selection: Option<Selection>,
+}
+
+struct ActiveStroke {
+    layer: LayerId,
+    stroker: Stroker,
+    opacity: f32,
+    mode: BlendMode,
+}
+
 pub struct Editor {
     doc: Doc,
-    assets: BTreeMap<String, Arc<RgbaImage>>,
     undo: Vec<(Doc, &'static str)>,
     redo: Vec<(Doc, &'static str)>,
-    /// Chave da edição contínua em andamento (arrastar, digitar): só a primeira vira passo.
     coalesce: Option<String>,
     revision: u64,
     saved_revision: u64,
+    dirty: Dirty,
+    stroke: Option<ActiveStroke>,
 }
 
 impl Editor {
-    pub fn new(width: u32, height: u32) -> Self {
-        Self::from_parts(Doc::new(width, height), BTreeMap::new())
+    pub fn new(width: usize, height: usize, bg: Background) -> Self {
+        let mut doc = Doc::new(width, height);
+        let id = doc.fresh();
+        let mut layer = Layer::new(id, "Fundo", width, height);
+        let color = match bg {
+            Background::White => Some([255, 255, 255]),
+            Background::Color(c) => Some(c),
+            Background::Transparent => None,
+        };
+        if let Some(c) = color {
+            let mask = vec![255u8; width * height];
+            fill::fill_mask(&mut layer.pixels, &mask, c, 1.0, None, false);
+        } else {
+            layer.name = "Camada 1".into();
+        }
+        doc.layers.push(layer);
+        Self::from_doc(doc)
     }
 
-    pub fn from_parts(doc: Doc, assets: BTreeMap<String, Arc<RgbaImage>>) -> Self {
+    pub fn from_doc(doc: Doc) -> Self {
         Self {
             doc,
-            assets,
             undo: Vec::new(),
             redo: Vec::new(),
             coalesce: None,
             revision: 0,
             saved_revision: 0,
+            dirty: Dirty::All,
+            stroke: None,
         }
+    }
+
+    /// Documento novo com uma imagem como única camada.
+    pub fn from_image(img: &RgbaImage, name: &str) -> Self {
+        let mut doc = Doc::new(img.width() as usize, img.height() as usize);
+        let id = doc.fresh();
+        let mut l = Layer::new(id, name, doc.width, doc.height);
+        l.pixels = TiledImage::from_rgba(img);
+        doc.layers.push(l);
+        Self::from_doc(doc)
     }
 
     pub fn doc(&self) -> &Doc {
         &self.doc
     }
 
-    pub fn assets(&self) -> &BTreeMap<String, Arc<RgbaImage>> {
-        &self.assets
-    }
-
-    /// Sobe a cada mudança (para saber quando redesenhar).
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -66,6 +148,31 @@ impl Editor {
 
     pub fn mark_saved(&mut self) {
         self.saved_revision = self.revision;
+    }
+
+    pub fn take_dirty(&mut self) -> Dirty {
+        std::mem::take(&mut self.dirty)
+    }
+
+    fn dirty_all(&mut self) {
+        self.dirty = Dirty::All;
+    }
+
+    fn dirty_tiles(&mut self, tiles: impl IntoIterator<Item = (usize, usize)>) {
+        match &mut self.dirty {
+            Dirty::All => {}
+            Dirty::Tiles(set) => set.extend(tiles),
+            Dirty::Nothing => self.dirty = Dirty::Tiles(tiles.into_iter().collect()),
+        }
+    }
+
+    // ------------------------------------------------------------ histórico
+
+    pub fn history(&self) -> (Vec<&'static str>, Vec<&'static str>) {
+        (
+            self.undo.iter().map(|(_, l)| *l).collect(),
+            self.redo.iter().rev().map(|(_, l)| *l).collect(),
+        )
     }
 
     pub fn undo_label(&self) -> Option<&'static str> {
@@ -86,12 +193,12 @@ impl Editor {
         self.revision += 1;
     }
 
-    /// Fim de uma edição contínua (soltou o mouse, saiu do campo de texto).
     pub fn end_change(&mut self) {
         self.coalesce = None;
     }
 
     pub fn undo(&mut self) -> bool {
+        self.stroke = None;
         let Some((doc, label)) = self.undo.pop() else {
             return false;
         };
@@ -99,6 +206,7 @@ impl Editor {
             .push((std::mem::replace(&mut self.doc, doc), label));
         self.coalesce = None;
         self.revision += 1;
+        self.dirty_all();
         true
     }
 
@@ -110,12 +218,87 @@ impl Editor {
             .push((std::mem::replace(&mut self.doc, doc), label));
         self.coalesce = None;
         self.revision += 1;
+        self.dirty_all();
         true
     }
 
-    /// Mexe numa camada. Repetir a mesma `key` em seguida (arrastar um controle) conta como
-    /// um passo só de desfazer.
-    pub fn edit(
+    /// Volta (ou avança) até ficar com `steps` passos de desfazer.
+    pub fn jump_to(&mut self, steps: usize) {
+        while self.undo.len() > steps && self.undo() {}
+        while self.undo.len() < steps && self.redo() {}
+    }
+
+    fn layer_checked(&self, id: LayerId) -> Result<&Layer, EditError> {
+        let l = self.doc.layer(id).ok_or(EditError::NoLayer)?;
+        if l.locked {
+            return Err(EditError::Locked);
+        }
+        Ok(l)
+    }
+
+    // ------------------------------------------------------------ camadas
+
+    /// Camada vazia nova logo acima de `above` (ou no topo). Devolve o id.
+    pub fn add_layer(&mut self, name: Option<String>, above: Option<LayerId>) -> LayerId {
+        self.checkpoint("Nova camada");
+        let id = self.doc.fresh();
+        let name = name.unwrap_or_else(|| format!("Camada {}", self.doc.layers.len() + 1));
+        let layer = Layer::new(id, name, self.doc.width, self.doc.height);
+        let at = above
+            .and_then(|a| self.doc.index_of(a))
+            .map_or(self.doc.layers.len(), |i| i + 1);
+        self.doc.layers.insert(at, layer);
+        self.dirty_all();
+        id
+    }
+
+    pub fn duplicate_layer(&mut self, id: LayerId) -> Result<LayerId, EditError> {
+        let src = self.doc.layer(id).ok_or(EditError::NoLayer)?.clone();
+        self.checkpoint("Duplicar camada");
+        let mut copy = src;
+        copy.id = self.doc.fresh();
+        copy.name = format!("{} cópia", copy.name);
+        let at = self
+            .doc
+            .index_of(id)
+            .map_or(self.doc.layers.len(), |i| i + 1);
+        let new_id = copy.id;
+        self.doc.layers.insert(at, copy);
+        self.dirty_all();
+        Ok(new_id)
+    }
+
+    pub fn delete_layer(&mut self, id: LayerId) -> Result<(), EditError> {
+        self.doc.layer(id).ok_or(EditError::NoLayer)?;
+        self.checkpoint("Apagar camada");
+        self.doc.layers.retain(|l| l.id != id);
+        self.dirty_all();
+        Ok(())
+    }
+
+    pub fn move_layer(&mut self, id: LayerId, to: MoveTo) {
+        let Some(i) = self.doc.index_of(id) else {
+            return;
+        };
+        let last = self.doc.layers.len() - 1;
+        let j = match to {
+            MoveTo::Up => (i + 1).min(last),
+            MoveTo::Down => i.saturating_sub(1),
+            MoveTo::Top => last,
+            MoveTo::Bottom => 0,
+        };
+        if i == j {
+            return;
+        }
+        self.checkpoint("Mover camada");
+        let l = self.doc.layers.remove(i);
+        self.doc.layers.insert(j, l);
+        self.dirty_all();
+    }
+
+    /// Mexe nas propriedades da camada (nome, opacidade, modo…). Repetir a mesma `key` em seguida
+    /// (arrastar um controle) vira um passo só.
+    pub fn edit_layer(
         &mut self,
         id: LayerId,
         key: &str,
@@ -132,169 +315,767 @@ impl Editor {
         } else {
             self.revision += 1;
         }
-        if let Some(l) = self.doc.layers.iter_mut().find(|l| l.id == id) {
+        if let Some(l) = self.doc.layer_mut(id) {
             f(l);
         }
+        self.dirty_all();
     }
 
-    pub fn set_background(&mut self, bg: Background) {
-        if self.doc.background == bg {
+    /// Une a camada com a de baixo (na opacidade e no modo dela).
+    pub fn merge_down(&mut self, id: LayerId) -> Result<LayerId, EditError> {
+        let i = self.doc.index_of(id).ok_or(EditError::NoLayer)?;
+        if i == 0 {
+            return Err(EditError::NothingBelow);
+        }
+        self.checkpoint("Unir com a de baixo");
+        let top = self.doc.layers.remove(i);
+        let below_id = self.doc.layers[i - 1].id;
+        let (w, h) = (self.doc.width, self.doc.height);
+        let below = &mut self.doc.layers[i - 1];
+        for ty in 0..h.div_ceil(TILE) {
+            for tx in 0..w.div_ceil(TILE) {
+                let Some(src) = top.pixels.tile(tx, ty) else {
+                    continue;
+                };
+                let dst = below.pixels.tile_mut(tx, ty);
+                for p in 0..TILE * TILE {
+                    let k = p * 4;
+                    if src[k + 3] != 0 {
+                        crate::blend::blend_over(
+                            &mut dst[k..k + 4],
+                            &src[k..k + 4],
+                            top.opacity,
+                            top.mode,
+                        );
+                    }
+                }
+            }
+        }
+        self.dirty_all();
+        Ok(below_id)
+    }
+
+    /// Junta tudo numa camada só.
+    pub fn flatten(&mut self) {
+        if self.doc.layers.len() <= 1 {
             return;
         }
-        if self.coalesce.as_deref() != Some("background") {
-            self.checkpoint("Fundo");
-            self.coalesce = Some("background".into());
+        self.checkpoint("Achatar imagem");
+        let img = composite::flatten(&self.doc);
+        let id = self.doc.fresh();
+        let mut l = Layer::new(id, "Imagem achatada", self.doc.width, self.doc.height);
+        l.pixels = TiledImage::from_rgba(&img);
+        self.doc.layers = vec![l];
+        self.dirty_all();
+    }
+
+    pub fn clear_layer(&mut self, id: LayerId) -> Result<(), EditError> {
+        let l = self.layer_checked(id)?;
+        if let Some(sel) = self.doc.selection.clone() {
+            let mut px = l.pixels.clone();
+            erase_with_mask(&mut px, &sel);
+            self.checkpoint("Limpar seleção");
+            self.doc.layer_mut(id).expect("existe").pixels = px;
         } else {
-            self.revision += 1;
+            self.checkpoint("Limpar camada");
+            self.doc.layer_mut(id).expect("existe").pixels.clear();
         }
-        self.doc.background = bg;
+        self.dirty_all();
+        Ok(())
     }
 
-    /// Muda o tamanho da tela (as camadas ficam onde estão).
-    pub fn set_canvas(&mut self, width: u32, height: u32) {
-        let (w, h) = (width.clamp(64, 8192), height.clamp(64, 8192));
-        if (w, h) != (self.doc.width, self.doc.height) {
-            self.checkpoint("Tamanho da tela");
-            self.doc.width = w;
-            self.doc.height = h;
+    // ------------------------------------------------------------ pincel
+
+    /// Começa um traço na camada. Um passo de desfazer cobre o traço inteiro.
+    pub fn begin_stroke(
+        &mut self,
+        layer: LayerId,
+        brush: Brush,
+        color: [u8; 3],
+        erase: bool,
+        mode: BlendMode,
+    ) -> Result<(), EditError> {
+        self.layer_checked(layer)?;
+        self.checkpoint(if erase { "Borracha" } else { "Pincel" });
+        let mut stroker = Stroker::new(self.doc.width, self.doc.height);
+        let opacity = brush.opacity;
+        stroker.begin(brush, color, erase);
+        self.stroke = Some(ActiveStroke {
+            layer,
+            stroker,
+            opacity,
+            mode,
+        });
+        Ok(())
+    }
+
+    pub fn stroke_active(&self) -> bool {
+        self.stroke.is_some()
+    }
+
+    pub fn stroke_point(&mut self, x: f32, y: f32) {
+        if let Some(s) = &mut self.stroke {
+            s.stroker.add_point(x, y);
+            let tiles = s.stroker.buf.take_dirty();
+            self.dirty_tiles(tiles);
         }
     }
 
-    fn push(&mut self, layer: Layer) -> LayerId {
-        let id = layer.id;
-        self.doc.layers.push(layer);
+    /// Traço reto (linhas e contornos de formas) dentro de um traço já começado.
+    pub fn stroke_line(&mut self, a: (f32, f32), b: (f32, f32)) {
+        if let Some(s) = &mut self.stroke {
+            s.stroker.line(a, b);
+            let tiles = s.stroker.buf.take_dirty();
+            self.dirty_tiles(tiles);
+        }
+    }
+
+    pub fn end_stroke(&mut self, x: f32, y: f32) {
+        let Some(mut s) = self.stroke.take() else {
+            return;
+        };
+        s.stroker.finish(x, y);
+        let (selection, alpha_lock) = (
+            self.doc.selection.clone(),
+            self.doc.layer(s.layer).is_some_and(|l| l.alpha_lock),
+        );
+        if let Some(layer) = self.doc.layer_mut(s.layer) {
+            commit_stroke(
+                &mut layer.pixels,
+                &s.stroker.buf,
+                s.opacity,
+                s.stroker.erase,
+                s.mode,
+                selection.as_ref(),
+                alpha_lock,
+            );
+        }
+        let tiles: Vec<_> = s.stroker.buf.tile_keys().collect();
+        self.dirty_tiles(tiles);
+    }
+
+    /// O traço em andamento, para mostrar na tela antes de aplicar.
+    pub fn live(&self) -> Option<Live<'_>> {
+        self.stroke.as_ref().map(|s| Live {
+            layer: s.layer,
+            buf: &s.stroker.buf,
+            opacity: s.opacity,
+            erase: s.stroker.erase,
+            mode: s.mode,
+        })
+    }
+
+    // ------------------------------------------------------------ preenchimento
+
+    /// Cor (alfa direto) no ponto, da camada ou da imagem toda.
+    pub fn pick_color(&self, x: usize, y: usize, merged: bool, layer: Option<LayerId>) -> [u8; 4] {
+        if x >= self.doc.width || y >= self.doc.height {
+            return [0; 4];
+        }
+        if merged || layer.is_none() {
+            let t = composite::composite_tile(&self.doc, x / TILE, y / TILE, None);
+            let i = ((y % TILE) * TILE + x % TILE) * 4;
+            unpremultiply([t[i], t[i + 1], t[i + 2], t[i + 3]])
+        } else {
+            layer
+                .and_then(|id| self.doc.layer(id))
+                .map_or([0; 4], |l| unpremultiply(l.pixels.pixel(x, y)))
+        }
+    }
+
+    /// Balde de tinta: pinta a região parecida com a do ponto.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bucket_fill(
+        &mut self,
+        id: LayerId,
+        seed: (usize, usize),
+        color: [u8; 3],
+        tolerance: f32,
+        contiguous: bool,
+        opacity: f32,
+        sample_merged: bool,
+    ) -> Result<(), EditError> {
+        let layer = self.layer_checked(id)?;
+        let (w, h) = (self.doc.width, self.doc.height);
+        let mask = if sample_merged {
+            let flat = composite::flatten(&self.doc);
+            fill::flood_mask(
+                &|x, y| flat.get_pixel(x as u32, y as u32).0,
+                w,
+                h,
+                seed,
+                tolerance,
+                contiguous,
+            )
+        } else {
+            let px = &layer.pixels;
+            fill::flood_mask(
+                &|x, y| unpremultiply(px.pixel(x, y)),
+                w,
+                h,
+                seed,
+                tolerance,
+                contiguous,
+            )
+        };
+        let (sel, lock) = (self.doc.selection.clone(), layer.alpha_lock);
+        self.checkpoint("Balde de tinta");
+        let l = self.doc.layer_mut(id).expect("existe");
+        fill::fill_mask(&mut l.pixels, &mask, color, opacity, sel.as_ref(), lock);
+        self.dirty_all();
+        Ok(())
+    }
+
+    /// Pinta a seleção (ou a camada toda) com a cor.
+    pub fn fill_selection(&mut self, id: LayerId, color: [u8; 3]) -> Result<(), EditError> {
+        let layer = self.layer_checked(id)?;
+        let (w, h) = (self.doc.width, self.doc.height);
+        let lock = layer.alpha_lock;
+        let mask = self
+            .doc
+            .selection
+            .as_ref()
+            .map_or_else(|| vec![255u8; w * h], |s| s.mask().to_vec());
+        self.checkpoint("Preencher");
+        let l = self.doc.layer_mut(id).expect("existe");
+        fill::fill_mask(&mut l.pixels, &mask, color, 1.0, None, lock);
+        self.dirty_all();
+        Ok(())
+    }
+
+    /// Pinta o que `shape` cobre (formas preenchidas), respeitando a seleção.
+    pub fn fill_shape(
+        &mut self,
+        id: LayerId,
+        shape: &Selection,
+        color: [u8; 3],
+        label: &'static str,
+    ) -> Result<(), EditError> {
+        let layer = self.layer_checked(id)?;
+        let (sel, lock) = (self.doc.selection.clone(), layer.alpha_lock);
+        self.checkpoint(label);
+        let l = self.doc.layer_mut(id).expect("existe");
+        fill::fill_mask(&mut l.pixels, shape.mask(), color, 1.0, sel.as_ref(), lock);
+        self.dirty_all();
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn gradient(
+        &mut self,
+        id: LayerId,
+        p0: (f32, f32),
+        p1: (f32, f32),
+        kind: GradientKind,
+        a: [u8; 4],
+        b: [u8; 4],
+        opacity: f32,
+    ) -> Result<(), EditError> {
+        self.layer_checked(id)?;
+        let sel = self.doc.selection.clone();
+        self.checkpoint("Degradê");
+        let l = self.doc.layer_mut(id).expect("existe");
+        fill::gradient(&mut l.pixels, p0, p1, kind, a, b, opacity, sel.as_ref());
+        self.dirty_all();
+        Ok(())
+    }
+
+    pub fn apply_filter(
+        &mut self,
+        id: LayerId,
+        filter: &Filter,
+        label: &'static str,
+    ) -> Result<(), EditError> {
+        let layer = self.layer_checked(id)?;
+        let (sel, lock) = (self.doc.selection.clone(), layer.alpha_lock);
+        self.checkpoint(label);
+        let l = self.doc.layer_mut(id).expect("existe");
+        filters::apply(&mut l.pixels, filter, sel.as_ref(), lock);
+        self.dirty_all();
+        Ok(())
+    }
+
+    // ------------------------------------------------------------ seleção
+
+    pub fn set_selection(&mut self, sel: Option<Selection>, label: &'static str) {
+        let sel = sel.filter(|s| !s.is_empty());
+        if self.doc.selection == sel {
+            return;
+        }
+        self.checkpoint(label);
+        self.doc.selection = sel;
+        self.dirty_all();
+    }
+
+    /// Junta `new` à seleção atual conforme `op`.
+    pub fn combine_selection(&mut self, new: Selection, op: SelOp, label: &'static str) {
+        let merged = match (&self.doc.selection, op) {
+            (Some(cur), op) if op != SelOp::Replace => cur.combine(&new, op),
+            (None, SelOp::Subtract) => {
+                Selection::all(self.doc.width, self.doc.height).combine(&new, op)
+            }
+            (None, SelOp::Intersect) => Selection::empty(self.doc.width, self.doc.height),
+            _ => new,
+        };
+        self.set_selection(Some(merged), label);
+    }
+
+    pub fn select_all(&mut self) {
+        self.set_selection(
+            Some(Selection::all(self.doc.width, self.doc.height)),
+            "Selecionar tudo",
+        );
+    }
+
+    pub fn deselect(&mut self) {
+        self.set_selection(None, "Desfazer seleção");
+    }
+
+    pub fn invert_selection(&mut self) {
+        let inv = match &self.doc.selection {
+            Some(s) => s.invert(),
+            None => Selection::all(self.doc.width, self.doc.height),
+        };
+        self.set_selection(Some(inv), "Inverter seleção");
+    }
+
+    pub fn feather_selection(&mut self, radius: usize) {
+        if let Some(s) = self.doc.selection.clone() {
+            self.set_selection(Some(s.feather(radius)), "Suavizar seleção");
+        }
+    }
+
+    pub fn grow_selection(&mut self, px: i32) {
+        if let Some(s) = self.doc.selection.clone() {
+            self.set_selection(
+                Some(s.grow(px)),
+                if px >= 0 {
+                    "Expandir seleção"
+                } else {
+                    "Contrair seleção"
+                },
+            );
+        }
+    }
+
+    /// Varinha mágica na camada (ou na imagem toda).
+    pub fn magic_wand(
+        &mut self,
+        id: LayerId,
+        seed: (usize, usize),
+        tolerance: f32,
+        contiguous: bool,
+        op: SelOp,
+        merged: bool,
+    ) {
+        let (w, h) = (self.doc.width, self.doc.height);
+        let sel = if merged {
+            let flat = composite::flatten(&self.doc);
+            fill::magic_wand(
+                &|x, y| flat.get_pixel(x as u32, y as u32).0,
+                w,
+                h,
+                seed,
+                tolerance,
+                contiguous,
+            )
+        } else if let Some(l) = self.doc.layer(id) {
+            let px = &l.pixels;
+            fill::magic_wand(
+                &|x, y| unpremultiply(px.pixel(x, y)),
+                w,
+                h,
+                seed,
+                tolerance,
+                contiguous,
+            )
+        } else {
+            return;
+        };
+        self.combine_selection(sel, op, "Varinha mágica");
+    }
+
+    // ------------------------------------------------------------ copiar e colar
+
+    /// Copia a seleção (ou a camada toda) como imagem.
+    pub fn copy(&self, id: LayerId, merged: bool) -> Option<Clip> {
+        let (x0, y0, x1, y1) = match &self.doc.selection {
+            Some(s) => s.bounds()?,
+            None => (0, 0, self.doc.width, self.doc.height),
+        };
+        let mut img = if merged {
+            let flat = composite::flatten(&self.doc);
+            image::imageops::crop_imm(
+                &flat,
+                x0 as u32,
+                y0 as u32,
+                (x1 - x0) as u32,
+                (y1 - y0) as u32,
+            )
+            .to_image()
+        } else {
+            self.doc.layer(id)?.pixels.region_to_rgba(x0, y0, x1, y1)
+        };
+        if let Some(s) = &self.doc.selection {
+            for (x, y, p) in img.enumerate_pixels_mut() {
+                let m = s.value(x0 + x as usize, y0 + y as usize) as u32;
+                p.0[3] = (p.0[3] as u32 * m / 255) as u8;
+            }
+        }
+        Some(Clip {
+            image: img,
+            x: x0 as i64,
+            y: y0 as i64,
+        })
+    }
+
+    pub fn cut(&mut self, id: LayerId) -> Result<Option<Clip>, EditError> {
+        self.layer_checked(id)?;
+        let clip = self.copy(id, false);
+        if clip.is_some() {
+            self.clear_layer(id)?;
+        }
+        Ok(clip)
+    }
+
+    /// Cola como camada nova. `at` = canto de cima à esquerda (o lugar original se vazio).
+    pub fn paste(&mut self, clip: &Clip, at: Option<(i64, i64)>) -> LayerId {
+        self.checkpoint("Colar");
+        let id = self.doc.fresh();
+        let mut l = Layer::new(id, "Colado", self.doc.width, self.doc.height);
+        let (x, y) = at.unwrap_or((clip.x, clip.y));
+        l.pixels.write_rgba(&clip.image, x, y);
+        self.doc.layers.push(l);
+        self.dirty_all();
         id
     }
 
-    fn center(&self) -> (f32, f32) {
-        (self.doc.width as f32 / 2.0, self.doc.height as f32 / 2.0)
+    /// Importa uma imagem como camada nova (centralizada se couber, senão no canto).
+    pub fn import_layer(&mut self, img: &RgbaImage, name: &str) -> LayerId {
+        let x = (self.doc.width as i64 - img.width() as i64) / 2;
+        let y = (self.doc.height as i64 - img.height() as i64) / 2;
+        let id = self.paste(
+            &Clip {
+                image: img.clone(),
+                x,
+                y,
+            },
+            Some((x.max(0), y.max(0))),
+        );
+        if let Some(l) = self.doc.layer_mut(id) {
+            l.name = name.to_string();
+        }
+        id
     }
 
-    /// Camada de imagem nova, encaixada em até 60% da tela e centralizada.
-    pub fn add_image(&mut self, name: &str, mut img: RgbaImage) -> LayerId {
-        self.checkpoint("Nova imagem");
-        let longest = img.width().max(img.height());
-        if longest > MAX_IMPORT {
-            let k = MAX_IMPORT as f32 / longest as f32;
-            img = image::imageops::resize(
-                &img,
-                ((img.width() as f32 * k) as u32).max(1),
-                ((img.height() as f32 * k) as u32).max(1),
-                image::imageops::FilterType::Lanczos3,
+    // ------------------------------------------------------------ transformar
+
+    /// Transforma a seleção (ou a camada toda) com `m`. Com seleção, só o que está dentro dela
+    /// se move (e a própria seleção acompanha).
+    pub fn transform(&mut self, id: LayerId, m: &Affine) -> Result<(), EditError> {
+        let layer = self.layer_checked(id)?;
+        let (w, h) = (self.doc.width, self.doc.height);
+        let new_pixels;
+        let mut new_sel = None;
+        if let Some(sel) = self.doc.selection.clone() {
+            let mut floating = layer.pixels.clone();
+            keep_with_mask(&mut floating, &sel);
+            let mut rest = layer.pixels.clone();
+            erase_with_mask(&mut rest, &sel);
+            let moved = transform::transform(&floating, m, w, h);
+            let mut out = rest;
+            for ty in 0..h.div_ceil(TILE) {
+                for tx in 0..w.div_ceil(TILE) {
+                    let Some(src) = moved.tile(tx, ty) else {
+                        continue;
+                    };
+                    let dst = out.tile_mut(tx, ty);
+                    for p in 0..TILE * TILE {
+                        let k = p * 4;
+                        if src[k + 3] != 0 {
+                            crate::blend::blend_over(
+                                &mut dst[k..k + 4],
+                                &src[k..k + 4],
+                                1.0,
+                                BlendMode::Normal,
+                            );
+                        }
+                    }
+                }
+            }
+            new_pixels = out;
+            let mut mask_img = TiledImage::new(w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    let v = sel.value(x, y);
+                    if v != 0 {
+                        mask_img.set_pixel(x, y, [v, v, v, v]);
+                    }
+                }
+            }
+            let tm = transform::transform(&mask_img, m, w, h);
+            let mut mm = vec![0u8; w * h];
+            for y in 0..h {
+                for x in 0..w {
+                    mm[y * w + x] = tm.pixel(x, y)[3];
+                }
+            }
+            new_sel = Some(Selection::from_mask(w, h, mm));
+        } else {
+            new_pixels = transform::transform(&layer.pixels, m, w, h);
+        }
+        self.checkpoint("Transformar");
+        self.doc.layer_mut(id).expect("existe").pixels = new_pixels;
+        if let Some(s) = new_sel {
+            self.doc.selection = Some(s).filter(|s| !s.is_empty());
+        }
+        self.dirty_all();
+        Ok(())
+    }
+
+    /// Solta a seleção (ou a camada toda) para mover/transformar. Um passo de desfazer cobre
+    /// tudo até `finish_float` (ou `abort_float`).
+    pub fn begin_float(&mut self, id: LayerId) -> Result<Floating, EditError> {
+        let layer = self.layer_checked(id)?;
+        let original = layer.pixels.clone();
+        let sel = self.doc.selection.clone();
+        let (pixels, rest) = match &sel {
+            Some(s) => {
+                let mut f = original.clone();
+                keep_with_mask(&mut f, s);
+                let mut r = original.clone();
+                erase_with_mask(&mut r, s);
+                (f, r)
+            }
+            None => (
+                original.clone(),
+                TiledImage::new(self.doc.width, self.doc.height),
+            ),
+        };
+        let bounds = pixels.content_bounds().ok_or(EditError::NothingToMove)?;
+        self.checkpoint("Transformar");
+        self.doc.layer_mut(id).expect("existe").pixels = rest.clone();
+        self.dirty_all();
+        Ok(Floating {
+            layer: id,
+            pixels,
+            rest,
+            original,
+            bounds,
+            selection: sel,
+        })
+    }
+
+    /// Põe o pedaço solto de volta, transformado por `m` (e leva a seleção junto).
+    pub fn finish_float(&mut self, f: &Floating, m: &Affine) {
+        let (w, h) = (self.doc.width, self.doc.height);
+        let moved = transform::transform(&f.pixels, m, w, h);
+        let mut out = f.rest.clone();
+        for ty in 0..h.div_ceil(TILE) {
+            for tx in 0..w.div_ceil(TILE) {
+                let Some(src) = moved.tile(tx, ty) else {
+                    continue;
+                };
+                let dst = out.tile_mut(tx, ty);
+                for p in 0..TILE * TILE {
+                    let k = p * 4;
+                    if src[k + 3] != 0 {
+                        crate::blend::blend_over(
+                            &mut dst[k..k + 4],
+                            &src[k..k + 4],
+                            1.0,
+                            BlendMode::Normal,
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(l) = self.doc.layer_mut(f.layer) {
+            l.pixels = out;
+        }
+        if let Some(sel) = &f.selection {
+            let mut mask_img = TiledImage::new(w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    let v = sel.value(x, y);
+                    if v != 0 {
+                        mask_img.set_pixel(x, y, [v, v, v, v]);
+                    }
+                }
+            }
+            let tm = transform::transform(&mask_img, m, w, h);
+            let mut mm = vec![0u8; w * h];
+            for y in 0..h {
+                for x in 0..w {
+                    mm[y * w + x] = tm.pixel(x, y)[3];
+                }
+            }
+            self.doc.selection = Some(Selection::from_mask(w, h, mm)).filter(|s| !s.is_empty());
+        }
+        self.dirty_all();
+    }
+
+    /// Desiste: a camada volta a ser como era e o passo de desfazer some.
+    pub fn abort_float(&mut self, f: &Floating) {
+        if let Some(l) = self.doc.layer_mut(f.layer) {
+            l.pixels = f.original.clone();
+        }
+        self.undo.pop();
+        self.dirty_all();
+    }
+
+    /// Recomeça o traço atual (para pré-visualizar formas que mudam enquanto se arrasta).
+    pub fn stroke_restart(&mut self) {
+        if let Some(s) = &mut self.stroke {
+            let tiles: Vec<_> = s.stroker.buf.tile_keys().collect();
+            let (brush, color, erase) = (s.stroker.brush.clone(), s.stroker.color, s.stroker.erase);
+            s.stroker.begin(brush, color, erase);
+            self.dirty_tiles(tiles);
+        }
+    }
+
+    // ------------------------------------------------------------ imagem toda
+
+    fn map_layers(
+        &mut self,
+        label: &'static str,
+        w: usize,
+        h: usize,
+        f: impl Fn(&TiledImage) -> TiledImage,
+    ) {
+        self.checkpoint(label);
+        for l in &mut self.doc.layers {
+            l.pixels = f(&l.pixels);
+        }
+        self.doc.width = w;
+        self.doc.height = h;
+        self.doc.selection = None;
+        self.dirty_all();
+    }
+
+    pub fn crop(&mut self, x0: usize, y0: usize, x1: usize, y1: usize) {
+        let (x1, y1) = (x1.min(self.doc.width), y1.min(self.doc.height));
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let (w, h) = (x1 - x0, y1 - y0);
+        self.map_layers("Cortar tela", w, h, |p| {
+            p.resized(w, h, -(x0 as i64), -(y0 as i64))
+        });
+    }
+
+    /// Muda o tamanho da tela sem esticar a imagem; (`dx`, `dy`) é onde a imagem antiga fica.
+    pub fn resize_canvas(&mut self, w: usize, h: usize, dx: i64, dy: i64) {
+        let (w, h) = (w.clamp(1, 16384), h.clamp(1, 16384));
+        self.map_layers("Tamanho da tela", w, h, |p| p.resized(w, h, dx, dy));
+    }
+
+    pub fn scale_image(&mut self, w: usize, h: usize) {
+        let (w, h) = (w.clamp(1, 16384), h.clamp(1, 16384));
+        self.map_layers("Escalar imagem", w, h, |p| transform::scale_image(p, w, h));
+    }
+
+    pub fn rotate_image(&mut self, clockwise: bool) {
+        let (w, h) = (self.doc.height, self.doc.width);
+        self.map_layers("Girar imagem", w, h, |p| transform::rotate90(p, clockwise));
+    }
+
+    pub fn flip_image(&mut self, horizontal: bool) {
+        let (w, h) = (self.doc.width, self.doc.height);
+        self.map_layers("Espelhar imagem", w, h, |p| {
+            if horizontal {
+                transform::flip_horizontal(p)
+            } else {
+                transform::flip_vertical(p)
+            }
+        });
+    }
+
+    pub fn flip_layer(&mut self, id: LayerId, horizontal: bool) -> Result<(), EditError> {
+        let l = self.layer_checked(id)?;
+        let px = if horizontal {
+            transform::flip_horizontal(&l.pixels)
+        } else {
+            transform::flip_vertical(&l.pixels)
+        };
+        self.checkpoint("Espelhar camada");
+        self.doc.layer_mut(id).expect("existe").pixels = px;
+        self.dirty_all();
+        Ok(())
+    }
+
+    /// Põe uma imagem (texto, por exemplo) na camada, misturando por cima.
+    pub fn stamp(
+        &mut self,
+        id: LayerId,
+        img: &RgbaImage,
+        x: i64,
+        y: i64,
+        label: &'static str,
+    ) -> Result<(), EditError> {
+        self.layer_checked(id)?;
+        let sel = self.doc.selection.clone();
+        self.checkpoint(label);
+        let l = self.doc.layer_mut(id).expect("existe");
+        for (ix, iy, p) in img.enumerate_pixels() {
+            let (px, py) = (x + ix as i64, y + iy as i64);
+            if px < 0 || py < 0 || p.0[3] == 0 {
+                continue;
+            }
+            let (px, py) = (px as usize, py as usize);
+            let m = sel.as_ref().map_or(1.0, |s| s.value(px, py) as f32 / 255.0);
+            if m <= 0.0 {
+                continue;
+            }
+            let mut d = l.pixels.pixel(px, py);
+            crate::blend::blend_over(&mut d, &premultiply(p.0), m, BlendMode::Normal);
+            l.pixels.set_pixel(px, py, d);
+        }
+        self.dirty_all();
+        Ok(())
+    }
+}
+
+/// Apaga da camada o que a seleção cobre (nas bordas suaves, só em parte).
+fn erase_with_mask(px: &mut TiledImage, sel: &Selection) {
+    if let Some((x0, y0, x1, y1)) = sel.bounds() {
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let m = sel.value(x, y) as u32;
+                if m == 0 {
+                    continue;
+                }
+                let p = px.pixel(x, y);
+                if p[3] == 0 {
+                    continue;
+                }
+                let k = 255 - m;
+                px.set_pixel(
+                    x,
+                    y,
+                    [0, 1, 2, 3].map(|i| ((p[i] as u32 * k + 127) / 255) as u8),
+                );
+            }
+        }
+    }
+}
+
+/// Deixa na imagem só o que a seleção cobre.
+fn keep_with_mask(px: &mut TiledImage, sel: &Selection) {
+    let (w, h) = (px.width(), px.height());
+    for y in 0..h {
+        for x in 0..w {
+            let p = px.pixel(x, y);
+            if p[3] == 0 {
+                continue;
+            }
+            let m = sel.value(x, y) as u32;
+            px.set_pixel(
+                x,
+                y,
+                [0, 1, 2, 3].map(|i| ((p[i] as u32 * m + 127) / 255) as u8),
             );
         }
-        let fit = (self.doc.width as f32 * 0.6 / img.width() as f32)
-            .min(self.doc.height as f32 * 0.6 / img.height() as f32)
-            .min(1.0);
-        let id = self.doc.fresh();
-        let asset = format!("img-{id}.png");
-        self.assets.insert(asset.clone(), Arc::new(img));
-        let (cx, cy) = self.center();
-        let mut layer = Layer::new(id, name, Kind::Image { asset }, cx, cy);
-        layer.scale = fit;
-        self.push(layer)
-    }
-
-    pub fn add_text(&mut self, text: &str) -> LayerId {
-        self.checkpoint("Novo texto");
-        let id = self.doc.fresh();
-        let (cx, cy) = self.center();
-        let style = TextStyle {
-            text: text.to_string(),
-            ..Default::default()
-        };
-        let mut layer = Layer::new(id, "Texto", Kind::Text(style), cx, cy);
-        // Padrão de thumbnail: contorno preto grosso.
-        layer.outline = Some(Outline {
-            width: 10.0,
-            color: Rgba::BLACK,
-        });
-        layer.shadow = Some(Shadow {
-            dx: 6.0,
-            dy: 8.0,
-            blur: 8.0,
-            color: Rgba::new(0, 0, 0, 160),
-        });
-        self.push(layer)
-    }
-
-    pub fn add_shape(&mut self, kind: ShapeKind) -> LayerId {
-        self.checkpoint("Nova forma");
-        let id = self.doc.fresh();
-        let (cx, cy) = self.center();
-        let name = match kind {
-            ShapeKind::Rect => "Retângulo",
-            ShapeKind::Ellipse => "Elipse",
-        };
-        self.push(Layer::new(
-            id,
-            name,
-            Kind::Shape(ShapeStyle::new(kind)),
-            cx,
-            cy,
-        ))
-    }
-
-    pub fn delete(&mut self, id: LayerId) {
-        if self.doc.layer(id).is_none() {
-            return;
-        }
-        self.checkpoint("Apagar camada");
-        self.doc.layers.retain(|l| l.id != id);
-        self.prune();
-    }
-
-    pub fn duplicate(&mut self, id: LayerId) -> Option<LayerId> {
-        let src = self.doc.layer(id)?.clone();
-        self.checkpoint("Duplicar camada");
-        let mut copy = src.clone();
-        copy.id = self.doc.fresh();
-        copy.name = format!("{} cópia", src.name);
-        copy.x += 30.0;
-        copy.y += 30.0;
-        let at = self.doc.layers.iter().position(|l| l.id == id)? + 1;
-        let new_id = copy.id;
-        self.doc.layers.insert(at, copy);
-        Some(new_id)
-    }
-
-    pub fn reorder(&mut self, id: LayerId, to: MoveTo) {
-        let Some(i) = self.doc.layers.iter().position(|l| l.id == id) else {
-            return;
-        };
-        let last = self.doc.layers.len() - 1;
-        let j = match to {
-            MoveTo::Up => (i + 1).min(last),
-            MoveTo::Down => i.saturating_sub(1),
-            MoveTo::Top => last,
-            MoveTo::Bottom => 0,
-        };
-        if i == j {
-            return;
-        }
-        self.checkpoint("Ordem das camadas");
-        let l = self.doc.layers.remove(i);
-        self.doc.layers.insert(j, l);
-    }
-
-    /// Esquece imagens que nenhuma camada (nem o histórico) usa mais.
-    fn prune(&mut self) {
-        let used: std::collections::HashSet<&str> = std::iter::once(&self.doc)
-            .chain(self.undo.iter().map(|(d, _)| d))
-            .chain(self.redo.iter().map(|(d, _)| d))
-            .flat_map(|d| d.layers.iter())
-            .filter_map(|l| match &l.kind {
-                Kind::Image { asset } => Some(asset.as_str()),
-                _ => None,
-            })
-            .collect();
-        let keep: Vec<String> = self
-            .assets
-            .keys()
-            .filter(|k| used.contains(k.as_str()))
-            .cloned()
-            .collect();
-        self.assets.retain(|k, _| keep.contains(k));
     }
 }
 
@@ -303,76 +1084,239 @@ mod tests {
     use super::*;
 
     fn ed() -> Editor {
-        Editor::new(THUMB_W, THUMB_H)
+        Editor::new(100, 80, Background::White)
+    }
+
+    fn top(e: &Editor) -> LayerId {
+        e.doc().layers.last().unwrap().id
     }
 
     #[test]
-    fn layers_are_added_on_top_and_reordered() {
-        let mut e = ed();
-        let t = e.add_text("OI");
-        let s = e.add_shape(ShapeKind::Rect);
-        let order = |e: &Editor| e.doc().layers.iter().map(|l| l.id).collect::<Vec<_>>();
-        assert_eq!(order(&e), vec![t, s]);
-        e.reorder(s, MoveTo::Down);
-        assert_eq!(order(&e), vec![s, t]);
-        e.reorder(s, MoveTo::Top);
-        assert_eq!(order(&e), vec![t, s]);
-        e.undo();
-        assert_eq!(order(&e), vec![s, t]);
-        e.redo();
-        assert_eq!(order(&e), vec![t, s]);
+    fn new_documents_start_with_a_white_or_transparent_layer() {
+        let e = ed();
+        assert_eq!(e.doc().layers.len(), 1);
+        assert_eq!(e.doc().layers[0].pixels.pixel(5, 5), [255, 255, 255, 255]);
+        let t = Editor::new(10, 10, Background::Transparent);
+        assert!(t.doc().layers[0].pixels.is_empty());
+        let c = Editor::new(10, 10, Background::Color([1, 2, 3]));
+        assert_eq!(c.doc().layers[0].pixels.pixel(0, 0), [1, 2, 3, 255]);
     }
 
     #[test]
-    fn dragging_is_one_undo_step() {
+    fn a_stroke_is_one_undo_step_and_shows_live() {
         let mut e = ed();
-        let t = e.add_text("OI");
-        e.end_change();
-        for x in [10.0, 20.0, 30.0] {
-            e.edit(t, "move", "Mover", |l| l.x = x);
-        }
-        assert_eq!(e.doc().layer(t).unwrap().x, 30.0);
-        e.undo();
-        assert_eq!(e.doc().layer(t).unwrap().x, THUMB_W as f32 / 2.0);
-        // outro gesto depois de soltar o mouse é outro passo
-        e.redo();
-        e.end_change();
-        e.edit(t, "move", "Mover", |l| l.x = 99.0);
-        e.undo();
-        assert_eq!(e.doc().layer(t).unwrap().x, 30.0);
-    }
-
-    #[test]
-    fn images_fit_the_canvas_and_unused_assets_are_dropped() {
-        let mut e = ed();
-        let id = e.add_image("foto", RgbaImage::new(4000, 3000));
-        let l = e.doc().layer(id).unwrap().clone();
-        let Kind::Image { asset } = &l.kind else {
-            panic!()
+        let id = e.add_layer(None, None);
+        let b = Brush {
+            size: 10.0,
+            hardness: 1.0,
+            ..Brush::basic()
         };
-        assert!(e.assets()[asset].width() <= MAX_IMPORT);
-        let drawn_h = e.assets()[asset].height() as f32 * l.scale;
-        assert!(drawn_h <= THUMB_H as f32 * 0.6 + 1.0);
-        e.delete(id);
-        // ainda dá para desfazer, então a imagem fica
-        assert_eq!(e.assets().len(), 1);
+        e.begin_stroke(id, b, [255, 0, 0], false, BlendMode::Normal)
+            .unwrap();
+        e.stroke_point(20.0, 20.0);
+        e.stroke_point(60.0, 20.0);
+        assert!(e.live().is_some());
+        let t = composite::composite_tile(e.doc(), 0, 0, e.live().as_ref());
+        assert_eq!(&t[(20 * TILE + 40) * 4..][..4], &[255, 0, 0, 255]);
+        e.end_stroke(60.0, 20.0);
+        assert!(e.live().is_none());
+        assert_eq!(
+            e.doc().layer(id).unwrap().pixels.pixel(40, 20),
+            [255, 0, 0, 255]
+        );
+        assert_eq!(e.undo_label(), Some("Pincel"));
         e.undo();
-        assert!(e.doc().layer(id).is_some());
+        assert_eq!(e.doc().layer(id).unwrap().pixels.pixel(40, 20), [0; 4]);
+        e.redo();
+        assert_eq!(
+            e.doc().layer(id).unwrap().pixels.pixel(40, 20),
+            [255, 0, 0, 255]
+        );
+        assert!(matches!(e.take_dirty(), Dirty::All));
     }
 
     #[test]
-    fn duplicate_and_dirty_tracking() {
+    fn locked_layers_refuse_edits() {
         let mut e = ed();
-        assert!(!e.is_dirty());
-        let t = e.add_text("A");
-        assert!(e.is_dirty());
-        e.mark_saved();
-        assert!(!e.is_dirty());
-        let c = e.duplicate(t).unwrap();
+        let id = e.add_layer(None, None);
+        e.edit_layer(id, "lock", "Travar", |l| l.locked = true);
+        assert_eq!(e.fill_selection(id, [0, 0, 0]), Err(EditError::Locked));
+        assert_eq!(
+            e.apply_filter(id, &Filter::Invert, "x"),
+            Err(EditError::Locked)
+        );
+        assert_eq!(
+            e.begin_stroke(id, Brush::basic(), [0; 3], false, BlendMode::Normal),
+            Err(EditError::Locked)
+        );
+    }
+
+    #[test]
+    fn selection_limits_fill_clear_and_copy_paste() {
+        let mut e = ed();
+        let id = top(&e);
+        e.combine_selection(
+            Selection::rect(100, 80, 10, 10, 30, 30),
+            SelOp::Replace,
+            "Seleção",
+        );
+        e.fill_selection(id, [0, 0, 255]).unwrap();
+        assert_eq!(e.doc().layers[0].pixels.pixel(15, 15), [0, 0, 255, 255]);
+        assert_eq!(e.doc().layers[0].pixels.pixel(50, 15), [255, 255, 255, 255]);
+        let clip = e.copy(id, false).unwrap();
+        assert_eq!(
+            (clip.image.width(), clip.image.height(), clip.x, clip.y),
+            (20, 20, 10, 10)
+        );
+        let pasted = e.paste(&clip, Some((60, 40)));
+        assert_eq!(
+            e.doc().layer(pasted).unwrap().pixels.pixel(65, 45),
+            [0, 0, 255, 255]
+        );
+        e.clear_layer(id).unwrap();
+        assert_eq!(e.doc().layer(id).unwrap().pixels.pixel(15, 15), [0; 4]);
+        assert_eq!(
+            e.doc().layer(id).unwrap().pixels.pixel(50, 15),
+            [255, 255, 255, 255]
+        );
+        e.deselect();
+        assert!(e.doc().selection.is_none());
+        e.invert_selection();
+        assert_eq!(e.doc().selection.as_ref().unwrap().value(5, 5), 255);
+    }
+
+    #[test]
+    fn bucket_wand_and_merge_down() {
+        let mut e = ed();
+        let bg = top(&e);
+        let line = e.add_layer(None, None);
+        for y in 0..80 {
+            e.doc
+                .layer_mut(line)
+                .unwrap()
+                .pixels
+                .set_pixel(50, y, [0, 0, 0, 255]);
+        }
+        e.bucket_fill(line, (10, 10), [255, 0, 0], 0.1, true, 1.0, true)
+            .unwrap();
+        // com "amostrar tudo", o traço preto fecha a região esquerda
+        let px = &e.doc().layer(line).unwrap().pixels;
+        assert_eq!(px.pixel(10, 10), [255, 0, 0, 255]);
+        assert_eq!(px.pixel(70, 10), [0; 4]);
+        e.magic_wand(bg, (5, 5), 0.0, true, SelOp::Replace, false);
+        assert_eq!(
+            e.doc().selection.as_ref().unwrap().bounds(),
+            Some((0, 0, 100, 80))
+        );
+        let merged = e.merge_down(line).unwrap();
+        assert_eq!(merged, bg);
+        assert_eq!(e.doc().layers.len(), 1);
+        assert_eq!(e.doc().layers[0].pixels.pixel(10, 10), [255, 0, 0, 255]);
+        assert_eq!(e.merge_down(bg), Err(EditError::NothingBelow));
+    }
+
+    #[test]
+    fn transform_moves_only_the_selection() {
+        let mut e = Editor::new(100, 80, Background::Transparent);
+        let id = top(&e);
+        e.doc
+            .layer_mut(id)
+            .unwrap()
+            .pixels
+            .set_pixel(10, 10, [255, 0, 0, 255]);
+        e.doc
+            .layer_mut(id)
+            .unwrap()
+            .pixels
+            .set_pixel(70, 60, [0, 255, 0, 255]);
+        e.combine_selection(
+            Selection::rect(100, 80, 0, 0, 30, 30),
+            SelOp::Replace,
+            "Seleção",
+        );
+        e.transform(id, &Affine::around((0.0, 0.0), 1.0, 1.0, 0.0, 20.0, 5.0))
+            .unwrap();
+        let px = &e.doc().layer(id).unwrap().pixels;
+        assert_eq!(px.pixel(10, 10), [0; 4]);
+        assert!(px.pixel(30, 15)[0] > 200);
+        assert_eq!(px.pixel(70, 60), [0, 255, 0, 255]);
+        assert!(e.doc().selection.as_ref().unwrap().value(35, 20) > 200);
+    }
+
+    #[test]
+    fn floating_move_commit_and_abort() {
+        let mut e = Editor::new(100, 80, Background::Transparent);
+        let id = top(&e);
+        e.doc
+            .layer_mut(id)
+            .unwrap()
+            .pixels
+            .set_pixel(10, 10, [255, 0, 0, 255]);
+        let f = e.begin_float(id).unwrap();
+        assert_eq!(f.bounds, (10, 10, 11, 11));
+        assert_eq!(e.doc().layer(id).unwrap().pixels.pixel(10, 10), [0; 4]);
+        e.finish_float(&f, &Affine::around((0.0, 0.0), 1.0, 1.0, 0.0, 30.0, 20.0));
+        assert_eq!(
+            e.doc().layer(id).unwrap().pixels.pixel(40, 30),
+            [255, 0, 0, 255]
+        );
+        e.undo();
+        assert_eq!(
+            e.doc().layer(id).unwrap().pixels.pixel(10, 10),
+            [255, 0, 0, 255]
+        );
+        let f = e.begin_float(id).unwrap();
+        let steps = e.history().0.len();
+        e.abort_float(&f);
+        assert_eq!(e.history().0.len(), steps - 1);
+        assert_eq!(
+            e.doc().layer(id).unwrap().pixels.pixel(10, 10),
+            [255, 0, 0, 255]
+        );
+        let empty = e.add_layer(None, None);
+        assert!(matches!(
+            e.begin_float(empty),
+            Err(EditError::NothingToMove)
+        ));
+    }
+
+    #[test]
+    fn canvas_operations_apply_to_every_layer() {
+        let mut e = ed();
+        e.add_layer(None, None);
+        e.crop(10, 10, 60, 50);
+        assert_eq!((e.doc().width, e.doc().height), (50, 40));
+        assert!(e.doc().layers.iter().all(|l| l.pixels.width() == 50));
+        e.rotate_image(true);
+        assert_eq!((e.doc().width, e.doc().height), (40, 50));
+        e.resize_canvas(80, 80, 20, 10);
+        assert_eq!(e.doc().layers[0].pixels.pixel(25, 15), [255, 255, 255, 255]);
+        e.scale_image(160, 160);
+        assert_eq!(e.doc().layers[0].pixels.width(), 160);
+        e.flatten();
+        assert_eq!(e.doc().layers.len(), 1);
+        e.undo();
         assert_eq!(e.doc().layers.len(), 2);
-        assert_ne!(c, t);
-        assert!(e.is_dirty());
-        e.set_canvas(1080, 1920);
-        assert_eq!((e.doc().width, e.doc().height), (1080, 1920));
+        let (undo, _) = e.history();
+        assert!(!undo.is_empty());
+    }
+
+    #[test]
+    fn layer_properties_coalesce_and_reorder() {
+        let mut e = ed();
+        let id = e.add_layer(None, None);
+        e.end_change();
+        for o in [0.9, 0.8, 0.7] {
+            e.edit_layer(id, "opacity", "Opacidade", |l| l.opacity = o);
+        }
+        assert_eq!(e.doc().layer(id).unwrap().opacity, 0.7);
+        e.undo();
+        assert_eq!(e.doc().layer(id).unwrap().opacity, 1.0);
+        e.move_layer(id, MoveTo::Bottom);
+        assert_eq!(e.doc().layers[0].id, id);
+        let dup = e.duplicate_layer(id).unwrap();
+        assert_eq!(e.doc().layers[1].id, dup);
+        e.jump_to(0);
+        assert_eq!(e.doc().layers.len(), 1);
     }
 }

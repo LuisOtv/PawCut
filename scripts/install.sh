@@ -12,7 +12,7 @@ APPS=(
   "pawcut|pawcut-app|PawCut|Editor de vídeo simples|AudioVideo;Video;AudioVideoEditing;|video/mp4;video/quicktime;video/x-matroska;video/webm;"
   "pawvoice|pawvoice-app|PawVoice|Gravador e editor de voz|AudioVideo;Audio;Recorder;|audio/x-wav;audio/mpeg;audio/flac;"
   "pawwrite|pawwrite-app|PawWrite|Editor de roteiros|Office;TextEditor;|text/markdown;text/plain;"
-  "pawpaint|pawpaint-app|PawPaint|Editor de thumbnails|Graphics;2DGraphics;RasterGraphics;|image/png;image/jpeg;image/webp;"
+  "pawpaint|pawpaint-app|PawPaint|Editor de imagens e pintura|Graphics;2DGraphics;RasterGraphics;|image/png;image/jpeg;image/webp;"
 )
 
 BIN_DIR="$HOME/.local/bin"

@@ -1,82 +1,151 @@
-//! A janela do PawPaint: camadas à esquerda, tela no meio, propriedades à direita.
+//! A janela do PawPaint: menus, barra de opções do pincel, dockers (egui_dock) e diálogos.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 
-use egui::{
-    Align2, Color32, CursorIcon, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke, Vec2, pos2,
-    vec2,
-};
+use egui::{Align2, Key, Modifiers, RichText, vec2};
+use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 use paw_ui::theme;
 use paw_ui::toasts::Toasts;
-use pawpaint_core::{
-    Adjust, Background, Chroma, Editor, Kind, Layer, LayerId, MoveTo, Outline, Rgba, Shadow,
-    ShapeKind, THUMB_H, THUMB_W, TextAlign, load_project, save_project,
-};
-use pawpaint_render::Renderer;
+use pawpaint_core::brush::Brush;
+use pawpaint_core::filters::Filter;
+use pawpaint_core::text::TextRaster;
+use pawpaint_core::{Background, file};
+use pawpaint_core::{BlendMode, Editor, MoveTo};
+use serde::{Deserialize, Serialize};
 
-/// Limite de tamanho da thumbnail no YouTube.
+use crate::canvas;
+use crate::docks;
+use crate::state::*;
+
 const YOUTUBE_MAX: usize = 2_000_000;
-const SNAP_PX: f32 = 6.0;
-const HANDLE: f32 = 6.0;
 
-fn to_color(c: Rgba) -> Color32 {
-    Color32::from_rgba_unmultiplied(c.r, c.g, c.b, c.a)
+/// Algo a fazer no estado depois que um diálogo fecha.
+type StateAction = Box<dyn FnOnce(&mut State)>;
+
+// ---------------------------------------------------------------- preferências
+
+fn config_dir() -> PathBuf {
+    // Os testes não mexem nas configurações de verdade.
+    if cfg!(test) {
+        return std::env::temp_dir().join("pawpaint-test-config");
+    }
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("pawpaint")
 }
 
-fn from_color(c: Color32) -> Rgba {
-    let [r, g, b, a] = c.to_srgba_unmultiplied();
-    Rgba::new(r, g, b, a)
+#[derive(Serialize, Deserialize, Default)]
+struct PrefsFile {
+    recent: Vec<[u8; 3]>,
+    brushes: Vec<Brush>,
 }
 
-/// Algo a fazer na janela depois que um diálogo fecha.
-type Action = Box<dyn FnOnce(&mut PaintApp)>;
-
-enum Purpose {
-    Open,
-    SaveAs,
-    Import,
-    ExportPng,
-    ExportJpg,
+pub fn save_prefs(st: &State) {
+    let user: Vec<Brush> = st.presets[st.presets.len() - st.user_presets..].to_vec();
+    let file = PrefsFile {
+        recent: st.prefs.recent.clone(),
+        brushes: user,
+    };
+    let _ = std::fs::create_dir_all(config_dir());
+    if let Ok(t) = serde_json::to_string(&file) {
+        let _ = std::fs::write(config_dir().join("prefs.json"), t);
+    }
 }
 
-enum Dialog {
-    New { w: u32, h: u32 },
-    ConfirmClose,
+pub fn save_brush_preset(st: &mut State, ctx: &egui::Context) {
+    let name = st.brush_name_edit.trim().to_string();
+    if name.is_empty() {
+        st.warn("Dê um nome ao pincel");
+        return;
+    }
+    let mut b = st.brush.clone();
+    b.name = name.clone();
+    st.preset_thumbs.push(docks::brush_thumb(ctx, &b, &name));
+    st.presets.push(b.clone());
+    st.user_presets += 1;
+    st.brush = b;
+    st.brush_name_edit.clear();
+    save_prefs(st);
+    st.say("Pincel salvo");
 }
 
-/// O que o mouse está fazendo na tela.
-#[derive(Clone)]
-enum Drag {
-    Pan,
-    Move { grab: Vec2 },
-    Scale { start_dist: f32, start_scale: f32 },
-    Rotate,
+// ---------------------------------------------------------------- layout dos dockers
+
+pub fn default_layout() -> DockState<Panel> {
+    let mut dock = DockState::new(vec![Panel::Canvas]);
+    let tree = dock.main_surface_mut();
+    let [canvas, right] =
+        tree.split_right(NodeIndex::root(), 0.79, vec![Panel::Color, Panel::Palette]);
+    let [_, layers] = tree.split_below(right, 0.42, vec![Panel::Layers]);
+    tree.split_below(
+        layers,
+        0.45,
+        vec![
+            Panel::BrushPresets,
+            Panel::BrushEditor,
+            Panel::ToolOptions,
+            Panel::History,
+            Panel::Overview,
+        ],
+    );
+    tree.split_left(canvas, 0.07, vec![Panel::Toolbox]);
+    dock
 }
+
+struct Viewer<'a> {
+    st: &'a mut State,
+}
+
+impl TabViewer for Viewer<'_> {
+    type Tab = Panel;
+
+    fn id(&mut self, tab: &mut Panel) -> egui::Id {
+        egui::Id::new(("pawpaint-tab", *tab))
+    }
+
+    fn title(&mut self, tab: &mut Panel) -> egui::WidgetText {
+        tab.title().into()
+    }
+
+    fn is_closeable(&self, tab: &Panel) -> bool {
+        *tab != Panel::Canvas
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut Panel) -> bool {
+        true
+    }
+
+    fn scroll_bars(&self, _tab: &Panel) -> [bool; 2] {
+        [false, false]
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Panel) {
+        let st = &mut *self.st;
+        match tab {
+            Panel::Canvas => canvas::canvas_panel(st, ui),
+            Panel::Toolbox => docks::toolbox(st, ui),
+            Panel::Layers => docks::layers(st, ui),
+            Panel::BrushPresets => docks::brush_presets(st, ui),
+            Panel::BrushEditor => docks::brush_editor(st, ui),
+            Panel::ToolOptions => docks::tool_options(st, ui),
+            Panel::Color => docks::color(st, ui),
+            Panel::Palette => docks::palette(st, ui),
+            Panel::Overview => docks::overview(st, ui),
+            Panel::History => docks::history(st, ui),
+        }
+    }
+}
+
+// ---------------------------------------------------------------- app
 
 pub struct PaintApp {
-    ed: Editor,
-    path: Option<PathBuf>,
-    selected: Option<LayerId>,
-    renderer: Renderer,
-    /// Imagem do último desenho e o `revision` dele.
-    rendered: Option<(u64, egui::TextureHandle)>,
-    previews: Vec<egui::TextureHandle>,
-    preview_rev: u64,
-    zoom: f32,
-    fit: bool,
-    pan: Vec2,
-    drag: Option<Drag>,
-    guides: bool,
-    snap_lines: (bool, bool),
-    toasts: Toasts,
-    dialog: Option<Dialog>,
-    file: Option<(Purpose, Receiver<Vec<PathBuf>>)>,
-    fonts: Vec<String>,
-    renaming: Option<(LayerId, String)>,
-    focus_text: bool,
-    allow_close: bool,
+    dock: DockState<Panel>,
+    st: State,
     last_title: String,
+    last_layout: String,
     screenshot: Option<PathBuf>,
     frames: u64,
 }
@@ -86,388 +155,371 @@ impl PaintApp {
         theme::apply(ctx);
         let mut app = Self::empty();
         app.screenshot = std::env::var_os("PAWPAINT_SCREENSHOT").map(PathBuf::from);
-        // Só para testes visuais: `PAWPAINT_SELECT=n` já abre com a camada n selecionada.
-        let select = std::env::var("PAWPAINT_SELECT")
-            .ok()
-            .and_then(|v| v.parse().ok());
-        let mut images = Vec::new();
+        if let Ok(t) = std::fs::read_to_string(config_dir().join("layout.json"))
+            && let Ok(d) = serde_json::from_str::<DockState<Panel>>(&t)
+            && d.find_tab(&Panel::Canvas).is_some()
+        {
+            app.dock = d;
+        }
+        if let Ok(t) = std::fs::read_to_string(config_dir().join("prefs.json"))
+            && let Ok(p) = serde_json::from_str::<PrefsFile>(&t)
+        {
+            app.st.prefs.recent = p.recent;
+            app.st.user_presets = p.brushes.len();
+            app.st.presets.extend(p.brushes);
+        }
+        app.st.preset_thumbs = app
+            .st
+            .presets
+            .iter()
+            .map(|b| docks::brush_thumb(ctx, b, &b.name))
+            .collect();
         for p in args {
-            match p.extension().and_then(|e| e.to_str()) {
-                Some("pawpaint") => app.open_project(&p),
-                _ => images.push(p),
-            }
-        }
-        if !images.is_empty() {
-            app.import(images);
-        }
-        if let Some(id) = select {
-            app.selected = Some(id);
+            open_path(&mut app.st, &p);
         }
         app
     }
 
     fn empty() -> Self {
+        let presets = Brush::presets();
+        let brush = presets[0].clone();
         Self {
-            ed: Editor::new(THUMB_W, THUMB_H),
-            path: None,
-            selected: None,
-            renderer: Renderer::new(),
-            rendered: None,
-            previews: Vec::new(),
-            preview_rev: u64::MAX,
-            zoom: 1.0,
-            fit: true,
-            pan: Vec2::ZERO,
-            drag: None,
-            guides: false,
-            snap_lines: (false, false),
-            toasts: Toasts::default(),
-            dialog: None,
-            file: None,
-            fonts: Vec::new(),
-            renaming: None,
-            focus_text: false,
-            allow_close: false,
+            dock: default_layout(),
+            st: State {
+                docs: Vec::new(),
+                cur: 0,
+                next_uid: 1,
+                tool: Tool::Brush,
+                brush,
+                presets,
+                user_presets: 0,
+                preset_thumbs: Vec::new(),
+                fg: [0, 0, 0],
+                bg: [255, 255, 255],
+                hsv: (0.0, 0.0, 0.0),
+                blend: BlendMode::Normal,
+                opts: ToolOpts::default(),
+                clipboard: None,
+                toasts: Toasts::default(),
+                dialog: None,
+                file: None,
+                text_raster: TextRaster::new(),
+                fonts: Vec::new(),
+                prefs: Prefs { recent: Vec::new() },
+                interaction: None,
+                text_input: None,
+                renaming: None,
+                brush_name_edit: String::new(),
+                dock_commands: Vec::new(),
+                allow_close: false,
+                tool_changed: false,
+            },
             last_title: String::new(),
+            last_layout: String::new(),
             screenshot: None,
             frames: 0,
         }
     }
+}
 
-    fn say(&mut self, text: impl Into<String>) {
-        self.toasts.push(text, false);
+// ---------------------------------------------------------------- operações de estado
+
+pub fn set_tool(st: &mut State, tool: Tool) {
+    if st.tool == tool {
+        return;
     }
-
-    fn warn(&mut self, text: impl Into<String>) {
-        self.toasts.push(text, true);
-    }
-
-    fn layer(&self) -> Option<&Layer> {
-        self.ed.doc().layer(self.selected?)
-    }
-
-    // ---------------------------------------------------------------- arquivos
-
-    fn ask(&mut self, purpose: Purpose) {
-        if self.file.is_some() {
-            return;
+    if let Some(d) = st.doc_mut() {
+        if d.float.is_some() {
+            canvas::commit_float(d);
         }
-        let name = self
-            .path
-            .as_ref()
-            .and_then(|p| p.file_stem())
-            .map_or("thumbnail".to_string(), |s| {
-                s.to_string_lossy().into_owned()
-            });
-        let (tx, rx) = channel();
-        let kind = match purpose {
-            Purpose::Open => 0,
-            Purpose::SaveAs => 1,
-            Purpose::Import => 2,
-            Purpose::ExportPng => 3,
-            Purpose::ExportJpg => 4,
-        };
-        std::thread::spawn(move || {
-            let d = rfd::FileDialog::new();
-            let picked: Vec<PathBuf> = match kind {
-                0 => d
-                    .set_title("Abrir projeto")
-                    .add_filter("PawPaint", &["pawpaint"])
-                    .pick_file()
-                    .into_iter()
-                    .collect(),
-                1 => d
-                    .set_title("Salvar projeto")
-                    .add_filter("PawPaint", &["pawpaint"])
-                    .set_file_name(format!("{name}.pawpaint"))
-                    .save_file()
-                    .into_iter()
-                    .collect(),
-                2 => d
-                    .set_title("Importar imagens")
-                    .add_filter("Imagens", &["png", "jpg", "jpeg", "webp", "bmp"])
-                    .pick_files()
-                    .unwrap_or_default(),
-                3 => d
-                    .set_title("Exportar PNG")
-                    .add_filter("PNG", &["png"])
-                    .set_file_name(format!("{name}.png"))
-                    .save_file()
-                    .into_iter()
-                    .collect(),
-                _ => d
-                    .set_title("Exportar JPG para o YouTube")
-                    .add_filter("JPG", &["jpg"])
-                    .set_file_name(format!("{name}.jpg"))
-                    .save_file()
-                    .into_iter()
-                    .collect(),
-            };
-            let _ = tx.send(picked);
-        });
-        self.file = Some((purpose, rx));
+        d.crop = None;
     }
+    st.text_input = None;
+    st.interaction = None;
+    st.tool = tool;
+    st.tool_changed = true;
+}
 
-    fn poll_file(&mut self) {
-        let Some(paths) = self.file.as_ref().and_then(|(_, rx)| rx.try_recv().ok()) else {
-            return;
-        };
-        let (purpose, _) = self.file.take().expect("janela aberta");
-        let Some(first) = paths.first().cloned() else {
-            return;
-        };
-        match purpose {
-            Purpose::Open => self.open_project(&first),
-            Purpose::SaveAs => {
-                let mut p = first;
-                if p.extension().is_none_or(|e| e != "pawpaint") {
-                    p.set_extension("pawpaint");
-                }
-                self.save_to(p);
-            }
-            Purpose::Import => self.import(paths),
-            Purpose::ExportPng => self.export_png(first),
-            Purpose::ExportJpg => self.export_jpg(first),
+pub fn swap_colors(st: &mut State) {
+    std::mem::swap(&mut st.fg, &mut st.bg);
+    st.hsv = rgb_to_hsv(st.fg);
+}
+
+pub fn request_close_doc(st: &mut State, i: usize) {
+    if st.docs.get(i).is_some_and(|d| d.ed.is_dirty()) {
+        st.dialog = Some(Dialog::ConfirmClose(i));
+    } else {
+        close_doc(st, i);
+    }
+}
+
+fn close_doc(st: &mut State, i: usize) {
+    if i < st.docs.len() {
+        st.docs.remove(i);
+        st.cur = st.cur.min(st.docs.len().saturating_sub(1));
+        st.interaction = None;
+    }
+}
+
+fn add_doc(st: &mut State, ed: Editor, path: Option<PathBuf>) {
+    let uid = st.next_uid;
+    st.next_uid += 1;
+    st.docs.push(DocView::new(uid, ed, path));
+    st.cur = st.docs.len() - 1;
+    st.interaction = None;
+}
+
+fn open_path(st: &mut State, p: &Path) {
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase);
+    if ext.as_deref() == Some("pawpaint") {
+        match file::load_project(p) {
+            Ok(ed) => add_doc(st, ed, Some(p.to_path_buf())),
+            Err(e) => st.warn(e.to_string()),
         }
+        return;
     }
-
-    fn open_project(&mut self, path: &Path) {
-        match load_project(path) {
-            Ok((ed, missing)) => {
-                self.ed = ed;
-                self.path = Some(path.to_path_buf());
-                self.selected = None;
-                self.fit = true;
-                self.rendered = None;
-                if !missing.is_empty() {
-                    self.warn(format!(
-                        "{} imagem(ns) do projeto não foram encontradas",
-                        missing.len()
-                    ));
-                }
-            }
-            Err(e) => self.warn(e.to_string()),
-        }
-    }
-
-    fn save_to(&mut self, path: PathBuf) {
-        match save_project(&self.ed, &path) {
-            Ok(()) => {
-                self.ed.mark_saved();
-                self.path = Some(path);
-                self.say("Projeto salvo");
-            }
-            Err(e) => self.warn(e.to_string()),
-        }
-    }
-
-    fn save(&mut self) {
-        match self.path.clone() {
-            Some(p) => self.save_to(p),
-            None => self.ask(Purpose::SaveAs),
-        }
-    }
-
-    fn import(&mut self, paths: Vec<PathBuf>) {
-        for p in paths {
+    match file::open_image(p) {
+        Ok(img) => {
             let name = p
                 .file_stem()
                 .map_or("Imagem".into(), |s| s.to_string_lossy().into_owned());
-            match image::open(&p) {
-                Ok(img) => {
-                    let id = self.ed.add_image(&name, img.to_rgba8());
-                    self.selected = Some(id);
-                }
-                Err(e) => self.warn(format!("Não deu para abrir {name}: {e}")),
-            }
-        }
-    }
-
-    /// Ctrl+V: imagem da área de transferência (print de tela), se wl-paste ou xclip existirem.
-    fn paste_image(&mut self) {
-        let attempts: [(&str, &[&str]); 2] = [
-            ("wl-paste", &["--type", "image/png"]),
-            (
-                "xclip",
-                &["-selection", "clipboard", "-t", "image/png", "-o"],
-            ),
-        ];
-        for (cmd, args) in attempts {
-            if let Ok(out) = std::process::Command::new(cmd).args(args).output()
-                && out.status.success()
-                && let Ok(img) = image::load_from_memory(&out.stdout)
-            {
-                let id = self.ed.add_image("Colada", img.to_rgba8());
-                self.selected = Some(id);
+            if img.width() > 8192 || img.height() > 8192 {
+                st.warn("Imagem grande demais (o limite é 8192 px de lado)");
                 return;
             }
+            add_doc(st, Editor::from_image(&img, &name), None);
+            if let Some(d) = st.doc_mut() {
+                d.name = name;
+            }
         }
-        self.warn("Não achei imagem na área de transferência (precisa de wl-clipboard ou xclip)");
+        Err(e) => st.warn(format!("Não deu para abrir {}: {e}", p.display())),
     }
+}
 
-    fn flat(&mut self) -> image::RgbaImage {
-        self.renderer.render(self.ed.doc(), self.ed.assets())
+fn ask(st: &mut State, purpose: Purpose) {
+    if st.file.is_some() {
+        return;
     }
+    let name = st
+        .doc()
+        .and_then(|d| {
+            d.path
+                .as_ref()
+                .and_then(|p| p.file_stem())
+                .map(|s| s.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "imagem".to_string());
+    let (tx, rx): (_, Receiver<Vec<PathBuf>>) = channel();
+    std::thread::spawn(move || {
+        let d = rfd::FileDialog::new();
+        let picked: Vec<PathBuf> = match purpose {
+            Purpose::Open => d
+                .set_title("Abrir")
+                .add_filter(
+                    "Imagens e projetos",
+                    &["pawpaint", "png", "jpg", "jpeg", "webp", "bmp"],
+                )
+                .pick_files()
+                .unwrap_or_default(),
+            Purpose::SaveAs => d
+                .set_title("Salvar projeto")
+                .add_filter("PawPaint", &["pawpaint"])
+                .set_file_name(format!("{name}.pawpaint"))
+                .save_file()
+                .into_iter()
+                .collect(),
+            Purpose::ImportLayer => d
+                .set_title("Importar como camada")
+                .add_filter("Imagens", &["png", "jpg", "jpeg", "webp", "bmp"])
+                .pick_files()
+                .unwrap_or_default(),
+            Purpose::Export => d
+                .set_title("Exportar imagem")
+                .add_filter("PNG", &["png"])
+                .add_filter("JPG", &["jpg"])
+                .add_filter("WebP", &["webp"])
+                .add_filter("BMP", &["bmp"])
+                .set_file_name(format!("{name}.png"))
+                .save_file()
+                .into_iter()
+                .collect(),
+            Purpose::ExportJpg => d
+                .set_title("Exportar JPG com até 2 MB")
+                .add_filter("JPG", &["jpg"])
+                .set_file_name(format!("{name}.jpg"))
+                .save_file()
+                .into_iter()
+                .collect(),
+        };
+        let _ = tx.send(picked);
+    });
+    st.file = Some((purpose, rx));
+}
 
-    fn export_png(&mut self, mut path: PathBuf) {
-        if path.extension().is_none() {
-            path.set_extension("png");
+fn poll_file(st: &mut State) {
+    let Some(paths) = st.file.as_ref().and_then(|(_, rx)| rx.try_recv().ok()) else {
+        return;
+    };
+    let (purpose, _) = st.file.take().expect("janela aberta");
+    if paths.is_empty() {
+        return;
+    }
+    match purpose {
+        Purpose::Open => {
+            for p in paths {
+                open_path(st, &p);
+            }
         }
-        let img = self.flat();
-        match img.save(&path) {
-            Ok(()) => {
-                let kb = std::fs::metadata(&path).map_or(0, |m| m.len() / 1000);
-                if kb * 1000 > YOUTUBE_MAX as u64 {
-                    self.warn(format!(
-                        "PNG exportado ({kb} KB), mas o YouTube só aceita até 2 MB: use o JPG"
-                    ));
-                } else {
-                    self.say(format!("PNG exportado ({kb} KB)"));
+        Purpose::SaveAs => {
+            let mut p = paths[0].clone();
+            if p.extension().is_none_or(|e| e != "pawpaint") {
+                p.set_extension("pawpaint");
+            }
+            save_to(st, p);
+        }
+        Purpose::ImportLayer => {
+            for p in paths {
+                match file::open_image(&p) {
+                    Ok(img) => {
+                        let name = p
+                            .file_stem()
+                            .map_or("Imagem".into(), |s| s.to_string_lossy().into_owned());
+                        if let Some(d) = st.doc_mut() {
+                            d.active = d.ed.import_layer(&img, &name);
+                        }
+                    }
+                    Err(e) => st.warn(e.to_string()),
                 }
             }
-            Err(e) => self.warn(e.to_string()),
         }
-    }
-
-    fn export_jpg(&mut self, mut path: PathBuf) {
-        if path.extension().is_none() {
-            path.set_extension("jpg");
-        }
-        let img = self.flat();
-        let (bytes, quality) = pawpaint_render::jpeg_under(&img, YOUTUBE_MAX);
-        match std::fs::write(&path, &bytes) {
-            Ok(()) => self.say(format!(
-                "JPG exportado: {} KB, qualidade {quality} (limite do YouTube: 2 MB)",
-                bytes.len() / 1000
-            )),
-            Err(e) => self.warn(e.to_string()),
-        }
-    }
-
-    fn guard_new(&mut self) {
-        self.dialog = Some(Dialog::New {
-            w: self.ed.doc().width,
-            h: self.ed.doc().height,
-        });
-    }
-
-    fn new_doc(&mut self, w: u32, h: u32) {
-        self.ed = Editor::new(w, h);
-        self.path = None;
-        self.selected = None;
-        self.fit = true;
-        self.rendered = None;
-    }
-
-    // ---------------------------------------------------------------- edição
-
-    fn nudge(&mut self, dx: f32, dy: f32) {
-        if let Some(id) = self.selected {
-            self.ed.edit(id, "nudge", "Mover", |l| {
-                l.x += dx;
-                l.y += dy;
-            });
-        }
-    }
-
-    fn delete_selected(&mut self) {
-        if let Some(id) = self.selected.take() {
-            self.ed.delete(id);
-        }
-    }
-
-    fn add_text(&mut self) {
-        let id = self.ed.add_text("TEXTO");
-        self.selected = Some(id);
-        self.focus_text = true;
-    }
-
-    fn shortcuts(&mut self, ctx: &egui::Context) {
-        let ctrl = Modifiers::COMMAND;
-        let hit = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
-        let typing = ctx.egui_wants_keyboard_input();
-        if hit(ctrl | Modifiers::SHIFT, Key::S) {
-            self.ask(Purpose::SaveAs);
-        } else if hit(ctrl, Key::S) {
-            self.save();
-        }
-        if hit(ctrl, Key::N) {
-            self.guard_new();
-        }
-        if hit(ctrl, Key::O) {
-            self.ask(Purpose::Open);
-        }
-        if hit(ctrl, Key::I) {
-            self.ask(Purpose::Import);
-        }
-        if hit(ctrl, Key::E) {
-            self.ask(Purpose::ExportJpg);
-        }
-        if hit(ctrl | Modifiers::SHIFT, Key::E) {
-            self.ask(Purpose::ExportPng);
-        }
-        if hit(ctrl, Key::Num0) {
-            self.fit = true;
-            self.pan = Vec2::ZERO;
-        }
-        if hit(ctrl, Key::Num1) {
-            self.fit = false;
-            self.zoom = 1.0;
-            self.pan = Vec2::ZERO;
-        }
-        if typing {
-            return;
-        }
-        if hit(ctrl | Modifiers::SHIFT, Key::Z) || hit(ctrl, Key::Y) {
-            self.ed.redo();
-        } else if hit(ctrl, Key::Z) {
-            self.ed.undo();
-        }
-        if hit(ctrl, Key::D)
-            && let Some(id) = self.selected
-        {
-            self.selected = self.ed.duplicate(id);
-        }
-        if hit(ctrl, Key::V) {
-            self.paste_image();
-        }
-        if hit(Modifiers::NONE, Key::T) {
-            self.add_text();
-        }
-        if hit(Modifiers::NONE, Key::Delete) || hit(Modifiers::NONE, Key::Backspace) {
-            self.delete_selected();
-        }
-        if hit(Modifiers::NONE, Key::Escape) {
-            self.selected = None;
-        }
-        if hit(Modifiers::NONE, Key::G) {
-            self.guides = !self.guides;
-        }
-        for (key, dx, dy) in [
-            (Key::ArrowLeft, -1.0, 0.0),
-            (Key::ArrowRight, 1.0, 0.0),
-            (Key::ArrowUp, 0.0, -1.0),
-            (Key::ArrowDown, 0.0, 1.0),
-        ] {
-            if hit(Modifiers::NONE, key) {
-                self.nudge(dx, dy);
-            }
-            if hit(Modifiers::SHIFT, key) {
-                self.nudge(dx * 10.0, dy * 10.0);
+        Purpose::Export => {
+            let Some(d) = st.doc() else { return };
+            match file::export_image(d.ed.doc(), &paths[0], 92) {
+                Ok(()) => st.say("Imagem exportada"),
+                Err(e) => st.warn(e.to_string()),
             }
         }
-        if let Some(id) = self.selected {
-            if hit(Modifiers::NONE, Key::CloseBracket) {
-                self.ed.reorder(id, MoveTo::Up);
+        Purpose::ExportJpg => {
+            let Some(d) = st.doc() else { return };
+            let img = pawpaint_core::composite::flatten(d.ed.doc());
+            let (bytes, q) = file::jpeg_under(&img, YOUTUBE_MAX);
+            let mut p = paths[0].clone();
+            if p.extension().is_none() {
+                p.set_extension("jpg");
             }
-            if hit(Modifiers::NONE, Key::OpenBracket) {
-                self.ed.reorder(id, MoveTo::Down);
+            match std::fs::write(&p, &bytes) {
+                Ok(()) => st.say(format!(
+                    "JPG exportado: {} KB, qualidade {q} (limite 2 MB)",
+                    bytes.len() / 1000
+                )),
+                Err(e) => st.warn(e.to_string()),
             }
         }
     }
+}
 
-    // ---------------------------------------------------------------- menus
+fn save_to(st: &mut State, path: PathBuf) {
+    let cur = st.cur;
+    if let Some(d) = st.docs.get_mut(cur) {
+        if d.float.is_some() {
+            canvas::commit_float(d);
+        }
+        match file::save_project(&d.ed, &path) {
+            Ok(()) => {
+                d.ed.mark_saved();
+                d.path = Some(path);
+                st.say("Projeto salvo");
+            }
+            Err(e) => st.warn(e.to_string()),
+        }
+    }
+}
 
+fn save(st: &mut State) {
+    match st.doc().map(|d| d.path.clone()) {
+        Some(Some(p)) => save_to(st, p),
+        Some(None) => ask(st, Purpose::SaveAs),
+        None => {}
+    }
+}
+
+fn open_filter(st: &mut State, kind: FilterKind) {
+    let (a, b, c) = match kind {
+        FilterKind::BrightnessContrast => (0.0, 0.0, 0.0),
+        FilterKind::HueSaturation => (0.0, 0.0, 0.0),
+        FilterKind::Levels => (0.0, 1.0, 1.0),
+        FilterKind::Threshold => (0.5, 0.0, 0.0),
+        FilterKind::Posterize => (4.0, 0.0, 0.0),
+        FilterKind::Blur => (4.0, 0.0, 0.0),
+        FilterKind::Sharpen => (1.0, 1.5, 0.0),
+        FilterKind::Pixelate => (8.0, 0.0, 0.0),
+        FilterKind::Noise => (0.2, 0.0, 0.0),
+    };
+    st.dialog = Some(Dialog::Filter {
+        kind,
+        a,
+        b,
+        c,
+        preview: true,
+        applied: false,
+    });
+}
+
+fn filter_of(kind: &FilterKind, a: f32, b: f32, c: f32) -> (Filter, &'static str) {
+    match kind {
+        FilterKind::BrightnessContrast => (
+            Filter::BrightnessContrast {
+                brightness: a,
+                contrast: b,
+            },
+            "Brilho e contraste",
+        ),
+        FilterKind::HueSaturation => (
+            Filter::HueSaturation {
+                hue: a,
+                saturation: b,
+                lightness: c,
+            },
+            "Matiz e saturação",
+        ),
+        FilterKind::Levels => (
+            Filter::Levels {
+                black: a,
+                white: b,
+                gamma: c,
+            },
+            "Níveis",
+        ),
+        FilterKind::Threshold => (Filter::Threshold(a), "Limiar"),
+        FilterKind::Posterize => (Filter::Posterize(a as u32), "Posterizar"),
+        FilterKind::Blur => (Filter::GaussianBlur(a), "Desfoque"),
+        FilterKind::Sharpen => (
+            Filter::Sharpen {
+                amount: a,
+                radius: b,
+            },
+            "Nitidez",
+        ),
+        FilterKind::Pixelate => (Filter::Pixelate(a as u32), "Pixelar"),
+        FilterKind::Noise => (Filter::Noise(a), "Ruído"),
+    }
+}
+
+fn quick_filter(st: &mut State, f: Filter, label: &'static str) {
+    if let Some(d) = st.doc_mut() {
+        let id = d.active;
+        if let Err(e) = d.ed.apply_filter(id, &f, label) {
+            st.warn(e.to_string());
+        }
+    }
+}
+
+// ---------------------------------------------------------------- menus
+
+impl PaintApp {
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         let item = |ui: &mut egui::Ui, label: &str, keys: &str, enabled: bool| {
             ui.add_enabled(
@@ -476,1121 +528,757 @@ impl PaintApp {
             )
             .clicked()
         };
+        let st = &mut self.st;
+        let has_doc = !st.docs.is_empty();
+        let has_sel = st.doc().is_some_and(|d| d.ed.doc().selection.is_some());
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("Arquivo", |ui| {
-                if item(ui, "Nova…", "Ctrl+N", true) {
+                if item(ui, "Novo…", "Ctrl+N", true) {
                     ui.close();
-                    self.guard_new();
+                    st.dialog = Some(Dialog::New {
+                        w: 1920,
+                        h: 1080,
+                        bg: 0,
+                        color: [255, 255, 255],
+                    });
                 }
                 if item(ui, "Abrir…", "Ctrl+O", true) {
                     ui.close();
-                    self.ask(Purpose::Open);
+                    ask(st, Purpose::Open);
                 }
-                if item(ui, "Salvar", "Ctrl+S", true) {
+                if item(ui, "Importar como camada…", "", has_doc) {
                     ui.close();
-                    self.save();
-                }
-                if item(ui, "Salvar como…", "Ctrl+Shift+S", true) {
-                    ui.close();
-                    self.ask(Purpose::SaveAs);
+                    ask(st, Purpose::ImportLayer);
                 }
                 ui.separator();
-                if item(ui, "Importar imagem…", "Ctrl+I", true) {
+                if item(ui, "Salvar", "Ctrl+S", has_doc) {
                     ui.close();
-                    self.ask(Purpose::Import);
+                    save(st);
                 }
-                if item(ui, "Colar imagem", "Ctrl+V", true) {
+                if item(ui, "Salvar como…", "Ctrl+Shift+S", has_doc) {
                     ui.close();
-                    self.paste_image();
+                    ask(st, Purpose::SaveAs);
                 }
                 ui.separator();
                 if item(
                     ui,
-                    "Exportar JPG para o YouTube (até 2 MB)…",
-                    "Ctrl+E",
-                    true,
+                    "Exportar imagem… (PNG, JPG, WebP)",
+                    "Ctrl+Shift+E",
+                    has_doc,
                 ) {
                     ui.close();
-                    self.ask(Purpose::ExportJpg);
+                    ask(st, Purpose::Export);
                 }
-                if item(ui, "Exportar PNG…", "Ctrl+Shift+E", true) {
+                if item(ui, "Exportar JPG com até 2 MB…", "", has_doc) {
                     ui.close();
-                    self.ask(Purpose::ExportPng);
+                    ask(st, Purpose::ExportJpg);
                 }
                 ui.separator();
+                if item(ui, "Fechar documento", "Ctrl+W", has_doc) {
+                    ui.close();
+                    request_close_doc(st, st.cur);
+                }
                 if item(ui, "Sair", "", true) {
                     ui.close();
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
             ui.menu_button("Editar", |ui| {
-                let undo = self
-                    .ed
-                    .undo_label()
-                    .map_or("Desfazer".to_string(), |l| format!("Desfazer {l}"));
-                if item(ui, &undo, "Ctrl+Z", self.ed.undo_label().is_some()) {
+                let (undo, redo) = st
+                    .doc()
+                    .map_or((None, None), |d| (d.ed.undo_label(), d.ed.redo_label()));
+                if item(
+                    ui,
+                    &undo.map_or("Desfazer".to_string(), |l| format!("Desfazer {l}")),
+                    "Ctrl+Z",
+                    undo.is_some(),
+                ) {
                     ui.close();
-                    self.ed.undo();
-                }
-                let redo = self
-                    .ed
-                    .redo_label()
-                    .map_or("Refazer".to_string(), |l| format!("Refazer {l}"));
-                if item(ui, &redo, "Ctrl+Y", self.ed.redo_label().is_some()) {
-                    ui.close();
-                    self.ed.redo();
-                }
-                ui.separator();
-                let sel = self.selected;
-                if item(ui, "Duplicar camada", "Ctrl+D", sel.is_some()) {
-                    ui.close();
-                    if let Some(id) = sel {
-                        self.selected = self.ed.duplicate(id);
+                    if let Some(d) = st.doc_mut() {
+                        d.ed.undo();
                     }
                 }
-                if item(ui, "Apagar camada", "Delete", sel.is_some()) {
+                if item(
+                    ui,
+                    &redo.map_or("Refazer".to_string(), |l| format!("Refazer {l}")),
+                    "Ctrl+Shift+Z",
+                    redo.is_some(),
+                ) {
                     ui.close();
-                    self.delete_selected();
+                    if let Some(d) = st.doc_mut() {
+                        d.ed.redo();
+                    }
+                }
+                ui.separator();
+                if item(ui, "Recortar", "Ctrl+X", has_doc) {
+                    ui.close();
+                    edit_cut(st);
+                }
+                if item(ui, "Copiar", "Ctrl+C", has_doc) {
+                    ui.close();
+                    edit_copy(st, false);
+                }
+                if item(ui, "Copiar tudo (mesclado)", "Ctrl+Shift+C", has_doc) {
+                    ui.close();
+                    edit_copy(st, true);
+                }
+                if item(
+                    ui,
+                    "Colar como camada nova",
+                    "Ctrl+V",
+                    st.clipboard.is_some() && has_doc,
+                ) {
+                    ui.close();
+                    edit_paste(st);
+                }
+                ui.separator();
+                if item(ui, "Preencher com a cor da frente", "Backspace", has_doc) {
+                    ui.close();
+                    edit_fill(st, false);
+                }
+                if item(
+                    ui,
+                    "Preencher com a cor de fundo",
+                    "Shift+Backspace",
+                    has_doc,
+                ) {
+                    ui.close();
+                    edit_fill(st, true);
+                }
+                if item(ui, "Limpar", "Delete", has_doc) {
+                    ui.close();
+                    edit_clear(st);
+                }
+            });
+            ui.menu_button("Selecionar", |ui| {
+                if item(ui, "Tudo", "Ctrl+A", has_doc) {
+                    ui.close();
+                    if let Some(d) = st.doc_mut() {
+                        d.ed.select_all();
+                    }
+                }
+                if item(ui, "Nenhum", "Ctrl+Shift+A", has_sel) {
+                    ui.close();
+                    if let Some(d) = st.doc_mut() {
+                        d.ed.deselect();
+                    }
+                }
+                if item(ui, "Inverter", "Ctrl+Shift+I", has_doc) {
+                    ui.close();
+                    if let Some(d) = st.doc_mut() {
+                        d.ed.invert_selection();
+                    }
+                }
+                ui.separator();
+                if item(ui, "Suavizar borda…", "", has_sel) {
+                    ui.close();
+                    st.dialog = Some(Dialog::Feather(4));
+                }
+                if item(ui, "Expandir ou contrair…", "", has_sel) {
+                    ui.close();
+                    st.dialog = Some(Dialog::Grow(3));
+                }
+            });
+            ui.menu_button("Imagem", |ui| {
+                if item(ui, "Tamanho da tela…", "", has_doc) {
+                    ui.close();
+                    if let Some(d) = st.doc() {
+                        st.dialog = Some(Dialog::CanvasSize {
+                            w: d.ed.doc().width,
+                            h: d.ed.doc().height,
+                            anchor: 4,
+                        });
+                    }
+                }
+                if item(ui, "Escalar imagem…", "", has_doc) {
+                    ui.close();
+                    if let Some(d) = st.doc() {
+                        let (w, h) = (d.ed.doc().width, d.ed.doc().height);
+                        st.dialog = Some(Dialog::ScaleImage {
+                            w,
+                            h,
+                            keep: true,
+                            ratio: w as f32 / h as f32,
+                        });
+                    }
+                }
+                if item(ui, "Cortar para a seleção", "", has_sel) {
+                    ui.close();
+                    crop_to_selection(st);
+                }
+                ui.separator();
+                for (label, cw, horizontal, is_flip) in [
+                    ("Girar 90° horário", true, false, false),
+                    ("Girar 90° anti-horário", false, false, false),
+                    ("Espelhar na horizontal", false, true, true),
+                    ("Espelhar na vertical", false, false, true),
+                ] {
+                    if item(ui, label, "", has_doc) {
+                        ui.close();
+                        if let Some(d) = st.doc_mut() {
+                            commit_if_floating(d);
+                            if is_flip {
+                                d.ed.flip_image(horizontal);
+                            } else {
+                                d.ed.rotate_image(cw);
+                            }
+                            d.fit = true;
+                        }
+                    }
+                }
+                ui.separator();
+                if item(ui, "Achatar imagem", "", has_doc) {
+                    ui.close();
+                    if let Some(d) = st.doc_mut() {
+                        commit_if_floating(d);
+                        d.ed.flatten();
+                        d.active = d.ed.doc().layers.last().map_or(0, |l| l.id);
+                    }
                 }
             });
             ui.menu_button("Camada", |ui| {
-                if item(ui, "Novo texto", "T", true) {
+                if item(ui, "Nova camada", "Ctrl+Shift+N", has_doc) {
                     ui.close();
-                    self.add_text();
+                    new_layer(st);
                 }
-                if item(ui, "Novo retângulo", "", true) {
+                if item(ui, "Duplicar", "Ctrl+J", has_doc) {
                     ui.close();
-                    self.selected = Some(self.ed.add_shape(ShapeKind::Rect));
+                    dup_layer(st);
                 }
-                if item(ui, "Nova elipse", "", true) {
+                if item(ui, "Unir com a de baixo", "Ctrl+E", has_doc) {
                     ui.close();
-                    self.selected = Some(self.ed.add_shape(ShapeKind::Ellipse));
+                    merge_down(st);
+                }
+                if item(ui, "Espelhar camada", "", has_doc) {
+                    ui.close();
+                    if let Some(d) = st.doc_mut() {
+                        let id = d.active;
+                        let _ = d.ed.flip_layer(id, true);
+                    }
+                }
+                if item(ui, "Propriedades…", "", has_doc) {
+                    ui.close();
+                    if let Some(d) = st.doc() {
+                        st.dialog = Some(Dialog::LayerProps(d.active));
+                    }
                 }
                 ui.separator();
-                let sel = self.selected;
-                for (label, keys, to) in [
-                    ("Trazer para frente", "]", MoveTo::Up),
-                    ("Enviar para trás", "[", MoveTo::Down),
-                    ("Para o topo", "", MoveTo::Top),
-                    ("Para o fundo", "", MoveTo::Bottom),
+                for (label, to) in [
+                    ("Trazer para frente", MoveTo::Up),
+                    ("Enviar para trás", MoveTo::Down),
+                    ("Para o topo", MoveTo::Top),
+                    ("Para o fundo", MoveTo::Bottom),
                 ] {
-                    if item(ui, label, keys, sel.is_some()) {
+                    if item(ui, label, "", has_doc) {
                         ui.close();
-                        if let Some(id) = sel {
-                            self.ed.reorder(id, to);
+                        if let Some(d) = st.doc_mut() {
+                            let id = d.active;
+                            d.ed.move_layer(id, to);
                         }
                     }
                 }
-                if item(ui, "Espelhar na horizontal", "", sel.is_some())
-                    && let Some(id) = sel
-                {
+            });
+            ui.menu_button("Filtro", |ui| {
+                ui.label(RichText::new("Ajustar").small().weak());
+                for (label, kind) in [
+                    ("Brilho e contraste…", FilterKind::BrightnessContrast),
+                    (
+                        "Matiz, saturação e luminosidade…",
+                        FilterKind::HueSaturation,
+                    ),
+                    ("Níveis…", FilterKind::Levels),
+                    ("Limiar…", FilterKind::Threshold),
+                    ("Posterizar…", FilterKind::Posterize),
+                ] {
+                    if item(ui, label, "", has_doc) {
+                        ui.close();
+                        open_filter(st, kind);
+                    }
+                }
+                if item(ui, "Inverter cores", "Ctrl+I", has_doc) {
                     ui.close();
-                    self.ed
-                        .edit(id, "flip", "Espelhar", |l| l.flip_h = !l.flip_h);
-                    self.ed.end_change();
+                    quick_filter(st, Filter::Invert, "Inverter cores");
+                }
+                if item(ui, "Dessaturar", "Ctrl+Shift+U", has_doc) {
+                    ui.close();
+                    quick_filter(st, Filter::Desaturate, "Dessaturar");
+                }
+                ui.separator();
+                ui.label(RichText::new("Efeitos").small().weak());
+                for (label, kind) in [
+                    ("Desfoque gaussiano…", FilterKind::Blur),
+                    ("Nitidez…", FilterKind::Sharpen),
+                    ("Pixelar…", FilterKind::Pixelate),
+                    ("Ruído…", FilterKind::Noise),
+                ] {
+                    if item(ui, label, "", has_doc) {
+                        ui.close();
+                        open_filter(st, kind);
+                    }
+                }
+                if item(ui, "Detectar bordas", "", has_doc) {
+                    ui.close();
+                    quick_filter(st, Filter::EdgeDetect, "Detectar bordas");
                 }
             });
             ui.menu_button("Ver", |ui| {
-                if item(ui, "Ajustar à janela", "Ctrl+0", true) {
+                if item(ui, "Ajustar à janela", "Ctrl+0", has_doc) {
                     ui.close();
-                    self.fit = true;
-                    self.pan = Vec2::ZERO;
+                    if let Some(d) = st.doc_mut() {
+                        d.fit = true;
+                        d.pan = egui::Vec2::ZERO;
+                    }
                 }
-                if item(ui, "Tamanho real (100%)", "Ctrl+1", true) {
+                if item(ui, "Tamanho real (100%)", "Ctrl+1", has_doc) {
                     ui.close();
-                    self.fit = false;
-                    self.zoom = 1.0;
-                    self.pan = Vec2::ZERO;
+                    zoom_to(st, 1.0);
                 }
-                ui.separator();
-                let label = if self.guides {
-                    "Esconder guias de segurança"
-                } else {
-                    "Mostrar guias de segurança"
-                };
-                if item(ui, label, "G", true) {
+                if item(ui, "Ampliar", "+", has_doc) {
                     ui.close();
-                    self.guides = !self.guides;
+                    zoom_by(st, 1.25);
+                }
+                if item(ui, "Reduzir", "-", has_doc) {
+                    ui.close();
+                    zoom_by(st, 0.8);
+                }
+            });
+            ui.menu_button("Configurações", |ui| {
+                ui.menu_button("Dockers", |ui| {
+                    for p in Panel::ALL.into_iter().filter(|p| *p != Panel::Canvas) {
+                        let on = self.dock.find_tab(&p).is_some();
+                        let mut v = on;
+                        if ui.checkbox(&mut v, p.title()).changed() {
+                            st.dock_commands.push(DockCommand::Toggle(p));
+                        }
+                    }
+                });
+                if ui.button("Redefinir layout dos dockers").clicked() {
+                    ui.close();
+                    st.dock_commands.push(DockCommand::Reset);
                 }
             });
         });
     }
 
-    // ---------------------------------------------------------------- camadas
-
-    fn layers_panel(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        ui.label(RichText::new("Camadas").strong());
-        ui.add_space(4.0);
-        if self.ed.doc().layers.is_empty() {
-            ui.label(
-                RichText::new("Importe uma imagem (Ctrl+I), arraste um arquivo para cá ou aperte T para pôr um texto.")
-                    .weak()
-                    .small(),
-            );
-        }
-        let ids: Vec<LayerId> = self.ed.doc().layers.iter().rev().map(|l| l.id).collect();
-        let list_h = (ui.available_height() - 330.0).max(100.0);
-        egui::ScrollArea::vertical()
-            .max_height(list_h)
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                for id in ids {
-                    self.layer_row(ui, id);
-                }
-            });
-        ui.add_space(8.0);
-        ui.separator();
-        self.previews_ui(ui);
-    }
-
-    fn layer_row(&mut self, ui: &mut egui::Ui, id: LayerId) {
-        let Some(layer) = self.ed.doc().layer(id).cloned() else {
-            return;
-        };
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
-        let selected = self.selected == Some(id);
-        let p = ui.painter();
-        if selected {
-            p.rect_filled(rect, 3.0, theme::ACCENT.gamma_multiply(0.35));
-        } else if resp.hovered() {
-            p.rect_filled(rect, 3.0, theme::BAR_LIGHT);
-        }
-        // Olho (visível) e cadeado.
-        let eye = Rect::from_min_size(rect.min + vec2(4.0, 3.0), vec2(20.0, 20.0));
-        let lock = Rect::from_min_size(rect.right_top() + vec2(-24.0, 3.0), vec2(20.0, 20.0));
-        let eye_resp = ui.interact(eye, ui.id().with(("eye", id)), Sense::click());
-        let lock_resp = ui.interact(lock, ui.id().with(("lock", id)), Sense::click());
-        let p = ui.painter();
-        // Olho: cheio = visível, só contorno = escondido. Cadeado: desenhado, só aparece travado.
-        let ec = eye.center();
-        if layer.visible {
-            p.circle_filled(ec, 5.0, theme::TEXT);
-        } else {
-            p.circle_stroke(ec, 5.0, Stroke::new(1.5, theme::TEXT_DIM));
-        }
-        if layer.locked {
-            let lc = lock.center();
-            let body = Rect::from_center_size(lc + vec2(0.0, 2.0), vec2(10.0, 7.0));
-            p.rect_filled(body, 1.5, theme::TEXT);
-            let st = Stroke::new(1.5, theme::TEXT);
-            p.line_segment(
-                [pos2(lc.x - 3.0, lc.y - 1.0), pos2(lc.x - 3.0, lc.y - 4.0)],
-                st,
-            );
-            p.line_segment(
-                [pos2(lc.x + 3.0, lc.y - 1.0), pos2(lc.x + 3.0, lc.y - 4.0)],
-                st,
-            );
-            p.line_segment(
-                [pos2(lc.x - 3.0, lc.y - 4.0), pos2(lc.x + 3.0, lc.y - 4.0)],
-                st,
-            );
-        }
-        // Ícone do tipo.
-        let icon = Rect::from_min_size(rect.min + vec2(30.0, 5.0), vec2(16.0, 16.0));
-        match &layer.kind {
-            Kind::Text(_) => {
-                p.text(
-                    icon.center(),
-                    Align2::CENTER_CENTER,
-                    "T",
-                    theme::text(13.0),
-                    theme::TEXT,
-                );
-            }
-            Kind::Shape(s) => match s.kind {
-                ShapeKind::Rect => {
-                    p.rect_filled(icon.shrink(1.0), 2.0, to_color(s.fill));
-                }
-                ShapeKind::Ellipse => {
-                    p.circle_filled(icon.center(), 7.0, to_color(s.fill));
-                }
-            },
-            Kind::Image { .. } => {
-                p.rect_stroke(
-                    icon.shrink(1.0),
-                    2.0,
-                    Stroke::new(1.5, theme::TEXT),
-                    egui::StrokeKind::Inside,
-                );
-                p.circle_filled(icon.center() - vec2(2.0, 2.0), 2.0, theme::TEXT);
-            }
-        }
-        let name_pos = rect.min + vec2(54.0, 13.0);
-        let renaming = matches!(&self.renaming, Some((rid, _) ) if *rid == id);
-        if renaming {
-            let mut done = false;
-            if let Some((_, text)) = &mut self.renaming {
-                let r = ui.put(
-                    Rect::from_min_size(
-                        rect.min + vec2(52.0, 2.0),
-                        vec2(rect.width() - 86.0, 22.0),
-                    ),
-                    egui::TextEdit::singleline(text),
-                );
-                r.request_focus();
-                done = r.lost_focus();
-            }
-            if done && let Some((rid, text)) = self.renaming.take() {
-                let name = text.trim().to_string();
-                if !name.is_empty() {
-                    self.ed
-                        .edit(rid, "name", "Renomear camada", |l| l.name = name);
-                    self.ed.end_change();
-                }
-            }
-        } else {
-            ui.painter()
-                .with_clip_rect(rect.shrink2(vec2(54.0, 0.0)).intersect(rect))
-                .text(
-                    name_pos,
-                    Align2::LEFT_CENTER,
-                    &layer.name,
-                    theme::text(12.5),
-                    if layer.visible {
-                        theme::TEXT
-                    } else {
-                        theme::TEXT_DIM
-                    },
-                );
-        }
-        if eye_resp.clicked() {
-            self.ed
-                .edit(id, "vis", "Mostrar/esconder", |l| l.visible = !l.visible);
-            self.ed.end_change();
-        } else if lock_resp.clicked() {
-            self.ed.edit(id, "lock", "Travar", |l| l.locked = !l.locked);
-            self.ed.end_change();
-        } else if resp.clicked() {
-            self.selected = Some(id);
-        }
-        if resp.double_clicked() {
-            self.renaming = Some((id, layer.name.clone()));
-        }
-        resp.context_menu(|ui| {
-            self.selected = Some(id);
-            if ui.button("Renomear").clicked() {
-                ui.close();
-                self.renaming = Some((id, layer.name.clone()));
-            }
-            if ui.button("Duplicar").clicked() {
-                ui.close();
-                self.selected = self.ed.duplicate(id);
-            }
-            if ui.button("Trazer para frente").clicked() {
-                ui.close();
-                self.ed.reorder(id, MoveTo::Up);
-            }
-            if ui.button("Enviar para trás").clicked() {
-                ui.close();
-                self.ed.reorder(id, MoveTo::Down);
-            }
-            if ui.button("Apagar").clicked() {
-                ui.close();
-                self.selected = None;
-                self.ed.delete(id);
-            }
-        });
-    }
-
-    /// A thumbnail como o espectador vê: grande na busca, pequena na lista, com a hora do vídeo
-    /// por cima do canto (onde o texto não pode ficar).
-    fn previews_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        ui.label(RichText::new("Como vai aparecer").strong());
-        ui.add_space(4.0);
-        let Some(big) = self.previews.first().cloned() else {
-            return;
-        };
-        let small = self.previews.get(1).cloned();
-        let aspect = self.ed.doc().width as f32 / self.ed.doc().height as f32;
-        let width = ui.available_width() - 8.0;
-        let draw = |ui: &mut egui::Ui, tex: &egui::TextureHandle, w: f32| {
-            let size = vec2(w, w / aspect);
-            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-            ui.painter().image(
-                tex.id(),
-                rect,
-                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
-            // Selo de duração, como no YouTube.
-            let badge = Rect::from_min_size(
-                rect.right_bottom() - vec2((w * 0.17).max(26.0) + 3.0, (w * 0.075).max(12.0) + 3.0),
-                vec2((w * 0.17).max(26.0), (w * 0.075).max(12.0)),
-            );
-            ui.painter()
-                .rect_filled(badge, 2.0, Color32::from_black_alpha(210));
-            ui.painter().text(
-                badge.center(),
-                Align2::CENTER_CENTER,
-                "12:34",
-                theme::text((w * 0.05).clamp(8.0, 11.0)),
-                Color32::WHITE,
-            );
-        };
-        draw(ui, &big, width.min(260.0));
-        if let Some(small) = small {
+    /// Barra de cima com as opções do pincel (como a do Krita).
+    fn brush_bar(&mut self, ui: &mut egui::Ui) {
+        let st = &mut self.st;
+        ui.horizontal_centered(|ui| {
             ui.add_space(4.0);
-            draw(ui, &small, 120.0);
-        }
-    }
-
-    // ---------------------------------------------------------------- propriedades
-
-    fn properties_panel(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        let Some(layer) = self.layer().cloned() else {
-            self.background_ui(ui);
-            return;
-        };
-        let id = layer.id;
-        ui.label(RichText::new(&layer.name).strong());
-        ui.add_space(4.0);
-        egui::ScrollArea::vertical()
-            .auto_shrink(false)
-            .show(ui, |ui| {
+            ui.label(RichText::new(st.tool.label()).strong());
+            ui.separator();
+            if st.tool.paints() || st.tool == Tool::Eraser || st.tool == Tool::Text {
+                let name = st.brush.name.clone();
+                egui::ComboBox::from_id_salt("bar-preset")
+                    .selected_text(name)
+                    .width(120.0)
+                    .show_ui(ui, |ui| {
+                        let mut pick = None;
+                        for (i, b) in st.presets.iter().enumerate() {
+                            if ui
+                                .selectable_label(b.name == st.brush.name, &b.name)
+                                .clicked()
+                            {
+                                pick = Some(i);
+                            }
+                        }
+                        if let Some(i) = pick {
+                            st.brush = st.presets[i].clone();
+                        }
+                    });
+                let mut mode = st.blend;
+                egui::ComboBox::from_id_salt("bar-blend")
+                    .selected_text(mode.label())
+                    .width(110.0)
+                    .show_ui(ui, |ui| {
+                        for m in BlendMode::ALL {
+                            ui.selectable_value(&mut mode, m, m.label());
+                        }
+                    });
+                st.blend = mode;
+                ui.separator();
+                let mut o = st.brush.opacity * 100.0;
+                ui.label("Opacidade");
+                ui.add(
+                    egui::Slider::new(&mut o, 1.0..=100.0)
+                        .suffix("%")
+                        .trailing_fill(true),
+                );
+                st.brush.opacity = o / 100.0;
+                ui.label("Tamanho");
+                ui.add(
+                    egui::Slider::new(&mut st.brush.size, 1.0..=500.0)
+                        .suffix(" px")
+                        .logarithmic(true)
+                        .trailing_fill(true),
+                );
+                let mut f = st.brush.flow * 100.0;
+                ui.label("Fluxo");
+                ui.add(
+                    egui::Slider::new(&mut f, 1.0..=100.0)
+                        .suffix("%")
+                        .trailing_fill(true),
+                );
+                st.brush.flow = f / 100.0;
+                ui.separator();
+                let mut erasing = st.tool == Tool::Eraser;
+                if ui
+                    .toggle_value(&mut erasing, "Borracha")
+                    .on_hover_text("Alterna borracha (E)")
+                    .changed()
+                {
+                    set_tool(st, if erasing { Tool::Eraser } else { Tool::Brush });
+                }
+            } else {
                 ui.label(
-                    RichText::new("Posição e tamanho")
-                        .small()
-                        .color(theme::TEXT_DIM),
+                    RichText::new("Opções no docker \"Opções da ferramenta\"")
+                        .weak()
+                        .small(),
                 );
-                let mut l = layer.clone();
-                let mut changed = false;
-                egui::Grid::new("xform").num_columns(2).show(ui, |ui| {
-                    ui.label("X");
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut l.x).speed(1.0).suffix(" px"))
-                        .changed();
-                    ui.end_row();
-                    ui.label("Y");
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut l.y).speed(1.0).suffix(" px"))
-                        .changed();
-                    ui.end_row();
-                    ui.label("Escala");
-                    let mut pct = l.scale * 100.0;
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut pct)
-                                .speed(0.5)
-                                .range(2.0..=1600.0)
-                                .suffix(" %"),
-                        )
-                        .changed()
-                    {
-                        l.scale = pct / 100.0;
-                        changed = true;
-                    }
-                    ui.end_row();
-                    ui.label("Giro");
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut l.rotation).speed(0.5).suffix("°"))
-                        .changed();
-                    ui.end_row();
-                    ui.label("Opacidade");
-                    let mut pct = l.opacity * 100.0;
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut pct)
-                                .speed(0.5)
-                                .range(0.0..=100.0)
-                                .suffix(" %"),
-                        )
-                        .changed()
-                    {
-                        l.opacity = pct / 100.0;
-                        changed = true;
-                    }
-                    ui.end_row();
-                });
-                ui.add_space(8.0);
-                match &mut l.kind {
-                    Kind::Text(t) => {
-                        ui.label(RichText::new("Texto").small().color(theme::TEXT_DIM));
-                        let te = ui.add(
-                            egui::TextEdit::multiline(&mut t.text)
-                                .desired_rows(3)
-                                .desired_width(f32::INFINITY),
-                        );
-                        if self.focus_text {
-                            te.request_focus();
-                            self.focus_text = false;
-                        }
-                        changed |= te.changed();
-                        if te.lost_focus() {
-                            self.ed.end_change();
-                        }
-                        egui::Grid::new("textprops").num_columns(2).show(ui, |ui| {
-                            ui.label("Fonte");
-                            if self.fonts.is_empty() {
-                                self.fonts = pawpaint_render::font_families();
-                            }
-                            egui::ComboBox::from_id_salt("font")
-                                .selected_text(&t.font)
-                                .width(170.0)
-                                .show_ui(ui, |ui| {
-                                    for f in ["sans-serif", "serif", "monospace"] {
-                                        changed |= ui
-                                            .selectable_value(&mut t.font, f.to_string(), f)
-                                            .changed();
-                                    }
-                                    ui.separator();
-                                    for f in &self.fonts {
-                                        changed |= ui
-                                            .selectable_value(&mut t.font, f.clone(), f)
-                                            .changed();
-                                    }
-                                });
-                            ui.end_row();
-                            ui.label("Tamanho");
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut t.size)
-                                        .speed(1.0)
-                                        .range(8.0..=800.0),
-                                )
-                                .changed();
-                            ui.end_row();
-                            ui.label("Estilo");
-                            ui.horizontal(|ui| {
-                                changed |= ui.toggle_value(&mut t.bold, "Negrito").changed();
-                                changed |= ui.toggle_value(&mut t.italic, "Itálico").changed();
-                            });
-                            ui.end_row();
-                            ui.label("Alinhar");
-                            ui.horizontal(|ui| {
-                                for (a, name) in [
-                                    (TextAlign::Left, "Esq."),
-                                    (TextAlign::Center, "Centro"),
-                                    (TextAlign::Right, "Dir."),
-                                ] {
-                                    changed |= ui.selectable_value(&mut t.align, a, name).changed();
-                                }
-                            });
-                            ui.end_row();
-                            ui.label("Cor");
-                            changed |= color_button(ui, &mut t.color, false);
-                            ui.end_row();
-                            ui.label("Entrelinha");
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut t.line_spacing)
-                                        .speed(0.01)
-                                        .range(0.5..=3.0),
-                                )
-                                .changed();
-                            ui.end_row();
-                        });
-                    }
-                    Kind::Shape(s) => {
-                        ui.label(RichText::new("Forma").small().color(theme::TEXT_DIM));
-                        egui::Grid::new("shapeprops").num_columns(2).show(ui, |ui| {
-                            ui.label("Largura");
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut s.w)
-                                        .speed(1.0)
-                                        .range(4.0..=4000.0),
-                                )
-                                .changed();
-                            ui.end_row();
-                            ui.label("Altura");
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut s.h)
-                                        .speed(1.0)
-                                        .range(4.0..=4000.0),
-                                )
-                                .changed();
-                            ui.end_row();
-                            ui.label("Preenchimento");
-                            changed |= color_button(ui, &mut s.fill, true);
-                            ui.end_row();
-                            ui.label("Borda");
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut s.stroke_width)
-                                        .speed(0.5)
-                                        .range(0.0..=200.0),
-                                )
-                                .changed();
-                            ui.end_row();
-                            if s.stroke_width > 0.0 {
-                                ui.label("Cor da borda");
-                                changed |= color_button(ui, &mut s.stroke, true);
-                                ui.end_row();
-                            }
-                            if s.kind == ShapeKind::Rect {
-                                ui.label("Cantos");
-                                changed |= ui
-                                    .add(
-                                        egui::DragValue::new(&mut s.radius)
-                                            .speed(0.5)
-                                            .range(0.0..=1000.0),
-                                    )
-                                    .changed();
-                                ui.end_row();
-                            }
-                        });
-                    }
-                    Kind::Image { .. } => {
-                        ui.label(RichText::new("Imagem").small().color(theme::TEXT_DIM));
-                        let mut remove = l.adjust.chroma.is_some();
-                        if ui
-                            .checkbox(&mut remove, "Tirar uma cor (fundo verde, branco…)")
-                            .changed()
-                        {
-                            l.adjust.chroma = remove.then(|| Chroma {
-                                color: Rgba::rgb(0, 255, 0),
-                                tolerance: 0.35,
-                                softness: 0.2,
-                            });
-                            changed = true;
-                        }
-                        if let Some(ch) = &mut l.adjust.chroma {
-                            egui::Grid::new("chroma").num_columns(2).show(ui, |ui| {
-                                ui.label("Cor");
-                                changed |= color_button(ui, &mut ch.color, false);
-                                ui.end_row();
-                                ui.label("Tolerância");
-                                changed |= ui
-                                    .add(
-                                        egui::Slider::new(&mut ch.tolerance, 0.0..=1.0)
-                                            .show_value(false),
-                                    )
-                                    .changed();
-                                ui.end_row();
-                                ui.label("Suavizar");
-                                changed |= ui
-                                    .add(
-                                        egui::Slider::new(&mut ch.softness, 0.0..=1.0)
-                                            .show_value(false),
-                                    )
-                                    .changed();
-                                ui.end_row();
-                            });
-                        }
-                    }
-                }
-                ui.add_space(8.0);
-                ui.label(RichText::new("Contorno").small().color(theme::TEXT_DIM));
-                let mut has = l.outline.is_some();
-                if ui.checkbox(&mut has, "Contorno de adesivo").changed() {
-                    l.outline = has.then_some(Outline {
-                        width: 10.0,
-                        color: Rgba::BLACK,
-                    });
-                    changed = true;
-                }
-                if let Some(o) = &mut l.outline {
-                    ui.horizontal(|ui| {
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut o.width)
-                                    .speed(0.5)
-                                    .range(0.0..=200.0)
-                                    .suffix(" px"),
-                            )
-                            .changed();
-                        changed |= color_button(ui, &mut o.color, false);
-                    });
-                }
-                let mut has = l.shadow.is_some();
-                if ui.checkbox(&mut has, "Sombra").changed() {
-                    l.shadow = has.then_some(Shadow {
-                        dx: 6.0,
-                        dy: 8.0,
-                        blur: 8.0,
-                        color: Rgba::new(0, 0, 0, 160),
-                    });
-                    changed = true;
-                }
-                if let Some(s) = &mut l.shadow {
-                    egui::Grid::new("shadow").num_columns(2).show(ui, |ui| {
-                        ui.label("Deslocar");
-                        ui.horizontal(|ui| {
-                            changed |= ui.add(egui::DragValue::new(&mut s.dx).speed(0.5)).changed();
-                            changed |= ui.add(egui::DragValue::new(&mut s.dy).speed(0.5)).changed();
-                        });
-                        ui.end_row();
-                        ui.label("Desfoque");
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut s.blur)
-                                    .speed(0.2)
-                                    .range(0.0..=100.0),
-                            )
-                            .changed();
-                        ui.end_row();
-                        ui.label("Cor");
-                        changed |= color_button(ui, &mut s.color, true);
-                        ui.end_row();
-                    });
-                }
-                ui.add_space(8.0);
-                ui.label(RichText::new("Cor").small().color(theme::TEXT_DIM));
-                egui::Grid::new("adjust").num_columns(2).show(ui, |ui| {
-                    for (label, v) in [
-                        ("Brilho", &mut l.adjust.brightness),
-                        ("Contraste", &mut l.adjust.contrast),
-                        ("Saturação", &mut l.adjust.saturation),
-                    ] {
-                        ui.label(label);
-                        let r = ui.add(egui::Slider::new(v, -1.0..=1.0).show_value(false));
-                        if r.double_clicked() {
-                            *v = 0.0;
-                            changed = true;
-                        }
-                        changed |= r.changed();
-                        ui.end_row();
-                    }
-                });
-                if l.adjust != Adjust::default() && ui.small_button("Zerar ajustes").clicked() {
-                    l.adjust = Adjust {
-                        chroma: l.adjust.chroma,
-                        ..Adjust::default()
-                    };
-                    changed = true;
-                }
-                if changed {
-                    self.ed.edit(id, "props", "Propriedades", |dst| *dst = l);
-                }
-            });
-    }
-
-    fn background_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Fundo").strong());
-        ui.add_space(4.0);
-        let bg = self.ed.doc().background.clone();
-        let (mut solid, mut from, mut to, mut angle) = match &bg {
-            Background::Solid(c) => (true, *c, *c, 135.0),
-            Background::Gradient { from, to, angle } => (false, *from, *to, *angle),
-        };
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            changed |= ui.selectable_value(&mut solid, true, "Cor").changed();
-            changed |= ui.selectable_value(&mut solid, false, "Degradê").changed();
-        });
-        egui::Grid::new("bg").num_columns(2).show(ui, |ui| {
-            ui.label(if solid { "Cor" } else { "De" });
-            changed |= color_button(ui, &mut from, false);
-            ui.end_row();
-            if !solid {
-                ui.label("Até");
-                changed |= color_button(ui, &mut to, false);
-                ui.end_row();
-                ui.label("Ângulo");
-                changed |= ui
-                    .add(egui::DragValue::new(&mut angle).speed(1.0).suffix("°"))
-                    .changed();
-                ui.end_row();
             }
         });
-        if changed {
-            self.ed.set_background(if solid {
-                Background::Solid(from)
-            } else {
-                Background::Gradient { from, to, angle }
-            });
-        }
-        ui.add_space(12.0);
-        ui.label(
-            RichText::new("Clique numa camada para editar. Atalhos: T texto · Ctrl+I imagem · [ e ] ordem · setas movem · G guias")
-                .weak()
-                .small(),
-        );
-    }
-
-    // ---------------------------------------------------------------- tela
-
-    fn render_texture(&mut self, ctx: &egui::Context) {
-        let rev = self.ed.revision();
-        if self.rendered.as_ref().is_some_and(|(r, _)| *r == rev) {
-            return;
-        }
-        let img = self.flat();
-        let color = egui::ColorImage::from_rgba_unmultiplied(
-            [img.width() as usize, img.height() as usize],
-            img.as_raw(),
-        );
-        match &mut self.rendered {
-            Some((r, tex)) => {
-                tex.set(color, egui::TextureOptions::LINEAR);
-                *r = rev;
-            }
-            None => {
-                self.rendered = Some((
-                    rev,
-                    ctx.load_texture("canvas", color, egui::TextureOptions::LINEAR),
-                ));
-            }
-        }
-        if self.preview_rev != rev {
-            self.preview_rev = rev;
-            let mut previews = Vec::new();
-            for (i, w) in [260u32, 120].into_iter().enumerate() {
-                let h = (w as f32 * img.height() as f32 / img.width() as f32)
-                    .round()
-                    .max(1.0) as u32;
-                let small = image::imageops::resize(
-                    &img,
-                    w * 2,
-                    h * 2,
-                    image::imageops::FilterType::Triangle,
-                );
-                let c = egui::ColorImage::from_rgba_unmultiplied(
-                    [small.width() as usize, small.height() as usize],
-                    small.as_raw(),
-                );
-                match self.previews.get_mut(i) {
-                    Some(t) => {
-                        t.set(c, egui::TextureOptions::LINEAR);
-                        previews.push(t.clone());
-                    }
-                    None => previews.push(ctx.load_texture(
-                        format!("preview{i}"),
-                        c,
-                        egui::TextureOptions::LINEAR,
-                    )),
-                }
-            }
-            self.previews = previews;
-        }
-    }
-
-    fn canvas_ui(&mut self, ui: &mut egui::Ui) {
-        let area = ui.available_rect_before_wrap();
-        ui.painter().rect_filled(area, 0.0, theme::BG_DARK);
-        let (cw, ch) = (self.ed.doc().width as f32, self.ed.doc().height as f32);
-        if self.fit {
-            self.zoom = ((area.width() - 48.0) / cw)
-                .min((area.height() - 48.0) / ch)
-                .max(0.05);
-        }
-        let resp = ui.interact(area, ui.id().with("canvas"), Sense::click_and_drag());
-        // Roda do mouse: zoom em volta do cursor.
-        if resp.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y + (i.zoom_delta() - 1.0) * 300.0);
-            if scroll.abs() > 0.1 {
-                let old = self.zoom;
-                let new = (old * (1.0 + scroll * 0.002)).clamp(0.05, 8.0);
-                if let Some(p) = resp.hover_pos() {
-                    let center = area.center() + self.pan;
-                    let before = (p - center) / old;
-                    self.pan += (before * old) - (before * new);
-                }
-                self.zoom = new;
-                self.fit = false;
-            }
-        }
-        let size = vec2(cw, ch) * self.zoom;
-        let origin = area.center() + self.pan - size / 2.0;
-        let canvas = Rect::from_min_size(origin, size);
-        let to_doc = |p: Pos2| ((p - origin) / self.zoom).to_pos2();
-        let to_screen = |p: Pos2| origin + p.to_vec2() * self.zoom;
-        // Fundo xadrez por trás (mostra transparência) e a imagem.
-        ui.painter()
-            .rect_filled(canvas, 0.0, Color32::from_gray(40));
-        if let Some((_, tex)) = &self.rendered {
-            ui.painter().image(
-                tex.id(),
-                canvas,
-                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
-        }
-        ui.painter().rect_stroke(
-            canvas,
-            0.0,
-            Stroke::new(1.0, theme::BORDER),
-            egui::StrokeKind::Outside,
-        );
-        let clip = ui.painter().with_clip_rect(area);
-        if self.guides {
-            // O selo de duração do YouTube cobre o canto de baixo à direita.
-            let danger = Rect::from_min_max(
-                pos2(
-                    canvas.right() - cw * 0.17 * self.zoom,
-                    canvas.bottom() - ch * 0.12 * self.zoom,
-                ),
-                canvas.right_bottom(),
-            );
-            clip.rect_filled(
-                danger,
-                0.0,
-                Color32::from_rgba_unmultiplied(230, 60, 60, 70),
-            );
-            clip.text(
-                danger.center(),
-                Align2::CENTER_CENTER,
-                "selo",
-                theme::text(10.0),
-                Color32::WHITE,
-            );
-            let safe = canvas.shrink2(vec2(cw * 0.03, ch * 0.05) * self.zoom);
-            clip.rect_stroke(
-                safe,
-                0.0,
-                Stroke::new(1.0, Color32::from_white_alpha(70)),
-                egui::StrokeKind::Inside,
-            );
-            for f in [1.0 / 3.0, 2.0 / 3.0] {
-                clip.line_segment(
-                    [
-                        pos2(canvas.left() + canvas.width() * f, canvas.top()),
-                        pos2(canvas.left() + canvas.width() * f, canvas.bottom()),
-                    ],
-                    Stroke::new(1.0, Color32::from_white_alpha(30)),
-                );
-                clip.line_segment(
-                    [
-                        pos2(canvas.left(), canvas.top() + canvas.height() * f),
-                        pos2(canvas.right(), canvas.top() + canvas.height() * f),
-                    ],
-                    Stroke::new(1.0, Color32::from_white_alpha(30)),
-                );
-            }
-        }
-        // Seleção: caixa girada, cantos (escala) e alça de giro.
-        let mut handles: Option<(Pos2, [Pos2; 4], Pos2)> = None;
-        if let Some(layer) = self.layer().cloned()
-            && let Some((w, h)) = self.renderer.extent(&layer, self.ed.assets())
-        {
-            let (c, s) = (
-                layer.rotation.to_radians().cos(),
-                layer.rotation.to_radians().sin(),
-            );
-            let rot = |dx: f32, dy: f32| {
-                to_screen(pos2(layer.x + dx * c - dy * s, layer.y + dx * s + dy * c))
-            };
-            let corners = [
-                rot(-w / 2.0, -h / 2.0),
-                rot(w / 2.0, -h / 2.0),
-                rot(w / 2.0, h / 2.0),
-                rot(-w / 2.0, h / 2.0),
-            ];
-            let top = rot(0.0, -h / 2.0 - 28.0 / self.zoom);
-            let center = to_screen(pos2(layer.x, layer.y));
-            let stroke = Stroke::new(1.5, theme::ACCENT);
-            for i in 0..4 {
-                clip.line_segment([corners[i], corners[(i + 1) % 4]], stroke);
-            }
-            clip.line_segment([rot(0.0, -h / 2.0), top], stroke);
-            for c in corners {
-                clip.rect_filled(
-                    Rect::from_center_size(c, Vec2::splat(HANDLE * 2.0)),
-                    2.0,
-                    Color32::WHITE,
-                );
-                clip.rect_stroke(
-                    Rect::from_center_size(c, Vec2::splat(HANDLE * 2.0)),
-                    2.0,
-                    stroke,
-                    egui::StrokeKind::Inside,
-                );
-            }
-            clip.circle_filled(top, HANDLE, Color32::WHITE);
-            clip.circle_stroke(top, HANDLE, stroke);
-            handles = Some((center, corners, top));
-        }
-        // Guias de ímã mostradas enquanto arrasta.
-        if matches!(self.drag, Some(Drag::Move { .. })) {
-            let s = Stroke::new(1.0, Color32::from_rgb(255, 80, 200));
-            if self.snap_lines.0 {
-                clip.line_segment(
-                    [
-                        pos2(canvas.center().x, canvas.top()),
-                        pos2(canvas.center().x, canvas.bottom()),
-                    ],
-                    s,
-                );
-            }
-            if self.snap_lines.1 {
-                clip.line_segment(
-                    [
-                        pos2(canvas.left(), canvas.center().y),
-                        pos2(canvas.right(), canvas.center().y),
-                    ],
-                    s,
-                );
-            }
-        }
-        // ---- interação
-        let pointer = resp.interact_pointer_pos();
-        if resp.drag_started() {
-            let space = ui.input(|i| i.key_down(Key::Space));
-            let middle = ui.input(|i| i.pointer.middle_down());
-            self.drag = None;
-            if let Some(p) = pointer {
-                if space || middle {
-                    self.drag = Some(Drag::Pan);
-                } else if let Some((center, corners, top)) = handles
-                    && p.distance(top) <= HANDLE + 4.0
-                {
-                    let _ = (center, corners);
-                    self.drag = Some(Drag::Rotate);
-                } else if let Some((center, corners, _)) = handles
-                    && corners.iter().any(|c| p.distance(*c) <= HANDLE + 4.0)
-                {
-                    let l = self.layer().cloned();
-                    if let Some(l) = l {
-                        self.drag = Some(Drag::Scale {
-                            start_dist: p.distance(center).max(1.0),
-                            start_scale: l.scale,
-                        });
-                    }
-                } else {
-                    let d = to_doc(p);
-                    let hit = self
-                        .renderer
-                        .layer_at(self.ed.doc(), self.ed.assets(), d.x, d.y);
-                    // Clicar no vazio não perde a seleção ao começar a arrastar; só no clique.
-                    if let Some(id) = hit {
-                        self.selected = Some(id);
-                    }
-                    if let Some(l) = self.layer().filter(|l| !l.locked).cloned()
-                        && hit.is_some()
-                    {
-                        self.drag = Some(Drag::Move {
-                            grab: vec2(d.x - l.x, d.y - l.y),
-                        });
-                    } else {
-                        self.drag = Some(Drag::Pan);
-                    }
-                }
-            }
-        }
-        if resp.dragged()
-            && let (Some(drag), Some(p)) = (self.drag.clone(), pointer)
-        {
-            match drag {
-                Drag::Pan => {
-                    self.pan += resp.drag_delta();
-                    self.fit = false;
-                    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-                }
-                Drag::Move { grab } => {
-                    let d = to_doc(p);
-                    let (mut x, mut y) = (d.x - grab.x, d.y - grab.y);
-                    let snap = SNAP_PX / self.zoom;
-                    let shift = ui.input(|i| i.modifiers.shift);
-                    self.snap_lines = (false, false);
-                    if !shift {
-                        if (x - cw / 2.0).abs() < snap {
-                            x = cw / 2.0;
-                            self.snap_lines.0 = true;
-                        }
-                        if (y - ch / 2.0).abs() < snap {
-                            y = ch / 2.0;
-                            self.snap_lines.1 = true;
-                        }
-                    }
-                    if let Some(id) = self.selected {
-                        self.ed.edit(id, "move", "Mover", |l| {
-                            l.x = x.round();
-                            l.y = y.round();
-                        });
-                    }
-                }
-                Drag::Scale {
-                    start_dist,
-                    start_scale,
-                } => {
-                    if let (Some(id), Some((center, _, _))) = (self.selected, handles) {
-                        let k = (p.distance(center) / start_dist).max(0.01);
-                        self.ed.edit(id, "scale", "Escalar", |l| {
-                            l.scale = (start_scale * k).clamp(0.02, 16.0);
-                        });
-                    }
-                }
-                Drag::Rotate => {
-                    if let (Some(id), Some((center, _, _))) = (self.selected, handles) {
-                        let v = p - center;
-                        let mut deg = v.y.atan2(v.x).to_degrees() + 90.0;
-                        if ui.input(|i| i.modifiers.shift) {
-                            deg = (deg / 15.0).round() * 15.0;
-                        }
-                        self.ed.edit(id, "rotate", "Girar", |l| l.rotation = deg);
-                    }
-                }
-            }
-        }
-        if resp.drag_stopped() {
-            self.drag = None;
-            self.snap_lines = (false, false);
-            self.ed.end_change();
-        }
-        if resp.clicked()
-            && let Some(p) = pointer
-        {
-            let d = to_doc(p);
-            self.selected = self
-                .renderer
-                .layer_at(self.ed.doc(), self.ed.assets(), d.x, d.y);
-        }
-        if resp.double_clicked()
-            && let Some(l) = self.layer()
-            && matches!(l.kind, Kind::Text(_))
-        {
-            self.focus_text = true;
-        }
-        if resp.hovered() && self.drag.is_none() {
-            let over_handle = handles.is_some_and(|(_, corners, top)| {
-                resp.hover_pos().is_some_and(|p| {
-                    p.distance(top) <= HANDLE + 4.0
-                        || corners.iter().any(|c| p.distance(*c) <= HANDLE + 4.0)
-                })
-            });
-            ui.ctx().set_cursor_icon(if over_handle {
-                CursorIcon::Crosshair
-            } else {
-                CursorIcon::Default
-            });
-        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
-        let doc = self.ed.doc();
-        let text = format!(
-            "{} × {} px · {:.0}% · {} camada(s)",
-            doc.width,
-            doc.height,
-            self.zoom * 100.0,
-            doc.layers.len()
-        );
+        let st = &self.st;
         ui.horizontal_centered(|ui| {
             ui.add_space(8.0);
-            ui.label(RichText::new(text).small());
-            if self.ed.is_dirty() {
-                ui.label(RichText::new("não salvo").small().color(theme::TEXT_DIM));
+            if let Some(d) = st.doc() {
+                let doc = d.ed.doc();
+                ui.label(
+                    RichText::new(format!(
+                        "{} × {} px · {:.0}%",
+                        doc.width,
+                        doc.height,
+                        d.zoom * 100.0
+                    ))
+                    .small(),
+                );
+                if let Some((x, y)) = d.cursor
+                    && x >= 0.0
+                    && y >= 0.0
+                    && (x as usize) < doc.width
+                    && (y as usize) < doc.height
+                {
+                    ui.label(
+                        RichText::new(format!("{:.0}, {:.0}", x, y))
+                            .small()
+                            .color(theme::TEXT_DIM),
+                    );
+                }
+                if let Some(sel) = &doc.selection
+                    && let Some((x0, y0, x1, y1)) = sel.bounds()
+                {
+                    ui.label(
+                        RichText::new(format!("seleção {} × {}", x1 - x0, y1 - y0))
+                            .small()
+                            .color(theme::TEXT_DIM),
+                    );
+                }
+            } else {
+                ui.label(
+                    RichText::new("Sem documento")
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
             }
         });
     }
+}
 
+fn commit_if_floating(d: &mut DocView) {
+    if d.float.is_some() {
+        canvas::commit_float(d);
+    }
+}
+
+fn zoom_to(st: &mut State, z: f32) {
+    if let Some(d) = st.doc_mut() {
+        d.fit = false;
+        d.zoom = z;
+        d.pan = egui::Vec2::ZERO;
+    }
+}
+
+fn zoom_by(st: &mut State, k: f32) {
+    if let Some(d) = st.doc_mut() {
+        d.fit = false;
+        d.zoom = (d.zoom * k).clamp(0.02, 32.0);
+    }
+}
+
+fn new_layer(st: &mut State) {
+    if let Some(d) = st.doc_mut() {
+        let a = d.active;
+        d.active = d.ed.add_layer(None, Some(a));
+    }
+}
+
+fn dup_layer(st: &mut State) {
+    if let Some(d) = st.doc_mut() {
+        let a = d.active;
+        if let Ok(n) = d.ed.duplicate_layer(a) {
+            d.active = n;
+        }
+    }
+}
+
+fn merge_down(st: &mut State) {
+    let Some(d) = st.doc_mut() else { return };
+    let a = d.active;
+    match d.ed.merge_down(a) {
+        Ok(n) => d.active = n,
+        Err(e) => st.warn(e.to_string()),
+    }
+}
+
+fn edit_copy(st: &mut State, merged: bool) {
+    let Some(d) = st.doc() else { return };
+    st.clipboard = d.ed.copy(d.active, merged);
+    if st.clipboard.is_some() {
+        st.say("Copiado");
+    }
+}
+
+fn edit_cut(st: &mut State) {
+    let Some(d) = st.doc_mut() else { return };
+    let id = d.active;
+    match d.ed.cut(id) {
+        Ok(c) => st.clipboard = c.or(st.clipboard.take()),
+        Err(e) => st.warn(e.to_string()),
+    }
+}
+
+fn edit_paste(st: &mut State) {
+    let Some(c) = st.clipboard.clone() else {
+        return;
+    };
+    if let Some(d) = st.doc_mut() {
+        d.active = d.ed.paste(&c, None);
+    }
+}
+
+fn edit_fill(st: &mut State, bg: bool) {
+    let c = if bg { st.bg } else { st.fg };
+    let Some(d) = st.doc_mut() else { return };
+    let id = d.active;
+    if let Err(e) = d.ed.fill_selection(id, c) {
+        st.warn(e.to_string());
+    }
+}
+
+fn edit_clear(st: &mut State) {
+    let Some(d) = st.doc_mut() else { return };
+    let id = d.active;
+    if let Err(e) = d.ed.clear_layer(id) {
+        st.warn(e.to_string());
+    }
+}
+
+fn crop_to_selection(st: &mut State) {
+    let Some(d) = st.doc_mut() else { return };
+    if let Some((x0, y0, x1, y1)) = d.ed.doc().selection.as_ref().and_then(|s| s.bounds()) {
+        commit_if_floating(d);
+        d.ed.crop(x0, y0, x1, y1);
+        d.fit = true;
+    }
+}
+
+// ---------------------------------------------------------------- atalhos
+
+impl PaintApp {
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        let st = &mut self.st;
+        let ctrl = Modifiers::COMMAND;
+        let cs = Modifiers::COMMAND | Modifiers::SHIFT;
+        let hit = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
+        if ctx.egui_wants_keyboard_input() || st.dialog.is_some() || st.text_input.is_some() {
+            return;
+        }
+        if hit(ctrl, Key::N) {
+            st.dialog = Some(Dialog::New {
+                w: 1920,
+                h: 1080,
+                bg: 0,
+                color: [255, 255, 255],
+            });
+        }
+        if hit(ctrl, Key::O) {
+            ask(st, Purpose::Open);
+        }
+        if hit(cs, Key::S) {
+            ask(st, Purpose::SaveAs);
+        } else if hit(ctrl, Key::S) {
+            save(st);
+        }
+        if hit(cs, Key::E) {
+            ask(st, Purpose::Export);
+        }
+        if hit(ctrl, Key::W) {
+            request_close_doc(st, st.cur);
+        }
+        if st.docs.is_empty() {
+            return;
+        }
+        if hit(cs, Key::Z) || hit(ctrl, Key::Y) {
+            if let Some(d) = st.doc_mut() {
+                commit_if_floating(d);
+                d.ed.redo();
+            }
+        } else if hit(ctrl, Key::Z)
+            && let Some(d) = st.doc_mut()
+        {
+            if d.float.is_some() {
+                canvas::abort_float(d);
+            } else {
+                d.ed.undo();
+            }
+        }
+        if hit(cs, Key::C) {
+            edit_copy(st, true);
+        } else if hit(ctrl, Key::C) {
+            edit_copy(st, false);
+        }
+        if hit(ctrl, Key::X) {
+            edit_cut(st);
+        }
+        if hit(ctrl, Key::V) {
+            edit_paste(st);
+        }
+        if hit(cs, Key::A) {
+            if let Some(d) = st.doc_mut() {
+                d.ed.deselect();
+            }
+        } else if hit(ctrl, Key::A)
+            && let Some(d) = st.doc_mut()
+        {
+            d.ed.select_all();
+        }
+        if hit(cs, Key::I) {
+            if let Some(d) = st.doc_mut() {
+                d.ed.invert_selection();
+            }
+        } else if hit(ctrl, Key::I) {
+            quick_filter(st, Filter::Invert, "Inverter cores");
+        }
+        if hit(ctrl, Key::J) {
+            dup_layer(st);
+        }
+        if hit(ctrl, Key::E) {
+            merge_down(st);
+        }
+        if hit(cs, Key::N) {
+            new_layer(st);
+        }
+        if hit(ctrl, Key::Num0)
+            && let Some(d) = st.doc_mut()
+        {
+            d.fit = true;
+            d.pan = egui::Vec2::ZERO;
+        }
+        if hit(ctrl, Key::Num1) {
+            zoom_to(st, 1.0);
+        }
+        if hit(Modifiers::NONE, Key::Plus) || hit(Modifiers::NONE, Key::Equals) {
+            zoom_by(st, 1.25);
+        }
+        if hit(Modifiers::NONE, Key::Minus) {
+            zoom_by(st, 0.8);
+        }
+        if hit(ctrl, Key::T) {
+            set_tool(st, Tool::Transform);
+        }
+        if hit(Modifiers::NONE, Key::Enter) {
+            canvas::confirm(st, true);
+        }
+        if hit(Modifiers::NONE, Key::Escape) {
+            canvas::confirm(st, false);
+            if let Some(d) = st.doc_mut() {
+                d.ed.end_change();
+            }
+        }
+        if hit(Modifiers::NONE, Key::Delete) {
+            edit_clear(st);
+        }
+        if hit(Modifiers::NONE, Key::Backspace) {
+            edit_fill(st, false);
+        }
+        if hit(Modifiers::SHIFT, Key::Backspace) {
+            edit_fill(st, true);
+        }
+        if hit(Modifiers::NONE, Key::X) {
+            swap_colors(st);
+        }
+        if hit(Modifiers::NONE, Key::D) {
+            st.fg = [0, 0, 0];
+            st.bg = [255, 255, 255];
+            st.hsv = (0.0, 0.0, 0.0);
+        }
+        if hit(Modifiers::NONE, Key::OpenBracket) {
+            st.brush.size = (st.brush.size * 0.88 - 1.0).max(1.0);
+        }
+        if hit(Modifiers::NONE, Key::CloseBracket) {
+            st.brush.size = (st.brush.size * 1.14 + 1.0).min(500.0);
+        }
+        for tool in Tool::ALL {
+            let key = match tool.key() {
+                "B" => Key::B,
+                "E" => Key::E,
+                "F" => Key::F,
+                "G" => Key::G,
+                "P" => Key::P,
+                "J" => Key::J,
+                "K" => Key::K,
+                "L" => Key::L,
+                "W" => Key::W,
+                "T" => Key::T,
+                "C" => Key::C,
+                "I" => Key::I,
+                "U" => Key::U,
+                "O" => Key::O,
+                "Q" => Key::Q,
+                _ => continue,
+            };
+            if hit(Modifiers::NONE, key) {
+                set_tool(st, tool);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- diálogos
+
+impl PaintApp {
     fn dialogs(&mut self, ctx: &egui::Context) {
-        let Some(dialog) = self.dialog.take() else {
+        let st = &mut self.st;
+        let Some(mut dialog) = st.dialog.take() else {
             return;
         };
         let mut keep = true;
-        let mut then: Option<Action> = None;
+        let mut then: Option<StateAction> = None;
         let title = match &dialog {
-            Dialog::New { .. } => "Nova thumbnail",
-            Dialog::ConfirmClose => "Sair sem salvar?",
+            Dialog::New { .. } => "Nova imagem",
+            Dialog::Filter { .. } => "Filtro",
+            Dialog::CanvasSize { .. } => "Tamanho da tela",
+            Dialog::ScaleImage { .. } => "Escalar imagem",
+            Dialog::Feather(_) => "Suavizar borda da seleção",
+            Dialog::Grow(_) => "Expandir ou contrair seleção",
+            Dialog::LayerProps(_) => "Propriedades da camada",
+            Dialog::ConfirmClose(_) | Dialog::ConfirmQuit => "Mudanças não salvas",
         };
-        let mut dialog = dialog;
         egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| match &mut dialog {
-                Dialog::New { w, h } => {
-                    ui.horizontal(|ui| {
+                Dialog::New { w, h, bg, color } => {
+                    ui.horizontal_wrapped(|ui| {
                         for (label, (pw, ph)) in [
-                            ("YouTube 1280×720", (1280, 720)),
-                            ("Shorts 1080×1920", (1080, 1920)),
-                            ("Quadrado 1080", (1080, 1080)),
+                            ("1920×1080", (1920, 1080)),
+                            ("1280×720 (thumbnail)", (1280, 720)),
+                            ("1080×1080", (1080, 1080)),
+                            ("1080×1920", (1080, 1920)),
+                            ("A4 300 dpi", (2480, 3508)),
                         ] {
                             if ui.button(label).clicked() {
                                 (*w, *h) = (pw, ph);
@@ -1598,43 +1286,321 @@ impl PaintApp {
                         }
                     });
                     ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(w).range(64..=8192).suffix(" px"));
+                        ui.label("Tamanho");
+                        ui.add(egui::DragValue::new(w).range(1..=8192).suffix(" px"));
                         ui.label("×");
-                        ui.add(egui::DragValue::new(h).range(64..=8192).suffix(" px"));
+                        ui.add(egui::DragValue::new(h).range(1..=8192).suffix(" px"));
                     });
-                    ui.label(
-                        RichText::new("O projeto atual fecha (salve antes se precisar).")
-                            .weak()
-                            .small(),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.label("Fundo");
+                        ui.selectable_value(bg, 0, "Branco");
+                        ui.selectable_value(bg, 1, "Transparente");
+                        ui.selectable_value(bg, 2, "Cor");
+                        if *bg == 2 {
+                            ui.color_edit_button_srgb(color);
+                        }
+                    });
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Criar").clicked() {
                             keep = false;
-                            let (w, h) = (*w, *h);
-                            then = Some(Box::new(move |me| me.new_doc(w, h)));
+                            let (w, h, bg, color) = (*w, *h, *bg, *color);
+                            then = Some(Box::new(move |st| {
+                                let background = match bg {
+                                    0 => Background::White,
+                                    1 => Background::Transparent,
+                                    _ => Background::Color(color),
+                                };
+                                add_doc(st, Editor::new(w, h, background), None);
+                            }));
                         }
                         if ui.button("Cancelar").clicked() {
                             keep = false;
                         }
                     });
                 }
-                Dialog::ConfirmClose => {
-                    ui.label("O projeto tem mudanças que não foram salvas.");
+                Dialog::Filter {
+                    kind,
+                    a,
+                    b,
+                    c,
+                    preview,
+                    applied,
+                } => {
+                    let mut changed = false;
+                    let mut slider =
+                        |ui: &mut egui::Ui,
+                         name: &str,
+                         v: &mut f32,
+                         r: std::ops::RangeInclusive<f32>| {
+                            ui.horizontal(|ui| {
+                                ui.label(name);
+                                changed |= ui.add(egui::Slider::new(v, r)).changed();
+                            });
+                        };
+                    match kind {
+                        FilterKind::BrightnessContrast => {
+                            slider(ui, "Brilho", a, -1.0..=1.0);
+                            slider(ui, "Contraste", b, -1.0..=1.0);
+                        }
+                        FilterKind::HueSaturation => {
+                            slider(ui, "Matiz", a, -180.0..=180.0);
+                            slider(ui, "Saturação", b, -1.0..=1.0);
+                            slider(ui, "Luminosidade", c, -1.0..=1.0);
+                        }
+                        FilterKind::Levels => {
+                            slider(ui, "Pretos", a, 0.0..=1.0);
+                            slider(ui, "Brancos", b, 0.0..=1.0);
+                            slider(ui, "Gama", c, 0.1..=4.0);
+                        }
+                        FilterKind::Threshold => slider(ui, "Limiar", a, 0.0..=1.0),
+                        FilterKind::Posterize => slider(ui, "Níveis", a, 2.0..=32.0),
+                        FilterKind::Blur => slider(ui, "Raio", a, 0.5..=60.0),
+                        FilterKind::Sharpen => {
+                            slider(ui, "Quantidade", a, 0.0..=3.0);
+                            slider(ui, "Raio", b, 0.3..=10.0);
+                        }
+                        FilterKind::Pixelate => slider(ui, "Tamanho do bloco", a, 2.0..=80.0),
+                        FilterKind::Noise => slider(ui, "Quantidade", a, 0.0..=1.0),
+                    }
+                    ui.checkbox(preview, "Prévia na tela");
+                    let (f, label) = filter_of(kind, *a, *b, *c);
+                    let cur = st.cur;
+                    if (changed || (*preview && !*applied))
+                        && *preview
+                        && let Some(d) = st.docs.get_mut(cur)
+                    {
+                        if *applied {
+                            d.ed.undo();
+                        }
+                        let id = d.active;
+                        *applied = d.ed.apply_filter(id, &f, label).is_ok();
+                    } else if changed
+                        && !*preview
+                        && *applied
+                        && let Some(d) = st.docs.get_mut(cur)
+                    {
+                        d.ed.undo();
+                        *applied = false;
+                    }
                     ui.add_space(8.0);
+                    let applied_now = *applied;
+                    ui.horizontal(|ui| {
+                        if ui.button("Aplicar").clicked() {
+                            keep = false;
+                            then = Some(Box::new(move |st| {
+                                if !applied_now && let Some(d) = st.doc_mut() {
+                                    let id = d.active;
+                                    if let Err(e) = d.ed.apply_filter(id, &f, label) {
+                                        st.warn(e.to_string());
+                                    }
+                                }
+                            }));
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            keep = false;
+                            then = Some(Box::new(move |st| {
+                                if applied_now && let Some(d) = st.doc_mut() {
+                                    d.ed.undo();
+                                }
+                            }));
+                        }
+                    });
+                }
+                Dialog::CanvasSize { w, h, anchor } => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(w).range(1..=8192).suffix(" px"));
+                        ui.label("×");
+                        ui.add(egui::DragValue::new(h).range(1..=8192).suffix(" px"));
+                    });
+                    ui.label(
+                        RichText::new("Onde a imagem fica na tela nova:")
+                            .small()
+                            .weak(),
+                    );
+                    egui::Grid::new("anchor").show(ui, |ui| {
+                        for i in 0..9u8 {
+                            if ui.selectable_label(*anchor == i, "●").clicked() {
+                                *anchor = i;
+                            }
+                            if i % 3 == 2 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Aplicar").clicked() {
+                            keep = false;
+                            let (nw, nh, anchor) = (*w, *h, *anchor);
+                            then = Some(Box::new(move |st| {
+                                if let Some(d) = st.doc_mut() {
+                                    commit_if_floating(d);
+                                    let (ow, oh) =
+                                        (d.ed.doc().width as i64, d.ed.doc().height as i64);
+                                    let (ax, ay) = ((anchor % 3) as i64, (anchor / 3) as i64);
+                                    let dx = (nw as i64 - ow) * ax / 2;
+                                    let dy = (nh as i64 - oh) * ay / 2;
+                                    d.ed.resize_canvas(nw, nh, dx, dy);
+                                    d.fit = true;
+                                }
+                            }));
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Dialog::ScaleImage {
+                    w,
+                    h,
+                    keep: lock,
+                    ratio,
+                } => {
+                    let before = (*w, *h);
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(w).range(1..=8192).suffix(" px"));
+                        ui.label("×");
+                        ui.add(egui::DragValue::new(h).range(1..=8192).suffix(" px"));
+                    });
+                    ui.checkbox(lock, "Manter proporção");
+                    if *lock {
+                        if *w != before.0 {
+                            *h = ((*w as f32 / *ratio).round() as usize).clamp(1, 8192);
+                        } else if *h != before.1 {
+                            *w = ((*h as f32 * *ratio).round() as usize).clamp(1, 8192);
+                        }
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Escalar").clicked() {
+                            keep = false;
+                            let (nw, nh) = (*w, *h);
+                            then = Some(Box::new(move |st| {
+                                if let Some(d) = st.doc_mut() {
+                                    commit_if_floating(d);
+                                    d.ed.scale_image(nw, nh);
+                                    d.fit = true;
+                                }
+                            }));
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Dialog::Feather(r) => {
+                    ui.add(egui::Slider::new(r, 1..=100).suffix(" px"));
+                    ui.horizontal(|ui| {
+                        if ui.button("Aplicar").clicked() {
+                            keep = false;
+                            let r = *r;
+                            then = Some(Box::new(move |st| {
+                                if let Some(d) = st.doc_mut() {
+                                    d.ed.feather_selection(r);
+                                }
+                            }));
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Dialog::Grow(px) => {
+                    ui.add(egui::Slider::new(px, -100..=100).suffix(" px"));
+                    ui.label(
+                        RichText::new("Positivo expande, negativo contrai.")
+                            .small()
+                            .weak(),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Aplicar").clicked() {
+                            keep = false;
+                            let px = *px;
+                            then = Some(Box::new(move |st| {
+                                if let Some(d) = st.doc_mut() {
+                                    d.ed.grow_selection(px);
+                                }
+                            }));
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Dialog::LayerProps(id) => {
+                    let id = *id;
+                    let cur = st.cur;
+                    if let Some(l) = st.docs.get(cur).and_then(|d| d.ed.doc().layer(id).cloned()) {
+                        let mut name = l.name.clone();
+                        if ui.add(egui::TextEdit::singleline(&mut name)).changed() {
+                            st.docs[cur]
+                                .ed
+                                .edit_layer(id, "name", "Renomear camada", |x| x.name = name);
+                        }
+                        let mut o = l.opacity * 100.0;
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut o, 0.0..=100.0)
+                                    .suffix("%")
+                                    .text("Opacidade"),
+                            )
+                            .changed()
+                        {
+                            st.docs[cur]
+                                .ed
+                                .edit_layer(id, "opacity", "Opacidade da camada", |x| {
+                                    x.opacity = o / 100.0
+                                });
+                        }
+                        let mut mode = l.mode;
+                        egui::ComboBox::from_id_salt("props-blend")
+                            .selected_text(mode.label())
+                            .show_ui(ui, |ui| {
+                                for m in BlendMode::ALL {
+                                    ui.selectable_value(&mut mode, m, m.label());
+                                }
+                            });
+                        if mode != l.mode {
+                            st.docs[cur]
+                                .ed
+                                .edit_layer(id, "mode", "Modo de mistura", |x| x.mode = mode);
+                        }
+                    }
+                    if ui.button("Fechar").clicked() {
+                        keep = false;
+                        st.docs[cur].ed.end_change();
+                    }
+                }
+                Dialog::ConfirmClose(i) => {
+                    let i = *i;
+                    ui.label("Este documento tem mudanças que não foram salvas.");
                     ui.horizontal(|ui| {
                         if ui.button("Salvar").clicked() {
                             keep = false;
-                            then = Some(Box::new(|me| {
-                                me.save();
-                                if me.path.is_some() {
-                                    me.allow_close = true;
+                            then = Some(Box::new(move |st| {
+                                st.cur = i.min(st.docs.len().saturating_sub(1));
+                                save(st);
+                                if st.docs.get(i).is_some_and(|d| !d.ed.is_dirty()) {
+                                    close_doc(st, i);
                                 }
                             }));
                         }
                         if ui.button("Descartar").clicked() {
                             keep = false;
-                            then = Some(Box::new(|me| me.allow_close = true));
+                            then = Some(Box::new(move |st| close_doc(st, i)));
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Dialog::ConfirmQuit => {
+                    ui.label("Há documentos com mudanças que não foram salvas.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Sair sem salvar").clicked() {
+                            keep = false;
+                            then = Some(Box::new(|st| st.allow_close = true));
                         }
                         if ui.button("Cancelar").clicked() {
                             keep = false;
@@ -1643,16 +1609,16 @@ impl PaintApp {
                 }
             });
         if keep {
-            self.dialog = Some(dialog);
+            st.dialog = Some(dialog);
         }
         if let Some(f) = then {
-            f(self);
+            f(st);
         }
     }
 
     pub fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        self.poll_file();
+        poll_file(&mut self.st);
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -1661,57 +1627,47 @@ impl PaintApp {
                 .filter(|p| !p.as_os_str().is_empty())
                 .collect()
         });
-        if !dropped.is_empty() {
-            let (projects, images): (Vec<_>, Vec<_>) = dropped
-                .into_iter()
-                .partition(|p| p.extension().is_some_and(|e| e == "pawpaint"));
-            if let Some(p) = projects.first() {
-                self.open_project(p);
+        for p in dropped {
+            open_path(&mut self.st, &p);
+        }
+        self.shortcuts(&ctx);
+        // Fim de um gesto: o próximo vira outro passo de desfazer.
+        if ctx.input(|i| i.pointer.any_released()) {
+            for d in &mut self.st.docs {
+                d.ed.end_change();
             }
-            if !images.is_empty() {
-                self.import(images);
+        }
+        // Cores recentes: guarda a cor da frente depois de pintar.
+        if self.st.interaction.is_none() {
+            let fg = self.st.fg;
+            if self.st.tool.paints()
+                && self.st.prefs.recent.first() != Some(&fg)
+                && ctx.input(|i| i.pointer.any_released())
+            {
+                self.st.prefs.recent.retain(|c| *c != fg);
+                self.st.prefs.recent.insert(0, fg);
+                self.st.prefs.recent.truncate(20);
+                save_prefs(&self.st);
             }
         }
-        if self.dialog.is_none() {
-            self.shortcuts(&ctx);
-        }
-        // Fim de um gesto (soltou o mouse ou uma tecla): o próximo vira outro passo de desfazer.
-        if ctx.input(|i| {
-            i.pointer.any_released()
-                || i.events
-                    .iter()
-                    .any(|e| matches!(e, egui::Event::Key { pressed: false, .. }))
-        }) {
-            self.ed.end_change();
-        }
-        if self
-            .selected
-            .is_some_and(|id| self.ed.doc().layer(id).is_none())
-        {
-            self.selected = None;
-        }
-        if ctx.input(|i| i.viewport().close_requested()) && self.ed.is_dirty() && !self.allow_close
+        if ctx.input(|i| i.viewport().close_requested())
+            && !self.st.allow_close
+            && self.st.docs.iter().any(|d| d.ed.is_dirty())
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.dialog = Some(Dialog::ConfirmClose);
+            self.st.dialog = Some(Dialog::ConfirmQuit);
         }
-        if self.allow_close && self.screenshot.is_none() {
+        if self.st.allow_close && self.screenshot.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        let name = self
-            .path
-            .as_ref()
-            .and_then(|p| p.file_stem())
-            .map_or("Sem título".into(), |s| s.to_string_lossy().into_owned());
-        let title = format!(
-            "{}{name} — PawPaint",
-            if self.ed.is_dirty() { "• " } else { "" }
-        );
+        let title = match self.st.doc() {
+            Some(d) => format!("{} — PawPaint", d.title()),
+            None => "PawPaint".to_string(),
+        };
         if title != self.last_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_title = title;
         }
-        self.render_texture(&ctx);
         let bar = |fill| {
             egui::Frame::new()
                 .fill(fill)
@@ -1720,34 +1676,62 @@ impl PaintApp {
         egui::Panel::top("menu")
             .frame(bar(theme::BG_DARK))
             .show(ui, |ui| self.menu_bar(ui));
+        egui::Panel::top("brushbar")
+            .exact_size(34.0)
+            .frame(bar(theme::BAR))
+            .show(ui, |ui| self.brush_bar(ui));
         egui::Panel::bottom("status")
-            .exact_size(24.0)
+            .exact_size(22.0)
             .frame(bar(theme::BG_DARK))
             .show(ui, |ui| self.status_bar(ui));
-        let panel = egui::Frame::new()
-            .fill(theme::BAR)
-            .inner_margin(egui::Margin::same(8));
-        egui::Panel::left("layers")
-            .exact_size(280.0)
-            .resizable(false)
-            .frame(panel)
-            .show(ui, |ui| self.layers_panel(ui));
-        egui::Panel::right("props")
-            .exact_size(310.0)
-            .resizable(false)
-            .frame(panel)
-            .show(ui, |ui| self.properties_panel(ui));
-        egui::CentralPanel::no_frame().show(ui, |ui| self.canvas_ui(ui));
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            let style = theme::dock_style(ui.style().as_ref());
+            DockArea::new(&mut self.dock)
+                .style(style)
+                .show_leaf_collapse_buttons(false)
+                .show_leaf_close_all_buttons(false)
+                .show_inside(ui, &mut Viewer { st: &mut self.st });
+        });
+        self.apply_dock_commands();
         self.dialogs(&ctx);
-        self.toasts.tick(&ctx);
-        self.toasts.ui(&ctx);
+        self.st.toasts.tick(&ctx);
+        self.st.toasts.ui(&ctx);
+        self.save_layout();
+    }
+
+    fn apply_dock_commands(&mut self) {
+        for c in std::mem::take(&mut self.st.dock_commands) {
+            match c {
+                DockCommand::Reset => self.dock = default_layout(),
+                DockCommand::Toggle(p) => {
+                    if let Some(loc) = self.dock.find_tab(&p) {
+                        self.dock.remove_tab(loc);
+                    } else {
+                        self.dock.push_to_focused_leaf(p);
+                    }
+                }
+            }
+        }
+    }
+
+    fn save_layout(&mut self) {
+        if !self.frames.is_multiple_of(30) {
+            return;
+        }
+        if let Ok(t) = serde_json::to_string(&self.dock)
+            && t != self.last_layout
+        {
+            let _ = std::fs::create_dir_all(config_dir());
+            let _ = std::fs::write(config_dir().join("layout.json"), &t);
+            self.last_layout = t;
+        }
     }
 
     fn screenshot_hook(&mut self, ctx: &egui::Context) {
+        self.frames += 1;
         let Some(path) = self.screenshot.clone() else {
             return;
         };
-        self.frames += 1;
         if self.frames == 40 {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
         }
@@ -1764,26 +1748,11 @@ impl PaintApp {
             {
                 let _ = buf.save(&path);
             }
-            self.allow_close = true;
+            self.st.allow_close = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         ctx.request_repaint();
     }
-}
-
-/// Botão de cor; `alpha` deixa mexer na transparência também.
-fn color_button(ui: &mut egui::Ui, c: &mut Rgba, alpha: bool) -> bool {
-    let mut col = to_color(*c);
-    let mode = if alpha {
-        egui::color_picker::Alpha::OnlyBlend
-    } else {
-        egui::color_picker::Alpha::Opaque
-    };
-    let changed = egui::color_picker::color_edit_button_srgba(ui, &mut col, mode).changed();
-    if changed {
-        *c = from_color(col);
-    }
-    changed
 }
 
 impl eframe::App for PaintApp {
@@ -1797,58 +1766,221 @@ impl eframe::App for PaintApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::{Event, PointerButton, Pos2, RawInput, Rect, pos2};
 
-    /// Desenha a janela inteira com texto, forma e imagem, e com o texto selecionado.
-    #[test]
-    fn the_whole_window_renders_with_a_selection() {
-        let mut app = PaintApp::empty();
-        let t = app.ed.add_text("TESTE");
-        app.ed.add_shape(ShapeKind::Ellipse);
-        app.ed.add_image(
-            "foto",
-            image::RgbaImage::from_pixel(50, 50, image::Rgba([200, 50, 50, 255])),
-        );
-        app.selected = Some(t);
-        app.guides = true;
-        let ctx = egui::Context::default();
-        theme::apply(&ctx);
-        for i in 0..3 {
-            if i == 1 {
-                app.selected = None;
+    struct Harness {
+        ctx: egui::Context,
+        app: PaintApp,
+        time: f64,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let ctx = egui::Context::default();
+            theme::apply(&ctx);
+            let mut app = PaintApp::empty();
+            app.st.preset_thumbs = app
+                .st
+                .presets
+                .iter()
+                .map(|b| docks::brush_thumb(&ctx, b, &b.name))
+                .collect();
+            add_doc(&mut app.st, Editor::new(300, 200, Background::White), None);
+            let mut h = Self {
+                ctx,
+                app,
+                time: 0.0,
+            };
+            for _ in 0..3 {
+                h.frame(vec![]);
             }
-            if i == 2 {
-                app.dialog = Some(Dialog::New { w: 1280, h: 720 });
-            }
-            let out = ctx.run_ui(Default::default(), |ui| app.frame(ui));
+            h
+        }
+
+        fn frame(&mut self, events: Vec<Event>) {
+            self.time += 0.016;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1480.0, 880.0))),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let out = self.ctx.run_ui(raw, |ui| self.app.frame(ui));
             out.drop_without_applying_deltas();
         }
-        assert!(app.rendered.is_some());
-        assert_eq!(app.previews.len(), 2);
+
+        fn screen(&self, x: f32, y: f32) -> Pos2 {
+            let d = self.app.st.doc().unwrap();
+            d.view_origin + vec2(x, y) * d.zoom
+        }
+
+        fn mv(&mut self, x: f32, y: f32) {
+            let p = self.screen(x, y);
+            self.frame(vec![Event::PointerMoved(p)]);
+        }
+
+        fn button(&mut self, x: f32, y: f32, pressed: bool, mods: Modifiers) {
+            let p = self.screen(x, y);
+            self.frame(vec![Event::PointerButton {
+                pos: p,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: mods,
+            }]);
+        }
+
+        fn drag(&mut self, from: (f32, f32), to: (f32, f32)) {
+            self.mv(from.0, from.1);
+            self.button(from.0, from.1, true, Modifiers::NONE);
+            for i in 1..=4 {
+                let t = i as f32 / 4.0;
+                self.mv(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+            }
+            self.button(to.0, to.1, false, Modifiers::NONE);
+            self.frame(vec![]);
+        }
+
+        fn px(&self, x: usize, y: usize) -> [u8; 4] {
+            let d = self.app.st.doc().unwrap();
+            d.ed.doc().layer(d.active).unwrap().pixels.pixel(x, y)
+        }
     }
 
     #[test]
-    fn exporting_jpg_respects_the_youtube_limit() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = PaintApp::empty();
-        app.ed.add_text("OI");
-        let path = dir.path().join("t.jpg");
-        app.export_jpg(path.clone());
-        let size = std::fs::metadata(&path).unwrap().len() as usize;
-        assert!(size > 1000 && size <= YOUTUBE_MAX, "{size}");
-        let img = image::open(&path).unwrap();
-        assert_eq!((img.width(), img.height()), (THUMB_W, THUMB_H));
+    fn dragging_with_the_brush_paints_and_undoes_as_one_step() {
+        let mut h = Harness::new();
+        h.app.st.brush = Brush {
+            size: 12.0,
+            hardness: 1.0,
+            ..Brush::basic()
+        };
+        h.app.st.fg = [255, 0, 0];
+        h.app.st.tool = Tool::Brush;
+        h.drag((40.0, 100.0), (240.0, 100.0));
+        assert_eq!(h.px(140, 100), [255, 0, 0, 255]);
+        assert_eq!(h.px(140, 130), [255, 255, 255, 255]);
+        let d = h.app.st.doc_mut().unwrap();
+        assert_eq!(d.ed.undo_label(), Some("Pincel"));
+        d.ed.undo();
+        assert_eq!(h.px(140, 100), [255, 255, 255, 255]);
     }
 
     #[test]
-    fn save_and_open_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.pawpaint");
-        let mut app = PaintApp::empty();
-        app.ed.add_text("OI");
-        app.save_to(path.clone());
-        assert!(!app.ed.is_dirty());
-        let mut other = PaintApp::empty();
-        other.open_project(&path);
-        assert_eq!(other.ed.doc().layers.len(), 1);
+    fn eraser_selection_fill_and_bucket_follow_the_mouse() {
+        let mut h = Harness::new();
+        h.app.st.brush = Brush {
+            size: 20.0,
+            hardness: 1.0,
+            ..Brush::basic()
+        };
+        h.app.st.tool = Tool::Eraser;
+        h.drag((40.0, 50.0), (200.0, 50.0));
+        assert_eq!(h.px(100, 50)[3], 0);
+        // seleção retangular e preenchimento com Backspace
+        set_tool(&mut h.app.st, Tool::SelRect);
+        h.drag((20.0, 120.0), (120.0, 180.0));
+        let sel = h
+            .app
+            .st
+            .doc()
+            .unwrap()
+            .ed
+            .doc()
+            .selection
+            .clone()
+            .expect("seleção");
+        assert_eq!(sel.bounds().map(|b| (b.0 / 10, b.1 / 10)), Some((2, 12)));
+        h.app.st.fg = [0, 0, 255];
+        edit_fill(&mut h.app.st, false);
+        assert_eq!(h.px(60, 150), [0, 0, 255, 255]);
+        assert_eq!(h.px(200, 150), [255, 255, 255, 255]);
+        // balde de tinta: clica na parte branca de fora da seleção (a seleção segura o resto)
+        h.app.st.doc_mut().unwrap().ed.deselect();
+        set_tool(&mut h.app.st, Tool::Fill);
+        h.app.st.fg = [0, 200, 0];
+        h.mv(250.0, 20.0);
+        h.button(250.0, 20.0, true, Modifiers::NONE);
+        h.button(250.0, 20.0, false, Modifiers::NONE);
+        assert_eq!(h.px(250, 20), [0, 200, 0, 255]);
+        assert_eq!(h.px(60, 150), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn move_tool_drags_the_layer_and_transform_waits_for_enter() {
+        let mut h = Harness::new();
+        {
+            let d = h.app.st.doc_mut().unwrap();
+            let id = d.ed.add_layer(None, None);
+            d.active = id;
+            d.ed.fill_selection(id, [9, 9, 9]).unwrap();
+            d.ed.select_all();
+            d.ed.combine_selection(
+                pawpaint_core::Selection::rect(300, 200, 10, 10, 30, 30),
+                pawpaint_core::selection::SelOp::Replace,
+                "s",
+            );
+            d.ed.fill_selection(id, [200, 0, 0]).unwrap();
+            d.ed.deselect();
+        }
+        let id = h.app.st.doc().unwrap().active;
+        h.app.st.doc_mut().unwrap().ed.clear_layer(id).unwrap();
+        {
+            let d = h.app.st.doc_mut().unwrap();
+            d.ed.combine_selection(
+                pawpaint_core::Selection::rect(300, 200, 10, 10, 30, 30),
+                pawpaint_core::selection::SelOp::Replace,
+                "s",
+            );
+            d.ed.fill_selection(id, [200, 0, 0]).unwrap();
+            d.ed.deselect();
+        }
+        set_tool(&mut h.app.st, Tool::Move);
+        h.drag((100.0, 100.0), (150.0, 130.0));
+        assert!(
+            h.app.st.doc().unwrap().float.is_none(),
+            "Mover comita ao soltar"
+        );
+        assert_eq!(h.px(20, 20), [0; 4]);
+        assert_eq!(h.px(70, 50), [200, 0, 0, 255]);
+        // Transformar: solta a camada e espera o Enter
+        set_tool(&mut h.app.st, Tool::Transform);
+        h.frame(vec![]);
+        assert!(h.app.st.doc().unwrap().float.is_some());
+        canvas::confirm(&mut h.app.st, false);
+        assert!(h.app.st.doc().unwrap().float.is_none());
+        assert_eq!(h.px(70, 50), [200, 0, 0, 255]);
+    }
+
+    #[test]
+    fn docks_render_with_content_in_every_panel() {
+        let mut h = Harness::new();
+        h.app.st.dialog = Some(Dialog::New {
+            w: 100,
+            h: 100,
+            bg: 0,
+            color: [1, 2, 3],
+        });
+        h.frame(vec![]);
+        h.app.st.dialog = Some(Dialog::Filter {
+            kind: FilterKind::Blur,
+            a: 3.0,
+            b: 0.0,
+            c: 0.0,
+            preview: true,
+            applied: false,
+        });
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert!(h.app.st.doc().unwrap().ed.undo_label().is_some());
+        h.app.st.dialog = None;
+        for p in Panel::ALL {
+            let mut layout = DockState::new(vec![Panel::Canvas]);
+            layout.main_surface_mut().push_to_focused_leaf(p);
+            h.app.dock = layout;
+            h.frame(vec![]);
+        }
+        h.app.dock = default_layout();
+        h.frame(vec![]);
+        let _ = pos2(0.0, 0.0);
     }
 }
