@@ -97,8 +97,10 @@ Cantos com raio 3 (widgets) e 4 (janelas). Bordas de 1 px em `BORDER`. Espaço e
   andar para o lado.
 - **Barra de estado** embaixo: informação que muda sempre (tempo, contagens, zoom), nunca
   botão perigoso.
-- **Diálogos** são janelas pequenas, sem colapsar, com largura fixa. Confirmação de perigo usa
-  `Modal` com os botões na ordem Salvar, Não salvar, Cancelar.
+- **Diálogos** são janelas pequenas, sem seta de recolher (`collapsible(false)`), com largura
+  fixa e abertas por `dialog_pos`: centralizadas na horizontal, perto do topo. Confirmação de
+  perigo usa `Modal` com os botões na ordem Salvar, Não salvar, Cancelar.
+- **Menus** da barra de cima rolam quando não cabem na tela (`top_menu`), nunca cortam itens.
 - **Avisos** vão para `paw_ui::toasts` (canto de baixo, somem sozinhos, erro em vermelho e fica
   mais tempo). Diálogo bloqueante só para o que exige decisão.
 
@@ -123,8 +125,9 @@ em volta, nem vazar para fora da linha.
    multiplique pela escala interna.
 5. **Sempre com `range`.** Todo campo numérico tem mínimo e máximo, e o modelo (core) valida de
    novo: a interface ajuda, o core protege.
-6. **Digitar e arrastar dão o mesmo resultado**, com sufixo (`" %"`, `" dB"`, `" fr"`) e o mesmo
-   número de casas decimais.
+6. **Digitar e arrastar dão o mesmo resultado**, com sufixo (`" %"`, `" dB"`, `" px"`, `" fr"`)
+   e o mesmo número de casas decimais. O egui deduz as casas decimais de `speed`: campos
+   parecidos usam o mesmo `speed`, senão um mostra "100 %" e o vizinho "100.0 %".
 7. **Um passo de desfazer por gesto.** Arrastar um valor aplica a edição com
    `apply_coalescing(chave)`; soltar o mouse, Enter ou Tab fecham o passo.
 8. **Campo de texto foca = atalhos calam.** Com um campo de texto em foco, nenhum atalho de
@@ -145,8 +148,10 @@ O app abre bem em 960 x 600 e continua usável.
 - Menus e listas mais altos que a tela rolam (`ScrollArea` com `max_height`), em vez de cortar
   os últimos itens.
 - Janelas abrem centralizadas na horizontal e perto do topo (o topo fica fixo se a altura
-  mudar). Se não couberem, **só as opções rolam**: o resumo e os botões de ação ficam sempre à
-  vista.
+  mudar). Se não couberem, **só as opções rolam** (`ScrollArea` em volta delas, com
+  `max_height` calculado a partir da altura da tela): o resumo e os botões de ação ficam sempre
+  à vista. Não use `Window::vscroll(true)`: ele limita a altura da janela e esconde o botão
+  principal embaixo da dobra.
 - Nunca use `f32::clamp(min, max)` com limites que dependem do tamanho de algo na tela: se
   `min > max` o app cai. Use um clamp seguro (`clamp_in`) que fica no meio quando o intervalo
   se inverte.
@@ -158,6 +163,8 @@ O app abre bem em 960 x 600 e continua usável.
   roda rola. Um atalho novo nunca rouba o de outro app; se o original (Resolve, Audacity, Krita)
   usa uma tecla, a nossa usa a mesma.
 - **Paleta de comandos** (Ctrl+K) lista toda ação com o atalho ao lado.
+- **Atalhos aparecem como o usuário os digita**: `Shift+[`, não `Shift+OpenBracket`; `1`, não
+  `Num1` (`key_label` no keymap).
 - **Botão direito** abre o que se faz com aquilo (menu de contexto), nunca é o único caminho.
 - **Arrastar e soltar** arquivos na janela importa/abre.
 - **Cursor do mouse** diz o que vai acontecer (redimensionar, texto, mão).
@@ -174,14 +181,35 @@ Regras para qualquer app que toque ou grave som (`paw-audio` e o player do PawCu
    play, seek, scrub e stop.
 2. **Sem degrau.** Quando um parâmetro muda no meio da reprodução, passe do som antigo para o
    novo com um crossfade curto (um bloco de ~20 ms), senão dá estalo.
-3. **Buffer curto.** ~60 a 100 ms de fila na placa (`BufferAttr`), para que o que o usuário
-   fez seja ouvido quase na hora. O padrão do PulseAudio (~250 ms) parece lento.
+3. **Buffer curto.** ~60 a 100 ms de fila na placa (`BufferAttr`; 60 ms no `paw-audio`, 100 ms
+   no PawCut, que mixa mais coisa por bloco), para que o que o usuário fez seja ouvido quase na
+   hora. O padrão do PulseAudio (~250 ms) parece lento.
 4. **O áudio é o relógio.** O cursor de reprodução vem da posição que já saiu da caixa de som
    (posição escrita menos a latência), não de um cronômetro.
-5. **A thread de áudio nunca espera pela interface.** Estado compartilhado por atômicos ou
-   `Mutex` com trava curta, e a decodificação pesada é feita antes (`prepare`).
+5. **A thread de áudio nunca espera pela interface, nem decodifica.** Estado compartilhado por
+   atômicos ou `Mutex` com trava curta. A decodificação roda numa thread à parte
+   (`AudioLoader`) e entrega o PCM pronto; o laço de áudio só mixa o que já está na memória
+   (`mix_audio_resident`). Um clipe novo fica mudo por um instante em vez de travar o som dos
+   outros. Se algo sair da memória (orçamento de cache), é pedido de novo sozinho.
 6. **Medidores** sobem na hora e descem devagar (x0,85 por bloco). Pico em 0..1, escala em dB.
 7. **Loudness** em LUFS (EBU R128), alvo de −14 para YouTube, e nunca passa de −1 dB de pico.
+8. **Exportar em etapas visíveis.** A mixagem do áudio acontece antes dos frames e pode demorar:
+   o progresso informa a etapa ("Preparando o áudio…", depois "n / total frames"), e o arquivo
+   temporário do áudio é de 16 bits (metade do disco do float; o destino é AAC, MP3 ou WAV de
+   16 bits).
+9. **Compatibilidade com versões do ffmpeg.** Decoders do ffmpeg 6/7 podem não preencher o
+   layout de canais (WAV de 16 bits). Sempre tenha o reserva pela contagem de canais e teste
+   com arquivos gerados pelo `ffmpeg` de linha de comando em `pcm_s16le`, `pcm_s32le` e
+   `pcm_f32le`, mono e estéreo.
+
+### Como provar que o áudio não picota
+
+Sem placa de som, dá para medir. Suba um PulseAudio com um sink nulo
+(`pactl load-module module-null-sink sink_name=test`), toque um seno de 440 Hz no app e grave
+`test.monitor` com `parec` enquanto arrasta o volume. Num seno puro os cruzamentos por zero
+ficam a ~109 amostras (48 kHz); intervalos que fogem mais de 10 % disso são trechos repetidos
+ou degraus. Antes do conserto do PawCut eram 28 em ~3000 (um a cada ~0,1 s de arrasto); depois,
+zero.
 
 ## 7. Arquivos e segurança do trabalho
 
@@ -205,7 +233,7 @@ Regras para qualquer app que toque ou grave som (`paw-audio` e o player do PawCu
   tamanho).
 - Estruturas imutáveis compartilhadas (`Arc<Project>`) entre interface, preview e áudio, em vez
   de copiar.
-- Pedir repaint só quando algo muda ou algo está tocando.
+- Pedir repaint só quando algo muda ou algo está tocando. Parado, o app fica em 0 % de CPU.
 - Medir antes de otimizar, e deixar um teste ou exemplo (`examples/`) que reproduz o gargalo.
 
 ## 9. Qualidade
@@ -215,10 +243,31 @@ Regras para qualquer app que toque ou grave som (`paw-audio` e o player do PawCu
 - A interface tem testes com cliques e arrastos simulados (`egui_kittest`): um bug de
   interface corrigido ganha um teste.
 - `scripts/ui-fuzz.sh <app>` abre o app num display virtual e faz cliques, arrastos e atalhos
-  aleatórios. Todo crash que ele achar vira um teste que reproduz.
+  aleatórios. Todo crash que ele achar vira um teste que reproduz (e o teste tem de falhar sem
+  o conserto: confira revertendo o conserto).
+- **Ver o app de verdade**, sem monitor: `Xvfb :99 -screen 0 1600x950x24`, o app com
+  `DISPLAY=:99`, `xdotool` para clicar, arrastar e apertar teclas (`xdotool windowfocus` antes:
+  sem gerenciador de janelas as teclas não chegam) e `import -window root foto.png` para a
+  captura. Pacotes: `xvfb xdotool imagemagick libxkbcommon-x11-0 libgl1-mesa-dri`.
+  Faça isso também em 960 x 600 e com os painéis estreitos: foi assim que apareceram campos
+  cortados, menus sem fim e janelas altas demais.
 - Mensagem de commit: `tipo(app): o que mudou` (`feat`, `fix`, `perf`, `polish`).
 
-## 10. Checklist para uma tela nova
+## 10. Erros que já aconteceram (e a regra que saiu deles)
+
+| O que aconteceu | Regra |
+|---|---|
+| Ajustar o volume durante o play picotava o som: cada edição esvaziava o buffer e recomeçava de uma posição atrasada | 6.1 e 6.2: editar não reinicia, e o som novo entra em crossfade |
+| Zoom e Opacidade mudavam 50 % por pixel arrastado | 4.4: `speed` na unidade da tela |
+| Inspector estreito cortava Fonte, Tamanho, Cor e o botão Normalizar | painel com largura mínima, rótulo cede antes do campo |
+| Clipe de 1 frame com a timeline afastada derrubava o app (`clamp` com min > max) | clamp seguro para tudo que depende de tamanho na tela |
+| Menu Editar sem os últimos itens em janela de 600 px | menus rolam |
+| Deliver com o botão Exportar fora da tela | só as opções rolam; ação principal sempre à vista |
+| WAV de 16 bits não abria no ffmpeg 6/7 (layout de canais vazio) | 6.9: reserva pela contagem de canais |
+| Clipe desligado com arquivo sumido bloqueava a exportação | a checagem de mídia offline segue as mesmas regras do renderizador |
+| Atalhos escritos como `Shift+OpenBracket` | rótulos de tecla legíveis |
+
+## 11. Checklist para uma tela nova
 
 - [ ] Só usa cores e medidas de `paw_ui::theme`.
 - [ ] Barras e linhas usam `toolbar`, `section` e `row`.
@@ -229,5 +278,9 @@ Regras para qualquer app que toque ou grave som (`paw-audio` e o player do PawCu
 - [ ] Um gesto = um passo de desfazer.
 - [ ] Trabalho pesado fora da thread da interface.
 - [ ] Funciona com o painel pequeno, a janela em 960 x 600 e o painel maximizado.
+- [ ] Menu ou lista alta rola; janela alta rola só as opções; o botão principal fica à vista.
+- [ ] Nenhum `clamp(min, max)` com limites que dependem do tamanho da tela.
+- [ ] Nada decodifica, lê disco grande ou espera rede na thread de interface ou na de áudio.
+- [ ] Operação longa mostra a etapa e deixa cancelar.
 - [ ] Passou pelo `scripts/ui-fuzz.sh` sem cair.
 - [ ] Texto em português, curto, sem traço longo.
