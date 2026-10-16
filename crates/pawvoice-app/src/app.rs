@@ -197,6 +197,16 @@ struct SpecCache {
     cols: usize,
 }
 
+/// Efeito que está sendo calculado fora da thread da interface.
+struct EffectJob {
+    label: &'static str,
+    rx: Receiver<pawvoice_core::ProcessJob>,
+    started: Instant,
+}
+
+/// Até este tanto de áudio (amostras de todos os canais) o efeito roda na hora, sem aviso.
+const INLINE_EFFECT_SAMPLES: usize = RATE as usize * 60;
+
 pub struct VoiceApp {
     pub ed: Editor,
     pub path: Option<PathBuf>,
@@ -220,6 +230,8 @@ pub struct VoiceApp {
     /// Rótulo sendo escrito: (faixa de rótulos, índice, texto).
     label_edit: Option<(u64, usize, String)>,
     player: Player,
+    /// Efeito demorado rodando em outra thread.
+    effect: Option<EffectJob>,
     /// Uma reprodução foi iniciada e ainda não foi vista terminar (para repetir em loop).
     play_active: bool,
     /// Revisão da sessão que o player está tocando: se mudar, troca a mixagem ao vivo.
@@ -422,6 +434,7 @@ impl VoiceApp {
             empty_menu: None,
             label_edit: None,
             player: Player::spawn(RATE, 2),
+            effect: None,
             play_active: false,
             play_rev: 0,
             looping: false,
@@ -651,16 +664,88 @@ impl VoiceApp {
 
     // ---------------------------------------------------------------- edições
 
-    pub fn apply_effect(&mut self, label: &'static str, f: impl FnMut(&mut [Vec<f32>])) {
+    /// Aplica um efeito no trecho selecionado (ou em tudo). Trechos grandes (uma narração de
+    /// vários minutos leva segundos em alguns efeitos) rodam em outra thread, com um aviso na
+    /// tela, para a janela não congelar.
+    pub fn apply_effect(
+        &mut self,
+        label: &'static str,
+        mut f: impl FnMut(&mut [Vec<f32>]) + Send + 'static,
+    ) {
         self.stop();
-        match self.target() {
-            Some((tracks, a, b)) => {
-                if let Err(e) = self.ed.process(&tracks, a, b, label, f) {
-                    self.warn(e.to_string());
-                }
-            }
-            None => self.warn("Grave ou importe áudio primeiro"),
+        if self.effect.is_some() {
+            return;
         }
+        let Some((tracks, a, b)) = self.target() else {
+            self.warn("Grave ou importe áudio primeiro");
+            return;
+        };
+        let mut job = match self.ed.begin_process(&tracks, a, b) {
+            Ok(job) => job,
+            Err(e) => {
+                self.warn(e.to_string());
+                return;
+            }
+        };
+        if job.samples() <= INLINE_EFFECT_SAMPLES {
+            job.run(&mut f);
+            self.finish_effect(job, label);
+            return;
+        }
+        let (tx, rx) = channel();
+        std::thread::Builder::new()
+            .name("pawvoice-effect".into())
+            .spawn(move || {
+                job.run(f);
+                let _ = tx.send(job);
+            })
+            .expect("não foi possível criar a thread do efeito");
+        self.effect = Some(EffectJob {
+            label,
+            rx,
+            started: Instant::now(),
+        });
+    }
+
+    fn finish_effect(&mut self, job: pawvoice_core::ProcessJob, label: &'static str) {
+        if let Err(e) = self.ed.finish_process(job, label) {
+            self.warn(e.to_string());
+        }
+    }
+
+    /// Recolhe o efeito que terminou.
+    fn poll_effect(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.effect else { return };
+        match job.rx.try_recv() {
+            Ok(done) => {
+                let label = job.label;
+                self.effect = None;
+                self.finish_effect(done, label);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.effect = None;
+                self.warn("O efeito falhou");
+            }
+        }
+    }
+
+    /// Aviso por cima de tudo enquanto um efeito roda: bloqueia o resto da tela (editar no meio
+    /// faria o resultado entrar sobre áudio velho).
+    fn effect_overlay(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.effect else { return };
+        egui::Modal::new(egui::Id::new("effect-running")).show(ctx, |ui| {
+            ui.set_width(280.0);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new(format!("Aplicando {}…", job.label)).strong());
+            });
+            ui.label(
+                RichText::new(format!("{:.0} s", job.started.elapsed().as_secs_f32()))
+                    .weak()
+                    .small(),
+            );
+        });
     }
 
     pub fn delete_selection(&mut self) {
@@ -1268,7 +1353,7 @@ impl VoiceApp {
 
     /// Atalhos do Audacity.
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() || self.dialog.is_some() {
+        if ctx.egui_wants_keyboard_input() || self.dialog.is_some() || self.effect.is_some() {
             return;
         }
         let pressed = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
@@ -1756,7 +1841,7 @@ impl VoiceApp {
             {
                 ui.close();
                 let t = self.lufs_target;
-                self.apply_effect("Melhorar voz", |p| effects::enhance_voice(p, RATE, t));
+                self.apply_effect("Melhorar voz", move |p| effects::enhance_voice(p, RATE, t));
             }
             ui.separator();
             ui.label(RichText::new("Volume").weak().small());
@@ -1764,17 +1849,19 @@ impl VoiceApp {
                 if ui.button("Normalizar loudness").clicked() {
                     ui.close();
                     let t = self.lufs_target;
-                    self.apply_effect("Normalizar loudness", |p| {
+                    self.apply_effect("Normalizar loudness", move |p| {
                         effects::loudness(p, RATE, t);
                     });
                 }
-                ui.add(
-                    egui::DragValue::new(&mut self.lufs_target)
-                        .range(-30.0..=-6.0)
-                        .speed(0.2)
-                        .suffix(" LUFS"),
-                )
-                .on_hover_text("−14 YouTube · −16 narração/podcast · −23 TV");
+                theme::fixed_width(ui, theme::NUM_W + 20.0, |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.lufs_target)
+                            .range(-30.0..=-6.0)
+                            .speed(0.2)
+                            .suffix(" LUFS"),
+                    )
+                    .on_hover_text("−14 YouTube · −16 narração/podcast · −23 TV")
+                });
             });
             if ui.button("Normalizar (pico −1 dB)").clicked() {
                 ui.close();
@@ -1806,7 +1893,7 @@ impl VoiceApp {
                 .clicked()
             {
                 ui.close();
-                self.apply_effect("Fade in", |p| effects::each(p, |s| dsp::fade(s, true)));
+                self.apply_effect("Fade in", move |p| effects::each(p, |s| dsp::fade(s, true)));
             }
             if ui
                 .add_enabled(has_sel, egui::Button::new("Fade out"))
@@ -1814,7 +1901,9 @@ impl VoiceApp {
                 .clicked()
             {
                 ui.close();
-                self.apply_effect("Fade out", |p| effects::each(p, |s| dsp::fade(s, false)));
+                self.apply_effect("Fade out", move |p| {
+                    effects::each(p, |s| dsp::fade(s, false))
+                });
             }
             ui.separator();
             ui.label(RichText::new("Ruído e timbre").weak().small());
@@ -1841,7 +1930,7 @@ impl VoiceApp {
             }
             if ui.button("Filtro passa-altas 80 Hz (tira ronco)").clicked() {
                 ui.close();
-                self.apply_effect("Passa-altas", |p| {
+                self.apply_effect("Passa-altas", move |p| {
                     effects::each(p, |s| dsp::high_pass(s, RATE, 80.0))
                 });
             }
@@ -1863,7 +1952,7 @@ impl VoiceApp {
             }
             if ui.button("Inverter (de trás para frente)").clicked() {
                 ui.close();
-                self.apply_effect("Inverter", |p| effects::each(p, |s| s.reverse()));
+                self.apply_effect("Inverter", move |p| effects::each(p, |s| s.reverse()));
             }
         }
     }
@@ -3157,9 +3246,13 @@ impl VoiceApp {
             {
                 let rr = ui.add(egui::TextEdit::singleline(text).desired_width(x1 - x0 - 48.0));
                 rr.request_focus();
-                if rr.lost_focus() {
+                // Esc cancela; Enter ou clicar fora confirma.
+                let cancel = ui.input(|i| i.key_pressed(Key::Escape));
+                if rr.lost_focus() || cancel {
                     let (rid, text) = self.renaming.take().expect("renomeando");
-                    let _ = self.ed.rename_track(rid, text.trim().to_string());
+                    if !cancel {
+                        let _ = self.ed.rename_track(rid, text.trim().to_string());
+                    }
                 }
             } else {
                 let nr = ui
@@ -3722,8 +3815,13 @@ impl VoiceApp {
                 if r.has_focus() {
                     self.sel_edit[k] = Some(t.clone());
                 }
-                if r.lost_focus() {
-                    if let Some(v) = parse_time(&t, RATE) {
+                // Esc desfaz o que foi digitado; Enter ou Tab confirmam.
+                let cancel = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape));
+                if r.lost_focus() && !cancel {
+                    // Só mexe se o texto mudou: o campo mostra milissegundos, e confirmar sem digitar
+                    // nada arredondaria a seleção (que tem precisão de amostra) para o ms mais perto.
+                    let edited = t != format_time(value, RATE);
+                    if let Some(v) = parse_time(&t, RATE).filter(|_| edited) {
                         let (mut na, mut nb) = (a, b);
                         if k == 0 {
                             na = v;
@@ -3737,6 +3835,8 @@ impl VoiceApp {
                             self.cursor = na;
                         }
                     }
+                    self.sel_edit[k] = None;
+                } else if cancel {
                     self.sel_edit[k] = None;
                 }
             }
@@ -3839,13 +3939,15 @@ impl VoiceApp {
                 .small(),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(
-                    egui::DragValue::new(&mut self.wpm)
-                        .range(80.0..=240.0)
-                        .speed(1.0)
-                        .suffix(" ppm"),
-                )
-                .on_hover_text("Palavras por minuto (velocidade da leitura)");
+                theme::fixed_width(ui, theme::NUM_W + 12.0, |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.wpm)
+                            .range(80.0..=240.0)
+                            .speed(1.0)
+                            .suffix(" ppm"),
+                    )
+                    .on_hover_text("Palavras por minuto (velocidade da leitura)")
+                });
             });
         });
         ui.separator();
@@ -3901,11 +4003,18 @@ impl VoiceApp {
             Dialog::Recover(_) => "Recuperação automática",
         };
         let noise_info = self.noise.as_ref().map(|(_, secs)| *secs);
+        let (is_confirm, is_recover) = (
+            matches!(dialog, Dialog::ConfirmClose),
+            matches!(dialog, Dialog::Recover(_)),
+        );
+        let ready = !matches!(dialog, Dialog::NoiseReduction { .. }) || noise_info.is_some();
         egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
+                // Largura fixa para o valor de cada slider: ele não cresce nem encolhe com os dígitos.
+                ui.spacing_mut().interact_size.x = theme::NUM_W + 12.0;
                 match dialog {
                     Dialog::Gain(db) => {
                         ui.add(
@@ -4037,8 +4146,6 @@ impl VoiceApp {
                         Dialog::Recover(_) => ("Recuperar", "Descartar"),
                         _ => ("Aplicar", "Cancelar"),
                     };
-                    let ready =
-                        !matches!(dialog, Dialog::NoiseReduction { .. }) || noise_info.is_some();
                     if ui
                         .add_enabled(ready, egui::Button::new(RichText::new(ok).strong()))
                         .clicked()
@@ -4050,6 +4157,19 @@ impl VoiceApp {
                     }
                 });
             });
+        // Esc cancela e Enter aplica, como em qualquer diálogo. Esc não descarta a recuperação
+        // (apagaria as gravações) e Enter não confirma "Sair sem salvar" nem a recuperação.
+        if !ctx.text_edit_focused() {
+            if !is_recover && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                close = true;
+            } else if !is_confirm
+                && !is_recover
+                && ready
+                && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
+            {
+                apply = true;
+            }
+        }
         if capture {
             self.capture_noise_profile();
         }
@@ -4065,17 +4185,17 @@ impl VoiceApp {
             return;
         }
         match self.dialog.take() {
-            Some(Dialog::Gain(db)) => {
-                self.apply_effect("Amplificar", |p| effects::each(p, |s| dsp::gain(s, db)))
-            }
+            Some(Dialog::Gain(db)) => self.apply_effect("Amplificar", move |p| {
+                effects::each(p, |s| dsp::gain(s, db))
+            }),
             Some(Dialog::Gate {
                 threshold,
                 reduction,
-            }) => self.apply_effect("Noise gate", |p| {
+            }) => self.apply_effect("Noise gate", move |p| {
                 effects::each(p, |s| dsp::noise_gate(s, RATE, threshold, reduction))
             }),
             Some(Dialog::Compressor(c)) => {
-                self.apply_effect("Compressor", |p| effects::compress(p, RATE, c))
+                self.apply_effect("Compressor", move |p| effects::compress(p, RATE, c))
             }
             Some(Dialog::Silences { threshold, min }) => self.remove_silences(threshold, min),
             Some(Dialog::NoiseReduction {
@@ -4083,22 +4203,22 @@ impl VoiceApp {
                 sensitivity,
             }) => {
                 if let Some((prof, _)) = self.noise.clone() {
-                    self.apply_effect("Redução de ruído", |p| {
+                    self.apply_effect("Redução de ruído", move |p| {
                         effects::each(p, |s| dsp::reduce_noise(s, &prof, reduction, sensitivity))
                     });
                 }
             }
             Some(Dialog::BassTreble { bass, treble }) => self
-                .apply_effect("Graves e agudos", |p| {
+                .apply_effect("Graves e agudos", move |p| {
                     effects::each(p, |s| dsp::bass_treble(s, RATE, bass, treble))
                 }),
             Some(Dialog::DeEss {
                 threshold,
                 reduction,
-            }) => self.apply_effect("De-esser", |p| {
+            }) => self.apply_effect("De-esser", move |p| {
                 effects::each(p, |s| dsp::de_ess(s, RATE, 5500.0, threshold, reduction))
             }),
-            Some(Dialog::Limiter(db)) => self.apply_effect("Limitador", |p| {
+            Some(Dialog::Limiter(db)) => self.apply_effect("Limitador", move |p| {
                 effects::each(p, |s| dsp::limit(s, RATE, db))
             }),
             Some(Dialog::ConfirmClose) => {
@@ -4125,7 +4245,10 @@ impl VoiceApp {
     pub fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.poll_file();
-        self.poll_imports();
+        self.poll_effect(&ctx);
+        if self.effect.is_none() {
+            self.poll_imports();
+        }
         let now = ctx.input(|i| i.time);
         if self
             .watch
@@ -4210,6 +4333,7 @@ impl VoiceApp {
         }
         egui::CentralPanel::no_frame().show(ui, |ui| self.tracks_panel(ui));
         self.dialogs(&ctx);
+        self.effect_overlay(&ctx);
         self.toasts.tick(&ctx);
         self.toasts.ui(&ctx);
         if self.is_playing() || self.recorder.is_recording() || self.recorder.is_monitoring() {
@@ -4298,17 +4422,38 @@ mod tests {
     fn effects_act_on_the_selection_or_everything() {
         let (mut app, id) = app_with(vec![0.1; 1000]);
         app.sel = Some((100, 200));
-        app.apply_effect("Ganho", |p| effects::each(p, |s| dsp::gain(s, 20.0)));
+        app.apply_effect("Ganho", move |p| effects::each(p, |s| dsp::gain(s, 20.0)));
         let out = mono(&app, id);
         assert!((out[150] - 1.0).abs() < 1e-4 && (out[50] - 0.1).abs() < 1e-6);
         app.select_none();
-        app.apply_effect("Ganho", |p| effects::each(p, |s| dsp::gain(s, -20.0)));
+        app.apply_effect("Ganho", move |p| effects::each(p, |s| dsp::gain(s, -20.0)));
         assert!((mono(&app, id)[50] - 0.01).abs() < 1e-6);
         app.selected = vec![id];
         app.sel = Some((0, 500));
         app.delete_selection();
         assert_eq!(mono(&app, id).len(), 500);
         assert_eq!(app.cursor, 0);
+    }
+
+    #[test]
+    fn long_effects_run_off_the_ui_thread_and_land_when_done() {
+        // 70 s: passa do limite do efeito na hora.
+        let (mut app, id) = app_with(vec![0.1; RATE as usize * 70]);
+        app.apply_effect("Ganho", move |p| effects::each(p, |s| dsp::gain(s, 20.0)));
+        assert!(app.effect.is_some(), "devia rodar em outra thread");
+        let ctx = egui::Context::default();
+        let start = Instant::now();
+        while app.effect.is_some() {
+            app.poll_effect(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            assert!(start.elapsed().as_secs() < 30, "o efeito nunca terminou");
+        }
+        let out = mono(&app, id);
+        assert_eq!(out.len(), RATE as usize * 70);
+        assert!((out[1000] - 1.0).abs() < 1e-4);
+        // Desfazer volta ao áudio de antes.
+        app.undo();
+        assert!((mono(&app, id)[1000] - 0.1).abs() < 1e-6);
     }
 
     #[test]

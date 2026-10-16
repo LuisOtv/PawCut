@@ -21,6 +21,8 @@ pub enum EditError {
     NotStereo,
     #[error("escolha duas faixas mono")]
     NeedTwoMono,
+    #[error("a sessão mudou enquanto o efeito rodava; aplique de novo")]
+    Stale,
 }
 
 /// Para onde mover uma faixa na lista.
@@ -911,8 +913,21 @@ impl Editor {
         a: usize,
         b: usize,
         label: &'static str,
-        mut f: impl FnMut(&mut [Vec<f32>]),
+        f: impl FnMut(&mut [Vec<f32>]),
     ) -> Result<(), EditError> {
+        let mut job = self.begin_process(tracks, a, b)?;
+        job.run(f);
+        self.finish_process(job, label)
+    }
+
+    /// Primeira metade de um efeito: renderiza os trechos. Quem chama processa o `ProcessJob`
+    /// (pode ser em outra thread, é `Send`) e devolve com `finish_process`.
+    pub fn begin_process(
+        &self,
+        tracks: &[u64],
+        a: usize,
+        b: usize,
+    ) -> Result<ProcessJob, EditError> {
         self.check(tracks, a, b)?;
         let mut pieces = Vec::new();
         for id in tracks {
@@ -921,18 +936,36 @@ impl Editor {
             if a >= end {
                 continue;
             }
-            let mut planar = self.render_segments(&slice(&t.segments, a, end), t.channels);
-            f(&mut planar);
-            for ch in &mut planar {
-                ch.resize(end - a, 0.0);
-            }
+            let planar = self.render_segments(&slice(&t.segments, a, end), t.channels);
             pieces.push((*id, planar));
         }
         if pieces.is_empty() {
             return Err(EditError::EmptyRange);
         }
+        Ok(ProcessJob {
+            a,
+            revision: self.revision,
+            pieces,
+        })
+    }
+
+    /// Segunda metade: grava o resultado como fontes novas. Falha com `Stale` se a sessão
+    /// mudou desde o `begin_process` (o resultado seria sobre áudio velho).
+    pub fn finish_process(
+        &mut self,
+        job: ProcessJob,
+        label: &'static str,
+    ) -> Result<(), EditError> {
+        if job.revision != self.revision {
+            return Err(EditError::Stale);
+        }
         self.checkpoint(label);
-        for (id, planar) in pieces {
+        let a = job.a;
+        for (id, mut planar) in job.pieces {
+            let len = planar.iter().map(Vec::len).max().unwrap_or(0);
+            for ch in &mut planar {
+                ch.resize(len, 0.0);
+            }
             let seg = self.add_source(&planar);
             let t = self.track_mut(id)?;
             t.segments = overwrite(&t.segments, a, &[seg]);
@@ -970,6 +1003,36 @@ impl Editor {
             session: self.session.clone(),
             sources: self.sources.clone(),
         }
+    }
+}
+
+/// Trechos renderizados esperando um efeito (ver `Editor::begin_process`).
+pub struct ProcessJob {
+    a: usize,
+    revision: u64,
+    pieces: Vec<(u64, Planar)>,
+}
+
+impl ProcessJob {
+    /// Aplica `f` a cada trecho (um por faixa), em canais separados. O tamanho de cada trecho
+    /// é mantido: o que sobrar ou faltar é cortado ou completado com silêncio.
+    pub fn run(&mut self, mut f: impl FnMut(&mut [Vec<f32>])) {
+        for (_, planar) in &mut self.pieces {
+            let len = planar.iter().map(Vec::len).max().unwrap_or(0);
+            f(planar);
+            for ch in planar.iter_mut() {
+                ch.resize(len, 0.0);
+            }
+        }
+    }
+
+    /// Total de amostras (todos os canais de todos os trechos): mede o tamanho do trabalho.
+    pub fn samples(&self) -> usize {
+        self.pieces
+            .iter()
+            .flat_map(|(_, p)| p.iter())
+            .map(Vec::len)
+            .sum()
     }
 }
 
@@ -1120,6 +1183,38 @@ mod tests {
         assert_eq!(snap.mix(100, 200), before);
         assert_ne!(e.mix(100, 200), before);
         assert_ne!(e.mixer().mix(100, 200), before);
+    }
+
+    #[test]
+    fn split_process_matches_process_and_refuses_a_stale_result() {
+        let (mut e, id) = editor_with(100);
+        let mut twin = Editor::new(Session::new(48_000), BTreeMap::new());
+        let tid = twin.add_track(ramp(100), 0, None);
+        twin.process(&[tid], 10, 60, "Dobro", |p| {
+            for ch in p.iter_mut() {
+                ch.iter_mut().for_each(|v| *v *= 2.0);
+            }
+        })
+        .unwrap();
+        let mut job = e.begin_process(&[id], 10, 60).unwrap();
+        assert_eq!(job.samples(), 50);
+        job.run(|p| {
+            for ch in p.iter_mut() {
+                ch.iter_mut().for_each(|v| *v *= 2.0);
+            }
+        });
+        e.finish_process(job, "Dobro").unwrap();
+        assert_eq!(mono(&e, id), mono(&twin, tid));
+        assert!(e.undo());
+        assert_eq!(mono(&e, id), ramp(100).remove(0));
+
+        // Se a sessão mudou no meio do caminho, o resultado velho não entra.
+        let job = e.begin_process(&[id], 0, 50).unwrap();
+        e.set_mix(id, -3.0, 0.0, false, false);
+        assert!(matches!(
+            e.finish_process(job, "Velho"),
+            Err(EditError::Stale)
+        ));
     }
 
     fn editor_with(n: usize) -> (Editor, u64) {
