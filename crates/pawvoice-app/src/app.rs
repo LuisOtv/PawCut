@@ -136,6 +136,7 @@ enum Purpose {
     SaveAs,
     Import,
     Export { selection: bool },
+    ExportVideo,
     ExportTracks,
     ExportLabels,
     Script,
@@ -150,6 +151,7 @@ enum Dialog {
     NoiseReduction { reduction: f32, sensitivity: f32 },
     BassTreble { bass: f32, treble: f32 },
     Limiter(f32),
+    DeEss { threshold: f32, reduction: f32 },
     ConfirmClose,
     Recover(Vec<PathBuf>),
 }
@@ -262,6 +264,36 @@ fn data_dir() -> PathBuf {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
         .unwrap_or_else(|| PathBuf::from("."))
         .join("pawvoice")
+}
+
+fn recent_path() -> PathBuf {
+    settings_path().with_file_name("recent.json")
+}
+
+/// Projetos abertos ou salvos há pouco (do mais novo para o mais antigo).
+fn recent_projects() -> Vec<PathBuf> {
+    std::fs::read_to_string(recent_path())
+        .ok()
+        .and_then(|t| serde_json::from_str::<Vec<PathBuf>>(&t).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| p.exists())
+        .collect()
+}
+
+fn remember_project(path: &Path) {
+    // Os testes não mexem nas configurações de verdade.
+    if cfg!(test) {
+        return;
+    }
+    let mut list = recent_projects();
+    list.retain(|p| p != path);
+    list.insert(0, path.to_path_buf());
+    list.truncate(10);
+    let _ = std::fs::create_dir_all(settings_path().parent().unwrap_or(Path::new(".")));
+    if let Ok(t) = serde_json::to_string(&list) {
+        let _ = std::fs::write(recent_path(), t);
+    }
 }
 
 fn settings_path() -> PathBuf {
@@ -970,7 +1002,11 @@ impl VoiceApp {
                     Err(e) => self.warn(format!("Não deu para salvar os rótulos: {e}")),
                 }
             }
-            Purpose::Export { selection } => self.export_mix(&first, selection),
+            Purpose::Export { selection } => self.export_mix(&first, selection, None),
+            Purpose::ExportVideo => {
+                let target = self.lufs_target;
+                self.export_mix(&first, false, Some(target));
+            }
             Purpose::ExportTracks => {
                 let tracks: Vec<(u64, String)> = self
                     .ed
@@ -1004,7 +1040,8 @@ impl VoiceApp {
             }
             Purpose::Script => match std::fs::read_to_string(&first) {
                 Ok(text) => {
-                    self.ed.set_script(text);
+                    // Do roteiro do PawWrite vai só a fala (sem títulos, [notas] e // comentários).
+                    self.ed.set_script(pawwrite_core::spoken(&text));
                     self.show_script = true;
                     self.say("Roteiro carregado");
                 }
@@ -1026,6 +1063,7 @@ impl VoiceApp {
                     self.stop();
                     self.ed = ed;
                     self.path = Some(path.to_path_buf());
+                    remember_project(path);
                     self.cache.clear();
                     self.select_none();
                     self.cursor = 0;
@@ -1035,7 +1073,8 @@ impl VoiceApp {
             },
             "txt" | "md" => {
                 if let Ok(text) = std::fs::read_to_string(path) {
-                    self.ed.set_script(text);
+                    // Do roteiro do PawWrite vai só a fala (sem títulos, [notas] e // comentários).
+                    self.ed.set_script(pawwrite_core::spoken(&text));
                     self.show_script = true;
                     self.say("Roteiro carregado");
                 }
@@ -1115,6 +1154,7 @@ impl VoiceApp {
         match pawvoice_core::save_session(&self.ed, &path) {
             Ok(()) => {
                 self.ed.mark_saved();
+                remember_project(&path);
                 self.path = Some(path);
                 self.say("Projeto salvo");
             }
@@ -1123,7 +1163,7 @@ impl VoiceApp {
     }
 
     /// Exporta a mixagem (estéreo): tudo ou só a seleção.
-    fn export_mix(&mut self, path: &Path, selection: bool) {
+    fn export_mix(&mut self, path: &Path, selection: bool, loudness: Option<f32>) {
         let mut path = path.to_path_buf();
         if path.extension().is_none() {
             path.set_extension("wav");
@@ -1137,7 +1177,17 @@ impl VoiceApp {
             self.warn("Nada para exportar");
             return;
         }
-        let mix = self.ed.mix(a, b);
+        let mut mix = self.ed.mix(a, b);
+        if let Some(target) = loudness {
+            match dsp::integrated_lufs(&mix, RATE) {
+                Some(l) => {
+                    let g = dsp::loudness_gain(l, dsp::peak(&mix), target);
+                    dsp::gain(&mut mix, g);
+                    self.say(format!("Loudness {l:.1} → {target:.0} LUFS"));
+                }
+                None => self.warn("Áudio curto ou mudo demais para medir o loudness"),
+            }
+        }
         match pawvoice_core::export_audio(&mix, RATE, 2, &path) {
             Ok(()) => self.say(format!("Exportado: {}", path.display())),
             Err(e) => self.warn(e.to_string()),
@@ -1352,6 +1402,24 @@ impl VoiceApp {
                     ui.close();
                     self.open_dialog();
                 }
+                let recent = recent_projects();
+                ui.add_enabled_ui(!recent.is_empty(), |ui| {
+                    ui.menu_button("Abrir recente", |ui| {
+                        for f in recent {
+                            let name = f
+                                .file_name()
+                                .map_or(String::new(), |n| n.to_string_lossy().into_owned());
+                            if ui
+                                .button(name)
+                                .on_hover_text(f.display().to_string())
+                                .clicked()
+                            {
+                                ui.close();
+                                self.open_any(&f);
+                            }
+                        }
+                    });
+                });
                 ui.separator();
                 if item(ui, "Salvar projeto", "Ctrl+S", true) {
                     ui.close();
@@ -1366,6 +1434,19 @@ impl VoiceApp {
                 if item(ui, "Exportar áudio…", "Ctrl+Shift+E", has) {
                     ui.close();
                     self.export_dialog(false);
+                }
+                if item(ui, "Exportar para vídeo (loudness no alvo)…", "", has) {
+                    ui.close();
+                    self.ask(Purpose::ExportVideo, || {
+                        rfd::FileDialog::new()
+                            .set_title("Exportar com loudness ajustado")
+                            .add_filter("WAV", &["wav"])
+                            .add_filter("MP3", &["mp3"])
+                            .set_file_name("narracao.wav")
+                            .save_file()
+                            .into_iter()
+                            .collect()
+                    });
                 }
                 if item(ui, "Exportar seleção…", "", self.sel.is_some()) {
                     ui.close();
@@ -1688,6 +1769,13 @@ impl VoiceApp {
             if ui.button("Compressor…").clicked() {
                 ui.close();
                 self.dialog = Some(Dialog::Compressor(Compression::Medium));
+            }
+            if ui.button("De-esser (tira o chiado do S)…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::DeEss {
+                    threshold: -32.0,
+                    reduction: 10.0,
+                });
             }
             if ui.button("Limitador…").clicked() {
                 ui.close();
@@ -3800,6 +3888,7 @@ impl VoiceApp {
             Dialog::NoiseReduction { .. } => "Redução de ruído",
             Dialog::BassTreble { .. } => "Graves e agudos",
             Dialog::Limiter(_) => "Limitador",
+            Dialog::DeEss { .. } => "De-esser",
             Dialog::ConfirmClose => "Sair sem salvar?",
             Dialog::Recover(_) => "Recuperação automática",
         };
@@ -3917,6 +4006,11 @@ impl VoiceApp {
                         ui.label(RichText::new("Nada passa deste nível.").weak());
                         ui.add(egui::Slider::new(db, -12.0..=0.0).text("teto").suffix(" dB"));
                     }
+                    Dialog::DeEss { threshold, reduction } => {
+                        ui.label(RichText::new("Abaixa só os agudos quando o S estoura.").weak());
+                        ui.add(egui::Slider::new(threshold, -50.0..=-15.0).text("limiar").suffix(" dB"));
+                        ui.add(egui::Slider::new(reduction, 3.0..=24.0).text("redução máxima").suffix(" dB"));
+                    }
                     Dialog::ConfirmClose => {
                         ui.label("O projeto tem mudanças que não foram salvas.");
                     }
@@ -3990,6 +4084,12 @@ impl VoiceApp {
                 .apply_effect("Graves e agudos", |p| {
                     effects::each(p, |s| dsp::bass_treble(s, RATE, bass, treble))
                 }),
+            Some(Dialog::DeEss {
+                threshold,
+                reduction,
+            }) => self.apply_effect("De-esser", |p| {
+                effects::each(p, |s| dsp::de_ess(s, RATE, 5500.0, threshold, reduction))
+            }),
             Some(Dialog::Limiter(db)) => self.apply_effect("Limitador", |p| {
                 effects::each(p, |s| dsp::limit(s, RATE, db))
             }),

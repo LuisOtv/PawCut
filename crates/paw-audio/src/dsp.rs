@@ -288,6 +288,55 @@ pub fn high_pass(s: &mut [f32], sample_rate: u32, hz: f32) {
     }
 }
 
+/// Passa-baixas de 2ª ordem (Butterworth), par do `high_pass` para dividir o som em faixas.
+fn low_pass(s: &mut [f32], sample_rate: u32, hz: f32) {
+    use std::f64::consts::PI;
+    let w0 = 2.0 * PI * hz as f64 / sample_rate as f64;
+    let alpha = w0.sin() / (2.0 * std::f64::consts::FRAC_1_SQRT_2);
+    let cos = w0.cos();
+    let a0 = 1.0 + alpha;
+    let mut f = Biquad {
+        b: [
+            (1.0 - cos) / 2.0 / a0,
+            (1.0 - cos) / a0,
+            (1.0 - cos) / 2.0 / a0,
+        ],
+        a: [-2.0 * cos / a0, (1.0 - alpha) / a0],
+        x: [0.0; 2],
+        y: [0.0; 2],
+    };
+    for v in s {
+        *v = f.run(*v as f64) as f32;
+    }
+}
+
+/// De-esser: abaixa só a faixa aguda (a partir de `hz`) quando ela passa de `threshold_db`,
+/// tirando o chiado dos "s" e "x" sem mexer no resto da voz. Divide o som com um filtro
+/// Linkwitz-Riley (graves + agudos somam de volta exatamente) e só mexe no ganho dos agudos.
+pub fn de_ess(s: &mut [f32], sample_rate: u32, hz: f32, threshold_db: f32, reduction_db: f32) {
+    let mut high = s.to_vec();
+    high_pass(&mut high, sample_rate, hz);
+    high_pass(&mut high, sample_rate, hz);
+    let mut low = s.to_vec();
+    low_pass(&mut low, sample_rate, hz);
+    low_pass(&mut low, sample_rate, hz);
+    let sr = sample_rate as f32;
+    let attack = (-1.0 / (0.001 * sr)).exp();
+    let release = (-1.0 / (0.03 * sr)).exp();
+    let mut env = 0.0f32;
+    for ((v, h), l) in s.iter_mut().zip(&high).zip(&low) {
+        let x = h.abs();
+        env = if x > env {
+            attack * env + (1.0 - attack) * x
+        } else {
+            release * env + (1.0 - release) * x
+        };
+        let env_db = 20.0 * env.max(1e-6).log10();
+        let cut_db = ((env_db - threshold_db) * 0.8).clamp(0.0, reduction_db);
+        *v = l + h * 10f32.powf(-cut_db / 20.0);
+    }
+}
+
 /// Nível (dB) das partes mais baixas (10% mais silenciosas, em janelas de 50 ms):
 /// uma boa estimativa do chiado de fundo.
 pub fn noise_floor_db(s: &[f32], sample_rate: u32) -> f32 {
@@ -359,6 +408,42 @@ pub fn compress(
         let over = level - threshold_db;
         let reduce = if over > 0.0 { over - over / ratio } else { 0.0 };
         *v *= 10f32.powf(-reduce / 20.0) * makeup;
+    }
+}
+
+#[cfg(test)]
+mod de_ess_tests {
+    use super::*;
+
+    fn rms(s: &[f32]) -> f32 {
+        (s.iter().map(|v| v * v).sum::<f32>() / s.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn it_tames_sibilance_and_leaves_the_voice_alone() {
+        let sr = 48_000;
+        let tone = |hz: f32, amp: f32| -> Vec<f32> {
+            (0..sr)
+                .map(|i| amp * (std::f32::consts::TAU * hz * i as f32 / sr as f32).sin())
+                .collect()
+        };
+        let voice = tone(400.0, 0.2);
+        let sss = tone(7000.0, 0.3);
+        let mut mix: Vec<f32> = voice.iter().zip(&sss).map(|(a, b)| a + b).collect();
+        let before = rms(&mix);
+        de_ess(&mut mix, sr, 5000.0, -30.0, 12.0);
+        let tail = &mix[sr as usize / 2..];
+        // sobrou bem menos energia (o "s" foi domado) e a voz de 400 Hz continua lá
+        assert!(rms(tail) < before * 0.7, "{} vs {before}", rms(tail));
+        assert!(rms(tail) > 0.12);
+        // sem chiado nada muda
+        let mut clean = voice.clone();
+        de_ess(&mut clean, sr, 5000.0, -30.0, 12.0);
+        let (c, v) = (
+            rms(&clean[sr as usize / 2..]),
+            rms(&voice[sr as usize / 2..]),
+        );
+        assert!((c - v).abs() / v < 0.02, "{c} vs {v}");
     }
 }
 

@@ -8,12 +8,12 @@ bibliotecas:
 |---|---|---|
 | **PawCut** | editor de vídeo | pronto |
 | **PawVoice** | gravar e editar narração | primeira versão |
-| PawWrite | roteiros (no lugar do Word) | planejado |
-| PawPaint | thumbnails (no lugar do Krita) | planejado |
+| **PawWrite** | roteiros (no lugar do Word) | primeira versão |
+| **PawPaint** | imagens e pintura (no lugar do Krita) | primeira versão |
 
 ```bash
 scripts/install.sh            # compila e instala todos (menu de aplicativos + ~/.local/bin)
-scripts/install.sh pawvoice   # só um
+scripts/install.sh pawvoice   # só um (pawcut, pawvoice, pawwrite, pawpaint)
 ```
 
 Bibliotecas compartilhadas em `crates/`:
@@ -53,11 +53,61 @@ Gravador e editor de voz com a interface e o jeito de usar do Audacity.
   - **Melhorar voz (1 clique)**;
   - **Redução de ruído** com perfil (como no Audacity: pegue o perfil num trecho só de chiado e aplique);
   - normalizar loudness (LUFS) ou pico, amplificar, compressor, limitador, fades;
-  - noise gate, passa-altas, graves e agudos, truncar silêncio e inverter.
+  - noise gate, passa-altas, graves e agudos, **de-esser** (tira o chiado do S), truncar silêncio e inverter;
+  - Arquivo → *Exportar para vídeo* já ajusta o loudness para o alvo (−14 LUFS no YouTube).
 - **Roteiro e teleprompter** (Ver → Roteiro): a letra grande rola sozinha enquanto você grava.
 - **Arquivos:**
   - o projeto fica em `nome.pawvoice`, com os áudios em `nome.pawvoice-audio/` (WAV, mono ou estéreo);
   - exporta a mixagem ou só a seleção em WAV/MP3, ou cada faixa separada.
+
+## PawWrite
+
+Editor de roteiros para vídeo: texto limpo e o tempo de fala sempre à vista.
+
+- **Escrever:**
+  - `# Título` abre uma seção (`##` para subseções) e aparece na **Estrutura**, à esquerda, com o tempo de cada parte;
+  - `[B-roll: mesa]` é nota de edição: fica em azul e **não conta** no tempo;
+  - `// lembrete` é comentário só seu;
+  - o resto é a fala. Embaixo: palavras, tempo de fala e o seu **ritmo** (palavras por minuto, ajustável).
+- **Editar:** Ctrl+F localiza (F3 próximo), Ctrl+H substitui, Ctrl++ / Ctrl+- mudam o tamanho da letra,
+  Ctrl+\ mostra ou esconde a estrutura. Clicar numa seção da estrutura leva o texto até ela.
+- **Arquivos:** roteiro em Markdown (`.md`) ou texto. Salvar guarda as 10 versões anteriores; se o app
+  fechar sem salvar, ele oferece recuperar o texto.
+- **Com o PawVoice:** Arquivo → *Abrir no PawVoice* manda o roteiro para o teleprompter. O PawVoice
+  mostra só a fala (sem títulos, notas e comentários). Também dá para exportar ou copiar só a fala.
+  Arquivo → *Exportar legendas (.srt) pelo ritmo* gera legendas da fala com o tempo calculado, para importar
+  no PawCut e ajustar. Rótulos do PawVoice viram capítulos do YouTube.
+- **Mais:** mover seções pela estrutura (botão direito), meta de duração do vídeo na barra de baixo e modo leitura
+  (F5) com a fala em letra grande rolando sozinha.
+
+## PawPaint
+
+Editor de imagens no estilo do Krita: pintura, camadas, seleções, filtros e dockers que você arruma como quiser.
+
+- **Dockers:** Ferramentas, Camadas, Pincéis, Editor de pincel, Opções da ferramenta, Cor, Paleta, Visão geral e
+  Histórico. Arraste uma aba para outro lugar, junte em abas, solte numa janela, feche; Configurações → Dockers
+  mostra de novo, e o layout fica salvo. Vários documentos abertos em abas.
+- **Pincéis:** motor de carimbos com tamanho, dureza, opacidade (teto do traço), fluxo (soma), espaçamento, ângulo,
+  achatamento, grão, dispersão e estabilizador. Vêm 7 prontos (Básico, Aerógrafo, Lápis, Tinta, Marcador, Giz,
+  Aquarela) e dá para salvar os seus. `[` e `]` mudam o tamanho; Ctrl+clique pega a cor.
+- **Ferramentas:** pincel (B), borracha (E), balde de tinta (F), degradê (G), conta-gotas (P), seleção retangular (J),
+  elíptica (K), laço (L) e varinha mágica (W), mover (T), transformar (Ctrl+T), cortar (C), linha (I),
+  retângulo (U), elipse (O), borrão (S) e texto (Q). X troca frente e fundo, D volta ao preto e branco.
+- **Camadas:** pixels, 13 modos de mistura, opacidade, travar e travar alfa, mostrar/esconder, duplicar, unir,
+  reordenar, importar imagem como camada. Copiar, recortar e colar entre documentos.
+- **Seleções:** somar (Shift), subtrair (Alt), inverter, suavizar a borda, expandir/contrair; limitam pincel,
+  preenchimento, filtros e transformação.
+- **Filtros:** brilho/contraste, matiz/saturação, níveis, limiar, posterizar, inverter, dessaturar, desfoque,
+  nitidez, pixelar, ruído e detecção de bordas, com prévia.
+- **Imagem:** tamanho da tela, escalar, cortar, girar e espelhar, achatar.
+- **Arquivos:** abre PNG, JPG, WebP e BMP; salva `.pawpaint` (um zip com uma camada por PNG); exporta PNG, JPG, WebP
+  ou BMP, e *JPG com até 2 MB* para thumbnails do YouTube.
+- **Desfazer:** guarda o documento inteiro a cada passo sem gastar memória (os blocos de pixels são compartilhados).
+
+- **Mais:** pastas de camadas, máscaras de camada (preto esconde, branco revela), pintura com espelho, borrão, curvas, colar prints da
+  área de transferência do sistema, recuperação automática se o app fechar de repente.
+
+Ainda não tem: mesa digitalizadora com pressão, camadas vetoriais e histograma.
 
 ---
 
