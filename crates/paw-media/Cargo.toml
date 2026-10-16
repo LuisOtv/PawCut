@@ -1,5 +1,5 @@
 [package]
-name = "pawcut-media"
+name = "paw-media"
 version.workspace = true
 edition.workspace = true
 
@@ -11,5 +11,5 @@ lru.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-pawcut-testkit.workspace = true
+paw-testkit.workspace = true
 tempfile.workspace = true

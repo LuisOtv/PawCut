@@ -1,3 +1,116 @@
+# PawSuite
+
+Apps próprios, em Rust, para criar vídeos do YouTube sem depender de programas de outras
+empresas. Todos usam a mesma interface escura (no estilo do DaVinci Resolve) e as mesmas
+bibliotecas:
+
+| App | Para quê | Estado |
+|---|---|---|
+| **PawCut** | editor de vídeo | pronto |
+| **PawVoice** | gravar e editar narração | primeira versão |
+| **PawWrite** | roteiros (no lugar do Word) | primeira versão |
+| **PawPaint** | imagens e pintura (no lugar do Krita) | primeira versão |
+
+```bash
+scripts/install.sh            # compila e instala todos (menu de aplicativos + ~/.local/bin)
+scripts/install.sh pawvoice   # só um (pawcut, pawvoice, pawwrite, pawpaint)
+```
+
+Bibliotecas compartilhadas em `crates/`:
+- `paw-ui`: tema, ícones, avisos e backups;
+- `paw-audio`: loudness, filtros, gate, compressor, tocar e gravar;
+- `paw-media`: ffmpeg.
+
+## PawVoice
+
+Gravador e editor de voz com a interface e o jeito de usar do Audacity.
+
+- **Tela:**
+  - transporte (Pausar, Tocar, Parar, Início, Fim, Gravar, Loop);
+  - ferramentas Seleção (F1) e Envelope (F2), botões de edição e **Configuração de áudio**;
+  - medidores **Mic** e **Saída** com L/R (clique no medidor para monitorar o microfone sem gravar);
+  - régua, faixas mono ou **estéreo** (L em cima, R embaixo) e barra de seleção.
+- **Configuração de áudio:** escolha o microfone e a saída, e grave em mono ou estéreo. O padrão é
+  o que o microfone tiver; um microfone binaural/estéreo grava os dois lados. Fica salva entre as sessões.
+- **Gravar:**
+  - R grava na faixa selecionada a partir do cursor; Shift+R grava numa faixa nova;
+  - as outras faixas tocam enquanto grava (overdub);
+  - começa na hora e não perde o fim; se o app fechar no meio, ele oferece recuperar.
+- **Editar como no Audacity:**
+  - arrastar seleciona (na vertical pega várias faixas); Z ajusta a seleção ao cruzamento por zero;
+  - clique no cabeçalho do clipe seleciona e Ctrl+clique soma outros; arrastar move todos juntos
+    (Time Shift), e um clipe sozinho pode ir para outra faixa;
+  - mexer em Ganho/Pan/Mudo/Solo de uma faixa selecionada vale para todas as selecionadas;
+  - Ctrl+X, Ctrl+C e Ctrl+V; Delete; Ctrl+D duplica; Ctrl+L silencia; Ctrl+T apara;
+    Ctrl+Alt+I separa em nova faixa;
+  - Ctrl+1 e Ctrl+3 dão zoom, Ctrl+F cabe tudo, Ctrl+E dá zoom na seleção;
+  - Espaço toca/para, P pausa, Shift+Espaço repete.
+- **Envelope (F2):**
+  - clique cria um ponto e arrastar muda o volume ao longo do tempo (ex.: abaixar a música
+    debaixo da voz);
+  - botão direito, ou arrastar para fora, apaga o ponto.
+- **Efeitos** (na seleção; sem seleção, em tudo):
+  - **Melhorar voz (1 clique)**;
+  - **Redução de ruído** com perfil (como no Audacity: pegue o perfil num trecho só de chiado e aplique);
+  - normalizar loudness (LUFS) ou pico, amplificar, compressor, limitador, fades;
+  - noise gate, passa-altas, graves e agudos, **de-esser** (tira o chiado do S), truncar silêncio e inverter;
+  - Arquivo → *Exportar para vídeo* já ajusta o loudness para o alvo (−14 LUFS no YouTube).
+- **Roteiro e teleprompter** (Ver → Roteiro): a letra grande rola sozinha enquanto você grava.
+- **Arquivos:**
+  - o projeto fica em `nome.pawvoice`, com os áudios em `nome.pawvoice-audio/` (WAV, mono ou estéreo);
+  - exporta a mixagem ou só a seleção em WAV/MP3, ou cada faixa separada.
+
+## PawWrite
+
+Editor de roteiros para vídeo: texto limpo e o tempo de fala sempre à vista.
+
+- **Escrever:**
+  - `# Título` abre uma seção (`##` para subseções) e aparece na **Estrutura**, à esquerda, com o tempo de cada parte;
+  - `[B-roll: mesa]` é nota de edição: fica em azul e **não conta** no tempo;
+  - `// lembrete` é comentário só seu;
+  - o resto é a fala. Embaixo: palavras, tempo de fala e o seu **ritmo** (palavras por minuto, ajustável).
+- **Editar:** Ctrl+F localiza (F3 próximo), Ctrl+H substitui, Ctrl++ / Ctrl+- mudam o tamanho da letra,
+  Ctrl+\ mostra ou esconde a estrutura. Clicar numa seção da estrutura leva o texto até ela.
+- **Arquivos:** roteiro em Markdown (`.md`) ou texto. Salvar guarda as 10 versões anteriores; se o app
+  fechar sem salvar, ele oferece recuperar o texto.
+- **Com o PawVoice:** Arquivo → *Abrir no PawVoice* manda o roteiro para o teleprompter. O PawVoice
+  mostra só a fala (sem títulos, notas e comentários). Também dá para exportar ou copiar só a fala.
+  Arquivo → *Exportar legendas (.srt) pelo ritmo* gera legendas da fala com o tempo calculado, para importar
+  no PawCut e ajustar. Rótulos do PawVoice viram capítulos do YouTube.
+- **Mais:** mover seções pela estrutura (botão direito), meta de duração do vídeo na barra de baixo e modo leitura
+  (F5) com a fala em letra grande rolando sozinha.
+
+## PawPaint
+
+Editor de imagens no estilo do Krita: pintura, camadas, seleções, filtros e dockers que você arruma como quiser.
+
+- **Dockers:** Ferramentas, Camadas, Pincéis, Editor de pincel, Opções da ferramenta, Cor, Paleta, Visão geral e
+  Histórico. Arraste uma aba para outro lugar, junte em abas, solte numa janela, feche; Configurações → Dockers
+  mostra de novo, e o layout fica salvo. Vários documentos abertos em abas.
+- **Pincéis:** motor de carimbos com tamanho, dureza, opacidade (teto do traço), fluxo (soma), espaçamento, ângulo,
+  achatamento, grão, dispersão e estabilizador. Vêm 7 prontos (Básico, Aerógrafo, Lápis, Tinta, Marcador, Giz,
+  Aquarela) e dá para salvar os seus. `[` e `]` mudam o tamanho; Ctrl+clique pega a cor.
+- **Ferramentas:** pincel (B), borracha (E), balde de tinta (F), degradê (G), conta-gotas (P), seleção retangular (J),
+  elíptica (K), laço (L) e varinha mágica (W), mover (T), transformar (Ctrl+T), cortar (C), linha (I),
+  retângulo (U), elipse (O), borrão (S) e texto (Q). X troca frente e fundo, D volta ao preto e branco.
+- **Camadas:** pixels, 13 modos de mistura, opacidade, travar e travar alfa, mostrar/esconder, duplicar, unir,
+  reordenar, importar imagem como camada. Copiar, recortar e colar entre documentos.
+- **Seleções:** somar (Shift), subtrair (Alt), inverter, suavizar a borda, expandir/contrair; limitam pincel,
+  preenchimento, filtros e transformação.
+- **Filtros:** brilho/contraste, matiz/saturação, níveis, limiar, posterizar, inverter, dessaturar, desfoque,
+  nitidez, pixelar, ruído e detecção de bordas, com prévia.
+- **Imagem:** tamanho da tela, escalar, cortar, girar e espelhar, achatar.
+- **Arquivos:** abre PNG, JPG, WebP e BMP; salva `.pawpaint` (um zip com uma camada por PNG); exporta PNG, JPG, WebP
+  ou BMP, e *JPG com até 2 MB* para thumbnails do YouTube.
+- **Desfazer:** guarda o documento inteiro a cada passo sem gastar memória (os blocos de pixels são compartilhados).
+
+- **Mais:** pastas de camadas, máscaras de camada (preto esconde, branco revela), pintura com espelho, borrão, curvas, colar prints da
+  área de transferência do sistema, recuperação automática se o app fechar de repente.
+
+Ainda não tem: mesa digitalizadora com pressão, camadas vetoriais e histograma.
+
+---
+
 # PawCut
 
 Editor de vídeo simples para Linux, com a cara da página **Edit do DaVinci Resolve**.
@@ -97,7 +210,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Os crates são:
 - `pawcut-core`: modelo, edições, desfazer/refazer e arquivo `.pawcut`.
-- `pawcut-media`: lê arquivos com ffmpeg.
+- `paw-media`: lê arquivos com ffmpeg.
 - `pawcut-render`: compositor e mixer.
 - `pawcut-export`: MP4.
 - `pawcut-app`: a interface.

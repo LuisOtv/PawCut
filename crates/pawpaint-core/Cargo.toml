@@ -1,0 +1,15 @@
+[package]
+name = "pawpaint-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+cosmic-text.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile.workspace = true

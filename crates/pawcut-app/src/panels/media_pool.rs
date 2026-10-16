@@ -13,22 +13,8 @@ impl Workspace {
     pub fn media_pool_ui(&mut self, ui: &mut egui::Ui) {
         let project = self.project_arc.clone();
         theme::toolbar(ui, |ui| {
-            if icons::button(
-                ui,
-                Icon::Import,
-                theme::ICON,
-                false,
-                &self.tip("Importar mídia", crate::keymap::Action::Import),
-            )
-            .clicked()
-            {
-                self.import_dialog();
-            }
-            ui.add(
-                egui::TextEdit::singleline(&mut self.pool_search)
-                    .hint_text("Buscar…")
-                    .desired_width(110.0),
-            );
+            // Da direita para a esquerda: os botões de vista ficam fixos e a busca ocupa o
+            // que sobrar, sem passar por cima do controle de tamanho em painel estreito.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icons::button(ui, Icon::MediaPool, 14.0, !self.pool_list, "Grade").clicked() {
                     self.pool_list = false;
@@ -37,12 +23,31 @@ impl Workspace {
                     self.pool_list = true;
                 }
                 if !self.pool_list {
+                    ui.spacing_mut().slider_width = 48.0;
                     ui.add_sized(
-                        [70.0, 16.0],
+                        [48.0, 16.0],
                         egui::Slider::new(&mut self.pool_tile, 90.0..=220.0).show_value(false),
                     )
                     .on_hover_text("Tamanho das miniaturas");
                 }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    if icons::button(
+                        ui,
+                        Icon::Import,
+                        theme::ICON,
+                        false,
+                        &self.tip("Importar mídia", crate::keymap::Action::Import),
+                    )
+                    .clicked()
+                    {
+                        self.import_dialog();
+                    }
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.pool_search)
+                            .hint_text("Buscar…")
+                            .desired_width((ui.available_width() - 4.0).clamp(40.0, 220.0)),
+                    );
+                });
             });
         });
         let area = ui.available_rect_before_wrap();
@@ -119,15 +124,20 @@ impl Workspace {
             Icon::Import,
             theme::TEXT_DIM,
         );
-        ui.painter().text(
-            c + vec2(0.0, 12.0),
-            egui::Align2::CENTER_CENTER,
-            "Arraste vídeos, músicas e imagens para cá",
+        // Quebra a linha para caber no painel estreito em vez de cortar as pontas.
+        let mut job = egui::text::LayoutJob::simple(
+            "Arraste vídeos, músicas e imagens para cá".into(),
             theme::text(13.0),
             theme::TEXT_DIM,
+            (area.width() - 24.0).max(60.0),
         );
+        job.halign = egui::Align::Center;
+        let galley = ui.fonts_mut(|f| f.layout_job(job));
+        let text_h = galley.size().y;
+        ui.painter()
+            .galley(pos2(c.x, c.y + 4.0), galley, theme::TEXT_DIM);
         ui.painter().text(
-            c + vec2(0.0, 30.0),
+            c + vec2(0.0, 14.0 + text_h),
             egui::Align2::CENTER_CENTER,
             "ou use Ctrl+I",
             theme::text(11.0),
@@ -274,7 +284,7 @@ impl Workspace {
         if generating
             || (m.info.kind != MediaKind::Image
                 && m.info.kind != MediaKind::Audio
-                && pawcut_media::has_proxy(&m.info.path))
+                && paw_media::has_proxy(&m.info.path))
         {
             let label = if generating { "gerando…" } else { "PROXY" };
             let galley =

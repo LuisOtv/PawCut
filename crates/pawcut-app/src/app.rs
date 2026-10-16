@@ -398,59 +398,6 @@ impl PawCutApp {
         info.join("  ·  ")
     }
 
-    /// Avisos no canto de baixo, por cima de tudo, que somem sozinhos (clique fecha).
-    fn toasts_ui(&mut self, ctx: &egui::Context) {
-        let screen = ctx.content_rect();
-        let mut y = screen.bottom() - 16.0;
-        let mut close = None;
-        for (i, (text, error, born)) in self.ws.toasts.iter().enumerate().rev() {
-            let age = born.elapsed().as_secs_f32();
-            let life = if *error { 8.0 } else { 4.0 };
-            let alpha = ((life - age) / 0.4).clamp(0.0, 1.0) * (age / 0.15).clamp(0.0, 1.0);
-            let painter = ctx.layer_painter(egui::LayerId::new(
-                egui::Order::Foreground,
-                egui::Id::new(("toast", i)),
-            ));
-            let galley = painter.layout(text.clone(), theme::text(12.5), Color32::WHITE, 360.0);
-            let size = galley.size() + egui::vec2(28.0, 16.0);
-            let rect = egui::Rect::from_min_size(
-                egui::pos2(screen.right() - size.x - 16.0, y - size.y),
-                size,
-            );
-            let bg = if *error {
-                Color32::from_rgb(110, 30, 34)
-            } else {
-                theme::BAR_LIGHT
-            };
-            painter.rect_filled(rect, 6.0, bg.gamma_multiply(alpha));
-            painter.rect_filled(
-                egui::Rect::from_min_size(rect.min, egui::vec2(4.0, rect.height())),
-                2.0,
-                (if *error {
-                    Color32::from_rgb(240, 90, 80)
-                } else {
-                    theme::ACCENT
-                })
-                .gamma_multiply(alpha),
-            );
-            painter.galley(
-                rect.min + egui::vec2(16.0, 8.0),
-                galley,
-                Color32::WHITE.gamma_multiply(alpha),
-            );
-            if ctx.input(|inp| {
-                inp.pointer.primary_clicked()
-                    && inp.pointer.interact_pos().is_some_and(|p| rect.contains(p))
-            }) {
-                close = Some(i);
-            }
-            y = rect.top() - 8.0;
-        }
-        if let Some(i) = close {
-            self.ws.toasts.remove(i);
-        }
-    }
-
     /// Aviso por cima de tudo enquanto arquivos do sistema são arrastados sobre a janela.
     fn file_drop_overlay(&self, ctx: &egui::Context) {
         let hovering = ctx.input(|i| i.raw.hovered_files.len());
@@ -597,7 +544,7 @@ impl eframe::App for PawCutApp {
         self.ws.dialogs_ui(&ctx);
 
         self.file_drop_overlay(&ctx);
-        self.toasts_ui(&ctx);
+        self.ws.toasts.ui(&ctx);
         // Rótulo que acompanha o ponteiro ao arrastar do Media Pool / Toolbox.
         if let Some(payload) = egui::DragAndDrop::payload::<DragPayload>(&ctx)
             && let Some(pos) = ctx.pointer_hover_pos()

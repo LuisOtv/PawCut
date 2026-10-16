@@ -36,6 +36,9 @@ pub enum Icon {
     Skim,
     Trim,
     Loop,
+    Record,
+    Envelope,
+    IBeam,
 }
 
 fn p(r: Rect, x: f32, y: f32) -> Pos2 {
@@ -47,21 +50,49 @@ pub fn paint(painter: &Painter, r: Rect, icon: Icon, c: Color32) {
     let s = Stroke::new((r.width() / 11.0).max(1.2), c);
     let poly = |pts: Vec<Pos2>| Shape::convex_polygon(pts, c, Stroke::NONE);
     match icon {
+        Icon::Record => {
+            painter.circle_filled(r.center(), r.width() * 0.32, c);
+        }
         Icon::Loop => {
-            // Seta em volta: um retângulo arredondado aberto com a ponta da seta.
-            let pts: Vec<Pos2> = (0..=24)
+            // Círculo quase fechado com a ponta da seta (proporções iguais na largura e altura).
+            let c0 = r.center();
+            let rad = r.width().min(r.height()) * 0.34;
+            let pts: Vec<Pos2> = (0..=28)
                 .map(|i| {
-                    let a = std::f32::consts::TAU * (0.08 + 0.84 * i as f32 / 24.0);
-                    p(r, 0.5 + 0.36 * a.cos(), 0.5 + 0.3 * a.sin())
+                    let a = std::f32::consts::TAU * (0.12 + 0.76 * i as f32 / 28.0);
+                    c0 + vec2(a.cos(), a.sin()) * rad
                 })
                 .collect();
-            let tip = *pts.last().expect("pontos");
+            let end = *pts.last().expect("pontos");
+            let a = std::f32::consts::TAU * 0.88;
+            // Tangente no fim do arco e a normal, para a ponta ficar alinhada com a curva.
+            let tan = vec2(-a.sin(), a.cos());
+            let nor = vec2(a.cos(), a.sin());
+            let h = rad * 0.55;
             painter.add(Shape::line(pts, s));
             painter.add(poly(vec![
-                tip + vec2(r.width() * 0.16, 0.0),
-                tip + vec2(-r.width() * 0.04, -r.height() * 0.16),
-                tip + vec2(-r.width() * 0.04, r.height() * 0.16),
+                end + tan * h,
+                end - nor * h * 0.6,
+                end + nor * h * 0.6,
             ]));
+        }
+        Icon::Envelope => {
+            // Linha do envelope com dois pontos.
+            let pts = [
+                p(r, 0.08, 0.7),
+                p(r, 0.38, 0.25),
+                p(r, 0.7, 0.55),
+                p(r, 0.92, 0.3),
+            ];
+            painter.add(Shape::line(pts.to_vec(), s));
+            for q in &pts[1..3] {
+                painter.circle_filled(*q, r.width() * 0.09, c);
+            }
+        }
+        Icon::IBeam => {
+            painter.line_segment([p(r, 0.5, 0.12), p(r, 0.5, 0.88)], s);
+            painter.line_segment([p(r, 0.32, 0.12), p(r, 0.68, 0.12)], s);
+            painter.line_segment([p(r, 0.32, 0.88), p(r, 0.68, 0.88)], s);
         }
         Icon::Trim => {
             // ][ : duas bordas se encontrando no corte.

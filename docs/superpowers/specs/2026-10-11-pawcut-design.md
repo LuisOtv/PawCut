@@ -23,7 +23,7 @@ Um **compositor único** gera o preview e a exportação, e é isso que garante 
 | Crate | Responsabilidade | Depende de |
 |---|---|---|
 | `crates/pawcut-core` | Modelo, operações de edição (`Command`), desfazer/refazer, serialização `.pawcut` (JSON com `version`) | `serde`, `serde_json` |
-| `crates/pawcut-media` | Ler metadados, decodificar vídeo com seek e cache LRU, carregar imagens, decodificar áudio para PCM 48 kHz estéreo f32 (cache em `~/.cache/pawcut/`), áudio com velocidade via `atempo` (libavfilter), picos da waveform, miniaturas | `ffmpeg-next`, `image`, `lru` |
+| `crates/paw-media` | Ler metadados, decodificar vídeo com seek e cache LRU, carregar imagens, decodificar áudio para PCM 48 kHz estéreo f32 (cache em `~/.cache/pawcut/`), áudio com velocidade via `atempo` (libavfilter), picos da waveform, miniaturas | `ffmpeg-next`, `image`, `lru` |
 | `crates/pawcut-render` | `render_frame(project, frame, resolution) -> RgbaImage` (camadas de baixo para cima, transform, opacidade, fade, cor sólida, texto) e `mix_audio(project, sample_range) -> Vec<f32>` (volume em dB, fades, mute/solo) | core, media, `rayon`, `fast_image_resize`, `cosmic-text` |
 | `crates/pawcut-export` | Laço de exportação, pipe para `ffmpeg` (`libx264`/`aac`, `-pix_fmt yuv420p`), progresso, cancelamento, log de erro | render |
 | `crates/pawcut-app` | Interface `eframe`/`egui` + `egui_dock`, estado central do app, reprodução (`cpal`), keymap, preferências, autosave | todos |

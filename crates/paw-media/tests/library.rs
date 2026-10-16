@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use pawcut_media::{MediaLibrary, thumbnail};
-use pawcut_testkit as kit;
+use paw_media::{MediaLibrary, thumbnail};
+use paw_testkit as kit;
 
 #[test]
 fn video_frames_are_cached_and_follow_time() {
@@ -94,10 +94,10 @@ fn proxies_are_used_only_when_enabled() {
     // SAFETY: só este teste mexe no XDG_CACHE_HOME deste processo de teste.
     unsafe { std::env::set_var("XDG_CACHE_HOME", cache.path()) };
     let video = kit::solid_video(dir.path(), "grande.mp4", "0x3366CC", 1280, 720, 1);
-    assert!(!pawcut_media::has_proxy(&video));
-    let proxy = pawcut_media::make_proxy(&video).unwrap();
-    assert!(pawcut_media::has_proxy(&video));
-    let info = pawcut_media::probe(&proxy, pawcut_core::FrameRate::new(30, 1)).unwrap();
+    assert!(!paw_media::has_proxy(&video));
+    let proxy = paw_media::make_proxy(&video).unwrap();
+    assert!(paw_media::has_proxy(&video));
+    let info = paw_media::probe(&proxy, pawcut_core::FrameRate::new(30, 1)).unwrap();
     assert_eq!((info.width, info.height), (960, 540));
     let mut lib = MediaLibrary::new((1280, 720), 48_000, None);
     assert_eq!(lib.video_source_path(&video), video);

@@ -1,5 +1,5 @@
-use pawcut_media::{Pcm, decode_audio, load_audio, peaks};
-use pawcut_testkit as kit;
+use paw_media::{Pcm, decode_audio, load_audio, peaks};
+use paw_testkit as kit;
 
 fn mid(p: &Pcm) -> [f32; 2] {
     p.frame(p.frames() as i64 / 2)

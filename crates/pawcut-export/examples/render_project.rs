@@ -3,8 +3,8 @@
 
 use std::sync::atomic::AtomicBool;
 
+use paw_media::{MediaLibrary, default_cache_dir};
 use pawcut_export::{ExportSettings, export};
-use pawcut_media::{MediaLibrary, default_cache_dir};
 use pawcut_render::Renderer;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

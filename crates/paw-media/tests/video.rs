@@ -1,5 +1,5 @@
-use pawcut_media::VideoSource;
-use pawcut_testkit as kit;
+use paw_media::VideoSource;
+use paw_testkit as kit;
 
 fn gray(src: &mut VideoSource, index: i64) -> u8 {
     let img = src.frame(index).unwrap();

@@ -1,8 +1,8 @@
 mod common;
 
 use common::*;
+use paw_testkit as kit;
 use pawcut_core::*;
-use pawcut_testkit as kit;
 
 #[test]
 fn empty_timeline_is_black() {
@@ -335,7 +335,7 @@ fn crop_and_flip_on_media() {
     let mut ed = editor();
     let m = media(
         &mut ed,
-        &pawcut_testkit::png(dir.path(), "a.png", "red", 40, 40),
+        &paw_testkit::png(dir.path(), "a.png", "red", 40, 40),
     );
     let c = put(
         &mut ed,

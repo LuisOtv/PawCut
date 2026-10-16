@@ -1,0 +1,9 @@
+[package]
+name = "paw-audio"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+libpulse-binding = "2.30"
+libpulse-simple-binding = "2.29"
+rustfft = "6"

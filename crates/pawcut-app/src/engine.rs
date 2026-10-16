@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use paw_media::{MediaLibrary, RgbaImage, default_cache_dir, load_audio, peaks};
 use pawcut_core::{Frame, MediaKind, Project};
 use pawcut_export::{ExportError, ExportSettings, export};
-use pawcut_media::{MediaLibrary, RgbaImage, default_cache_dir, load_audio, peaks};
 use pawcut_render::Renderer;
 
 /// O que mostrar num viewer.

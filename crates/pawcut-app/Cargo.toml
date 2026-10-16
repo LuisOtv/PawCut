@@ -9,9 +9,11 @@ path = "src/main.rs"
 
 [dependencies]
 pawcut-core.workspace = true
-pawcut-media.workspace = true
+paw-media.workspace = true
 pawcut-render.workspace = true
 pawcut-export.workspace = true
+paw-ui.workspace = true
+paw-audio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 image.workspace = true
@@ -26,4 +28,4 @@ libpulse-simple-binding = "2.29"
 [dev-dependencies]
 tempfile.workspace = true
 egui_kittest = { version = "0.36", features = ["eframe"] }
-pawcut-testkit.workspace = true
+paw-testkit.workspace = true

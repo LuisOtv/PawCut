@@ -1,7 +1,7 @@
 //! Mixagem das faixas de áudio da timeline.
 
+use paw_media::MediaLibrary;
 use pawcut_core::{Clip, ClipSource, Frame, Param, Project};
-use pawcut_media::MediaLibrary;
 
 /// Janela `[início, fim)` em frames.
 type Window = Option<(Frame, Frame)>;

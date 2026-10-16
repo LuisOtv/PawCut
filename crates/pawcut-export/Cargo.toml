@@ -6,12 +6,12 @@ edition.workspace = true
 [dependencies]
 image.workspace = true
 pawcut-core.workspace = true
-pawcut-media.workspace = true
+paw-media.workspace = true
 pawcut-render.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 image.workspace = true
-pawcut-testkit.workspace = true
+paw-testkit.workspace = true
 serde_json.workspace = true

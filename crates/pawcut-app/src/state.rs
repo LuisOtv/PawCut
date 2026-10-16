@@ -881,7 +881,7 @@ impl AppState {
         let fps = self.project().settings.fps;
         let mut n = 0;
         for (media, path) in &found {
-            if let Ok(info) = pawcut_media::probe(path, fps)
+            if let Ok(info) = paw_media::probe(path, fps)
                 && self
                     .apply(Edit::RelinkMedia {
                         media: *media,
@@ -1220,7 +1220,7 @@ impl AppState {
             if self.project().media.iter().any(|m| m.info.path == *path) {
                 continue;
             }
-            match pawcut_media::probe(path, fps) {
+            match paw_media::probe(path, fps) {
                 Ok(info) => {
                     self.apply(Edit::AddMedia(info));
                     ok += 1;
@@ -1241,7 +1241,7 @@ impl AppState {
     }
 
     pub fn relink(&mut self, media: MediaId, path: &Path) {
-        match pawcut_media::probe(path, self.project().settings.fps) {
+        match paw_media::probe(path, self.project().settings.fps) {
             Ok(info) => {
                 self.apply(Edit::RelinkMedia { media, info });
                 self.refresh_offline();
@@ -1540,7 +1540,7 @@ mod tests {
     #[test]
     fn remove_silences_cuts_the_pause_out() {
         let dir = tempfile::tempdir().unwrap();
-        let wav = pawcut_testkit::speech_with_pause(dir.path());
+        let wav = paw_testkit::speech_with_pause(dir.path());
         let mut s = state();
         assert_eq!(s.import(&[wav]), 1);
         let m = s.project().media[0].id;
@@ -1700,7 +1700,7 @@ mod tests {
         assert!(ok);
         let mut s = state();
         let fps = s.project().settings.fps;
-        let info = pawcut_media::probe(&wav, fps).unwrap();
+        let info = paw_media::probe(&wav, fps).unwrap();
         let m = s.apply(Edit::AddMedia(info)).unwrap().media.unwrap();
         s.drop_media(m, TrackKind::Audio, 0, 0);
         let c = s.project().audio_tracks[0].clips[0].id;
