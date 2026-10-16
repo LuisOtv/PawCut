@@ -825,3 +825,25 @@ fn numeric_fields_keep_their_width_whatever_the_value() {
         "largura fixa do tema: {short:?}"
     );
 }
+
+#[test]
+fn a_one_frame_clip_can_be_selected_and_hovered_without_crashing() {
+    // Com a timeline afastada o clipe fica mais estreito que as margens das alças de fade, e o
+    // `clamp(min, max)` com min > max derrubava o app.
+    let mut h = harness(|st| {
+        st.drop_generator(Generator::SolidColor, 0, 0);
+        let id = st.project().video_tracks[0].clips[0].id;
+        st.apply(Edit::Trim {
+            clips: vec![id],
+            edge: Edge::End,
+            delta: -149,
+        });
+        st.select(id, false);
+    });
+    assert_eq!(v1_spans(&h), vec![(0, 1)]);
+    let at = h.state().tl_point(TrackKind::Video, 0, 0.5);
+    h.hover_at(at);
+    h.run_steps(3);
+    click(&mut h, at);
+    h.run_steps(2);
+}

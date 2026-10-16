@@ -1142,7 +1142,7 @@ impl AppState {
             self.say("Abra uma mídia no Source Viewer (duplo clique no Media Pool)");
             return;
         };
-        let Some(len) = self.source_length() else {
+        let Some(len) = self.source_length().filter(|l| *l > 0) else {
             return;
         };
         let from = self.source.mark_in.unwrap_or(0).clamp(0, len - 1);

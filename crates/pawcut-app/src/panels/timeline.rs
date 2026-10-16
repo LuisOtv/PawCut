@@ -332,6 +332,16 @@ fn ruler_step(ppf: f32, fps: i64, min_px: f32) -> Frame {
         .unwrap_or(600 * fps)
 }
 
+/// `clamp` que não entra em pânico quando o intervalo se inverte (clipe mais estreito que as
+/// margens, ex.: 1 frame com a timeline afastada): nesse caso fica no meio.
+fn clamp_in(v: f32, lo: f32, hi: f32) -> f32 {
+    if lo > hi {
+        (lo + hi) / 2.0
+    } else {
+        v.clamp(lo, hi)
+    }
+}
+
 /// Altura da linha de volume `db` dentro da área do clipe.
 fn vol_y(content: Rect, db: f32) -> f32 {
     let frac = ((db - VOL_MIN) / (VOL_MAX - VOL_MIN)).clamp(0.0, 1.0);
@@ -1473,7 +1483,7 @@ impl Workspace {
                 r.right() - clip.fade_out as f32 * self.tl.ppf,
             ] {
                 let hdl = Rect::from_center_size(
-                    pos2(x.clamp(r.left() + 4.0, r.right() - 4.0), r.top() + 4.0),
+                    pos2(clamp_in(x, r.left() + 4.0, r.right() - 4.0), r.top() + 4.0),
                     vec2(8.0, 8.0),
                 );
                 painter.rect_filled(hdl, 1.0, Color32::WHITE);
@@ -2373,8 +2383,8 @@ impl Workspace {
         let c = p.clip(clip)?;
         let x0 = self.x_of(c.start as f32, layout.left);
         let x1 = self.x_of(c.end() as f32, layout.left);
-        let xin = (x0 + c.fade_in as f32 * self.tl.ppf).clamp(x0 + 4.0, x1 - 4.0);
-        let xout = (x1 - c.fade_out as f32 * self.tl.ppf).clamp(x0 + 4.0, x1 - 4.0);
+        let xin = clamp_in(x0 + c.fade_in as f32 * self.tl.ppf, x0 + 4.0, x1 - 4.0);
+        let xout = clamp_in(x1 - c.fade_out as f32 * self.tl.ppf, x0 + 4.0, x1 - 4.0);
         if (pos.x - xin).abs() <= 6.0 {
             Some((clip, Edge::Start))
         } else if (pos.x - xout).abs() <= 6.0 {
