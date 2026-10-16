@@ -599,9 +599,8 @@ impl Workspace {
         let mut open = true;
         let mut jump = None;
         Window::new("Histórico")
-            .pivot(egui::Align2::CENTER_TOP)
-            .default_pos(dialog_pos(ctx))
             .open(&mut open)
+            .collapsible(false)
             .default_size([300.0, 420.0])
             .default_pos(ctx.content_rect().right_top() + egui::vec2(-340.0, 80.0))
             .show(ctx, |ui| {
@@ -1155,6 +1154,7 @@ impl Workspace {
             .vscroll(true)
             .max_height((ctx.content_rect().height() - 40.0).max(200.0))
             .open(&mut open)
+            .collapsible(false)
             .default_size([520.0, 520.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {

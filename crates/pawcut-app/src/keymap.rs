@@ -269,8 +269,40 @@ impl KeyChord {
         if self.shift {
             s.push_str("Shift+");
         }
-        s.push_str(self.key.name());
+        s.push_str(key_label(self.key));
         s
+    }
+}
+
+/// Nome da tecla para mostrar: pontuação como o símbolo (`[`), não `OpenBracket`.
+fn key_label(key: Key) -> &'static str {
+    match key {
+        Key::OpenBracket => "[",
+        Key::CloseBracket => "]",
+        Key::Minus => "-",
+        Key::Equals => "=",
+        Key::Plus => "+",
+        Key::Comma => ",",
+        Key::Period => ".",
+        Key::Semicolon => ";",
+        Key::Colon => ":",
+        Key::Slash => "/",
+        Key::Backslash => "\\",
+        Key::Backtick => "`",
+        Key::Quote => "'",
+        Key::Pipe => "|",
+        Key::Questionmark => "?",
+        Key::Num0 => "0",
+        Key::Num1 => "1",
+        Key::Num2 => "2",
+        Key::Num3 => "3",
+        Key::Num4 => "4",
+        Key::Num5 => "5",
+        Key::Num6 => "6",
+        Key::Num7 => "7",
+        Key::Num8 => "8",
+        Key::Num9 => "9",
+        other => other.name(),
     }
 }
 
@@ -449,6 +481,15 @@ impl Keymap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn punctuation_shortcuts_are_shown_as_symbols() {
+        let mut c = KeyChord::new(Key::OpenBracket);
+        c.shift = true;
+        assert_eq!(c.display(), "Shift+[");
+        assert_eq!(KeyChord::new(Key::Num1).display(), "1");
+        assert_eq!(KeyChord::new(Key::Space).display(), "Space");
+    }
 
     #[test]
     fn every_action_has_a_default_and_defaults_do_not_clash() {

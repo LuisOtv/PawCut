@@ -431,6 +431,8 @@ fn audio_loop(
             }
             current_gen = generation;
             pos = start;
+            // Play sem preparo (o projeto mudou e o play veio logo em seguida): pede já o que falta.
+            loader.request_missing(&project, renderer.media());
         }
         // De vez em quando confere se algo saiu da memória (orçamento de áudio) e pede de novo.
         if last_check.elapsed() > Duration::from_secs(1) {
