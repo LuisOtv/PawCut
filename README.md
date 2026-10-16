@@ -16,6 +16,8 @@ scripts/install.sh            # compila e instala todos (menu de aplicativos + ~
 scripts/install.sh pawvoice   # só um (pawcut, pawvoice, pawwrite, pawpaint)
 ```
 
+Como os apps se parecem e se comportam está em [`docs/DESIGN.md`](docs/DESIGN.md).
+
 Bibliotecas compartilhadas em `crates/`:
 - `paw-ui`: tema, ícones, avisos e backups;
 - `paw-audio`: loudness, filtros, gate, compressor, tocar e gravar;
