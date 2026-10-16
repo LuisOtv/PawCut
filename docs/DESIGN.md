@@ -135,7 +135,10 @@ em volta, nem vazar para fora da linha.
 9. **Valor misto.** Com vários itens selecionados e valores diferentes, mostre o do primeiro e
    a etiqueta "vários". Mudar o valor muda todos.
 10. **Enter confirma, Esc cancela**, em todo campo que valida o que foi digitado (timecode,
-    duração, nome).
+    duração, nome) e em todo diálogo de efeito. Exceções por segurança: Enter nunca confirma
+    "Sair sem salvar" nem uma recuperação, e Esc nunca descarta uma recuperação.
+11. **Só aplica o que foi editado.** Um campo que mostra o valor arredondado (milissegundos,
+    uma casa decimal) não pode gravar o valor arredondado só porque ganhou e perdeu o foco.
 
 ### Painéis e janelas pequenos
 
@@ -175,12 +178,18 @@ O app abre bem em 960 x 600 e continua usável.
 
 Regras para qualquer app que toque ou grave som (`paw-audio` e o player do PawCut):
 
-1. **Editar durante o play não reinicia o som.** Trocar o projeto/parâmetros muda só o que vem
-   a seguir. Nunca esvazie a fila da placa (`flush`) por causa de uma edição: isso repete
-   trechos e picota o áudio a cada ajuste (era o bug do volume no PawCut). `flush` só em
-   play, seek, scrub e stop.
+1. **Editar durante o play não reinicia o som, e vale na hora.** Ganho, pan, mudo, solo e
+   envelope mexidos enquanto toca são ouvidos no bloco seguinte, como no Audacity e no Resolve.
+   O player não toca um buffer pré-mixado: ele pede o som aos poucos a uma fonte
+   (`paw_audio::mix::MixSource`), e uma edição só troca a fonte (`Player::update_live`).
+   Nunca esvazie a fila da placa (`flush`) por causa de uma edição: isso repete trechos e
+   picota o áudio a cada ajuste (era o bug do volume no PawCut). `flush` só em play, seek,
+   scrub e stop. Pré-mixar o trecho inteiro antes do play também é proibido: 5 minutos de 4
+   faixas levavam ~0,6 s na thread da tela (30 minutos, ~3,5 s de janela travada); um bloco
+   de 10 ms ao vivo leva 0,02 ms.
 2. **Sem degrau.** Quando um parâmetro muda no meio da reprodução, passe do som antigo para o
-   novo com um crossfade curto (um bloco de ~20 ms), senão dá estalo.
+   novo com um crossfade curto (um bloco de 10 a 20 ms), senão dá estalo. Use
+   `paw_audio::mix::crossfade`, que PawCut e PawVoice compartilham.
 3. **Buffer curto.** ~60 a 100 ms de fila na placa (`BufferAttr`; 60 ms no `paw-audio`, 100 ms
    no PawCut, que mixa mais coisa por bloco), para que o que o usuário fez seja ouvido quase na
    hora. O padrão do PulseAudio (~250 ms) parece lento.
@@ -197,7 +206,12 @@ Regras para qualquer app que toque ou grave som (`paw-audio` e o player do PawCu
    o progresso informa a etapa ("Preparando o áudio…", depois "n / total frames"), e o arquivo
    temporário do áudio é de 16 bits (metade do disco do float; o destino é AAC, MP3 ou WAV de
    16 bits).
-9. **Compatibilidade com versões do ffmpeg.** Decoders do ffmpeg 6/7 podem não preencher o
+9. **Efeito demorado não congela a janela.** Efeito sobre mais de ~1 minuto de áudio roda numa
+   thread (`Editor::begin_process`, o trabalho em `ProcessJob::run`, depois `finish_process`)
+   com um aviso "Aplicando…" que bloqueia a tela; se a sessão mudou no meio, o resultado é
+   recusado (`Stale`). Referência (release, 10 min de áudio mono): de-esser 1,2 s, redução de
+   ruído 1,1 s, compressor 0,8 s (`cargo run --release -p paw-audio --example bench_dsp`).
+10. **Compatibilidade com versões do ffmpeg.** Decoders do ffmpeg 6/7 podem não preencher o
    layout de canais (WAV de 16 bits). Sempre tenha o reserva pela contagem de canais e teste
    com arquivos gerados pelo `ffmpeg` de linha de comando em `pcm_s16le`, `pcm_s32le` e
    `pcm_f32le`, mono e estéreo.
@@ -266,6 +280,10 @@ zero.
 | WAV de 16 bits não abria no ffmpeg 6/7 (layout de canais vazio) | 6.9: reserva pela contagem de canais |
 | Clipe desligado com arquivo sumido bloqueava a exportação | a checagem de mídia offline segue as mesmas regras do renderizador |
 | Atalhos escritos como `Shift+OpenBracket` | rótulos de tecla legíveis |
+| PawVoice: Ganho, Pan e envelope só valiam no próximo play, e apertar play numa sessão longa travava a janela | 6.1: mixagem ao vivo por `MixSource` |
+| PawVoice: aplicar efeito em narração de vários minutos congelava a janela | 6.9: efeito em outra thread |
+| PawVoice: confirmar o campo de seleção sem digitar arredondava a seleção para o milissegundo | campo de texto só aplica o que foi editado |
+| PawVoice: Esc em diálogo, renomear faixa e campo de seleção não cancelava | 4.10 vale para todo campo e diálogo; Esc nunca descarta trabalho (recuperação) |
 
 ## 11. Checklist para uma tela nova
 
@@ -281,6 +299,7 @@ zero.
 - [ ] Menu ou lista alta rola; janela alta rola só as opções; o botão principal fica à vista.
 - [ ] Nenhum `clamp(min, max)` com limites que dependem do tamanho da tela.
 - [ ] Nada decodifica, lê disco grande ou espera rede na thread de interface ou na de áudio.
-- [ ] Operação longa mostra a etapa e deixa cancelar.
+- [ ] Operação longa mostra a etapa e deixa cancelar (ou roda em outra thread com aviso).
+- [ ] Mexer num parâmetro durante o play vale na hora, sem reiniciar o som.
 - [ ] Passou pelo `scripts/ui-fuzz.sh` sem cair.
 - [ ] Texto em português, curto, sem traço longo.

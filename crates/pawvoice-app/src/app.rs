@@ -3169,7 +3169,8 @@ impl VoiceApp {
             let (wave_lane, spec_lane) = lane_parts(lane, view);
             if let Some(wl) = wave_lane {
                 let (mid, half) = (wl.center().y, wl.height() / 2.0 - 3.0);
-                let marks: &[(f32, &str)] = if wl.height() > 70.0 {
+                // Cinco marcas só se cabem sem encostar nas da raia de baixo (estéreo).
+                let marks: &[(f32, &str)] = if wl.height() > 100.0 {
                     &[
                         (1.0, "1,0"),
                         (0.5, "0,5"),

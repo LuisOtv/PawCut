@@ -42,7 +42,8 @@ Gravador e editor de voz com a interface e o jeito de usar do Audacity.
   - arrastar seleciona (na vertical pega várias faixas); Z ajusta a seleção ao cruzamento por zero;
   - clique no cabeçalho do clipe seleciona e Ctrl+clique soma outros; arrastar move todos juntos
     (Time Shift), e um clipe sozinho pode ir para outra faixa;
-  - mexer em Ganho/Pan/Mudo/Solo de uma faixa selecionada vale para todas as selecionadas;
+  - mexer em Ganho/Pan/Mudo/Solo de uma faixa selecionada vale para todas as selecionadas, e tudo (inclusive o
+    envelope) vale **na hora, enquanto toca**;
   - Ctrl+X, Ctrl+C e Ctrl+V; Delete; Ctrl+D duplica; Ctrl+L silencia; Ctrl+T apara;
     Ctrl+Alt+I separa em nova faixa;
   - Ctrl+1 e Ctrl+3 dão zoom, Ctrl+F cabe tudo, Ctrl+E dá zoom na seleção;
@@ -57,6 +58,8 @@ Gravador e editor de voz com a interface e o jeito de usar do Audacity.
   - normalizar loudness (LUFS) ou pico, amplificar, compressor, limitador, fades;
   - noise gate, passa-altas, graves e agudos, **de-esser** (tira o chiado do S), truncar silêncio e inverter;
   - Arquivo → *Exportar para vídeo* já ajusta o loudness para o alvo (−14 LUFS no YouTube).
+  - efeitos em trechos longos rodam em segundo plano (aparece "Aplicando…"), a janela não congela;
+  - nos diálogos de efeito, Esc cancela e Enter aplica.
 - **Roteiro e teleprompter** (Ver → Roteiro): a letra grande rola sozinha enquanto você grava.
 - **Arquivos:**
   - o projeto fica em `nome.pawvoice`, com os áudios em `nome.pawvoice-audio/` (WAV, mono ou estéreo);
