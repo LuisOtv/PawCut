@@ -247,6 +247,24 @@ impl Renderer {
 
     /// Áudio mixado: `frames` frames estéreo a partir da amostra `start`, intercalados L/R.
     pub fn mix_audio(&mut self, project: &Project, start: i64, frames: usize) -> Vec<f32> {
-        mix::mix(project, &mut self.media, start, frames)
+        let media = &mut self.media;
+        mix::mix(
+            project,
+            &mut |p, speed| media.audio(p, speed).ok(),
+            start,
+            frames,
+        )
+    }
+
+    /// Como `mix_audio`, mas só com o áudio que já está na memória: um clipe ainda não
+    /// decodificado fica em silêncio em vez de travar a mixagem (usado pelo player).
+    pub fn mix_audio_resident(&mut self, project: &Project, start: i64, frames: usize) -> Vec<f32> {
+        let media = &mut self.media;
+        mix::mix(
+            project,
+            &mut |p, speed| media.resident_audio(p, speed),
+            start,
+            frames,
+        )
     }
 }

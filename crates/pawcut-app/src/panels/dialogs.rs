@@ -276,6 +276,16 @@ impl Default for NewProjectDialog {
     }
 }
 
+/// Onde a janela abre: centralizada na horizontal e perto do topo. Fixar o topo (em vez do
+/// centro) evita que ela pule quando a altura muda, por exemplo ao aparecer a barra de progresso.
+fn dialog_pos(ctx: &egui::Context) -> egui::Pos2 {
+    let screen = ctx.content_rect();
+    egui::pos2(
+        screen.center().x,
+        screen.top() + (screen.height() * 0.1).clamp(16.0, 80.0),
+    )
+}
+
 impl Workspace {
     pub fn open_deliver(&mut self) {
         if self.deliver.is_none() {
@@ -332,8 +342,8 @@ impl Workspace {
         let mut open = true;
         let mut apply = false;
         Window::new("Configurações do projeto")
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
+            .pivot(egui::Align2::CENTER_TOP)
+            .default_pos(dialog_pos(ctx))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -403,8 +413,8 @@ impl Workspace {
         let mut changed = false;
         let mut delete = false;
         Window::new(format!("Marcador {}", format_timecode(frame, fps)))
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
+            .pivot(egui::Align2::CENTER_TOP)
+            .default_pos(dialog_pos(ctx))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -589,8 +599,8 @@ impl Workspace {
         let mut open = true;
         let mut jump = None;
         Window::new("Histórico")
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
+            .pivot(egui::Align2::CENTER_TOP)
+            .default_pos(dialog_pos(ctx))
             .open(&mut open)
             .default_size([300.0, 420.0])
             .default_pos(ctx.content_rect().right_top() + egui::vec2(-340.0, 80.0))
@@ -660,8 +670,8 @@ impl Workspace {
         let mut open = true;
         let mut restore = None;
         Window::new("Versões anteriores")
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
+            .pivot(egui::Align2::CENTER_TOP)
+            .default_pos(dialog_pos(ctx))
             .open(&mut open)
             .collapsible(false)
             .default_width(380.0)
@@ -725,8 +735,11 @@ impl Workspace {
         let mut still = false;
         let before = d.opts.clone();
         Window::new("Deliver — Exportar")
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
+            .pivot(egui::Align2::CENTER_TOP)
+            .default_pos(egui::pos2(
+                ctx.content_rect().center().x,
+                ctx.content_rect().top() + 8.0,
+            ))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -739,9 +752,17 @@ impl Workspace {
                         ui.label(RichText::new(text).color(crate::theme::TEXT_DIM));
                     });
                 };
+                // Só as opções rolam; o resumo e os botões de baixo ficam sempre à vista, mesmo
+                // numa janela baixa.
+                let audio_only = d.opts.format.audio_only().is_some();
+                let options_h = (ctx.content_rect().height() - 190.0).max(120.0);
+                egui::ScrollArea::vertical()
+                    .max_height(options_h)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
                 egui::Grid::new("deliver-file")
                     .num_columns(2)
-                    .spacing([12.0, 8.0])
+                    .spacing([12.0, 6.0])
                     .min_col_width(110.0)
                     .show(ui, |ui| {
                         label(ui, "Arquivo");
@@ -779,7 +800,7 @@ impl Workspace {
                     ui.label(RichText::new("Vídeo").strong());
                     egui::Grid::new("deliver-video")
                         .num_columns(2)
-                        .spacing([12.0, 8.0])
+                        .spacing([12.0, 6.0])
                         .min_col_width(110.0)
                         .show(ui, |ui| {
                             label(ui, "Codec");
@@ -903,7 +924,7 @@ impl Workspace {
                 ui.label(RichText::new("Áudio").strong());
                 egui::Grid::new("deliver-audio")
                     .num_columns(2)
-                    .spacing([12.0, 8.0])
+                    .spacing([12.0, 6.0])
                     .min_col_width(110.0)
                     .show(ui, |ui| {
                         if !audio_only {
@@ -915,23 +936,33 @@ impl Workspace {
                             && !(d.opts.codec == VideoCodec::ProRes && !audio_only);
                         if (d.opts.audio || audio_only) && lossy {
                             label(ui, "Bitrate");
-                            egui::ComboBox::from_id_salt("deliver-abr")
-                                .width(120.0)
-                                .selected_text(format!("{} kb/s", d.opts.audio_kbps))
-                                .show_ui(ui, |ui| {
-                                    for k in [128, 192, 256, 320] {
-                                        ui.selectable_value(
-                                            &mut d.opts.audio_kbps,
-                                            k,
-                                            format!("{k} kb/s"),
-                                        );
-                                    }
-                                });
+                            ui.horizontal(|ui| {
+                                egui::ComboBox::from_id_salt("deliver-abr")
+                                    .width(120.0)
+                                    .selected_text(format!("{} kb/s", d.opts.audio_kbps))
+                                    .show_ui(ui, |ui| {
+                                        for k in [128, 192, 256, 320] {
+                                            ui.selectable_value(
+                                                &mut d.opts.audio_kbps,
+                                                k,
+                                                format!("{k} kb/s"),
+                                            );
+                                        }
+                                    });
+                                ui.label(
+                                    RichText::new(format!("{} Hz · estéreo", s.sample_rate)).weak(),
+                                );
+                            });
+                            ui.end_row();
+                        } else {
+                            label(ui, "Amostragem");
+                            ui.label(
+                                RichText::new(format!("{} Hz · estéreo", s.sample_rate)).weak(),
+                            );
                             ui.end_row();
                         }
-                        label(ui, "Amostragem");
-                        ui.label(RichText::new(format!("{} Hz · estéreo", s.sample_rate)).weak());
-                        ui.end_row();
+                    });
+
                     });
 
                 // Resumo do que vai sair.
@@ -999,7 +1030,11 @@ impl Workspace {
                         ui.add(
                             egui::ProgressBar::new(frac)
                                 .show_percentage()
-                                .text(format!("{} / {} frames", done as i64, job.total)),
+                                .text(if job.mixing_audio.load(Ordering::Relaxed) {
+                                    "Preparando o áudio…".to_string()
+                                } else {
+                                    format!("{} / {} frames", done as i64, job.total)
+                                }),
                         );
                         if ui.button("Cancelar").clicked() {
                             job.cancel.store(true, Ordering::Relaxed);
@@ -1115,8 +1150,10 @@ impl Workspace {
         }
         let mut open = true;
         Window::new("Preferences — Teclado")
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
+            .pivot(egui::Align2::CENTER_TOP)
+            .default_pos(dialog_pos(ctx))
+            .vscroll(true)
+            .max_height((ctx.content_rect().height() - 40.0).max(200.0))
             .open(&mut open)
             .default_size([520.0, 520.0])
             .show(ctx, |ui| {
@@ -1195,8 +1232,8 @@ impl Workspace {
         let mut open = true;
         let mut create = None;
         Window::new("Novo projeto")
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
+            .pivot(egui::Align2::CENTER_TOP)
+            .default_pos(dialog_pos(ctx))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
