@@ -1072,6 +1072,13 @@ impl Workspace {
                                         .suffix(" LUFS"),
                                 )
                                 .on_hover_text("−14 YouTube/Spotify · −16 podcast · −23 TV");
+                            },
+                            |_| {},
+                        );
+                        row(
+                            ui,
+                            "",
+                            |ui| {
                                 if ui
                                     .button("Normalizar")
                                     .on_hover_text(
@@ -1135,7 +1142,11 @@ impl Workspace {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.add_space(theme::LABEL_W + theme::PAD);
-                        if ui.button("Separar áudio e vídeo").clicked() {
+                        if ui
+                            .button("Separar A/V")
+                            .on_hover_text("Desliga o áudio do vídeo (Ctrl+Alt+L)")
+                            .clicked()
+                        {
                             self.st.apply(Edit::Unlink {
                                 clips: project.expand_linked(&[id]),
                             });
@@ -1192,7 +1203,12 @@ impl Workspace {
                 "Tamanho",
                 |ui| {
                     changed |= ui
-                        .add(DragValue::new(&mut s.size).range(4.0..=600.0).speed(0.5))
+                        .add(
+                            DragValue::new(&mut s.size)
+                                .range(4.0..=600.0)
+                                .speed(0.5)
+                                .suffix(" px"),
+                        )
                         .changed()
                 },
                 |_| {},
@@ -1236,7 +1252,8 @@ impl Workspace {
                                 .suffix(" px"),
                         )
                         .changed();
-                    changed |= color_button(ui, &mut s.outline_color);
+                    changed |=
+                        theme::fixed_width(ui, 36.0, |ui| color_button(ui, &mut s.outline_color));
                 },
                 |_| {},
             );
@@ -1251,7 +1268,9 @@ impl Workspace {
                 "Caixa",
                 |ui| {
                     changed |= ui.checkbox(&mut s.background, "").changed();
-                    changed |= color_button(ui, &mut s.background_color);
+                    changed |= theme::fixed_width(ui, 36.0, |ui| {
+                        color_button(ui, &mut s.background_color)
+                    });
                 },
                 |_| {},
             );

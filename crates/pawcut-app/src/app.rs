@@ -533,7 +533,9 @@ impl eframe::App for PawCutApp {
             .frame(bar(theme::BAR))
             .show(ui, |ui| self.interface_bar(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            let style = theme::dock_style(ui.style().as_ref());
+            let mut style = theme::dock_style(ui.style().as_ref());
+            // Nenhum painel encolhe a ponto de cortar os campos do Inspector.
+            style.separator.extra = theme::PROPS_MIN_W;
             DockArea::new(&mut self.layout.dock)
                 .style(style)
                 .show_leaf_collapse_buttons(false)

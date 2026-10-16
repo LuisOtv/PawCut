@@ -33,6 +33,10 @@ pub const ICON: f32 = 16.0;
 pub const ROW_H: f32 = 24.0;
 /// Colunas do Inspector.
 pub const LABEL_W: f32 = 104.0;
+/// Menor largura da coluna de rótulos quando o painel fica estreito.
+pub const LABEL_MIN_W: f32 = 60.0;
+/// Largura mínima que um painel de propriedades aguenta sem cortar campos.
+pub const PROPS_MIN_W: f32 = 260.0;
 pub const VALUE_W: f32 = 84.0;
 /// Largura de um campo numérico solto (fora do Inspector), com ou sem sufixo.
 pub const NUM_W: f32 = 64.0;
@@ -237,7 +241,10 @@ pub fn row(
     extras: impl FnOnce(&mut egui::Ui),
 ) {
     let full = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), ROW_H));
-    let label_rect = egui::Rect::from_min_size(full.min, egui::vec2(LABEL_W, ROW_H));
+    // Painel estreito: quem cede primeiro é a coluna do rótulo, nunca o campo de valor.
+    let extras_w = 48.0;
+    let label_w = (full.width() - PAD - VALUE_W - extras_w - 4.0).clamp(LABEL_MIN_W, LABEL_W);
+    let label_rect = egui::Rect::from_min_size(full.min, egui::vec2(label_w, ROW_H));
     // Rótulo desenhado à mão; o widget invisível deixa ele acessível (leitor de tela, testes).
     if !label.is_empty() {
         ui.interact(
@@ -247,17 +254,20 @@ pub fn row(
         )
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label));
     }
-    ui.painter().text(
+    // Recortado na própria coluna: rótulo comprido não invade o painel vizinho.
+    ui.painter_at(label_rect).text(
         label_rect.right_center() - egui::vec2(4.0, 0.0),
         egui::Align2::RIGHT_CENTER,
         label,
         text(12.0),
         TEXT_DIM,
     );
-    let extras_w = 48.0;
     let value_rect = egui::Rect::from_min_max(
         egui::pos2(label_rect.right() + PAD, full.top()),
-        egui::pos2(full.right() - extras_w - 4.0, full.bottom()),
+        egui::pos2(
+            (full.right() - extras_w - 4.0).max(label_rect.right() + PAD),
+            full.bottom(),
+        ),
     );
     ui.scope_builder(
         egui::UiBuilder::new()
