@@ -75,6 +75,10 @@ Editor de roteiros para vídeo: texto limpo e o tempo de fala sempre à vista.
   fechar sem salvar, ele oferece recuperar o texto.
 - **Com o PawVoice:** Arquivo → *Abrir no PawVoice* manda o roteiro para o teleprompter. O PawVoice
   mostra só a fala (sem títulos, notas e comentários). Também dá para exportar ou copiar só a fala.
+  Arquivo → *Exportar legendas (.srt) pelo ritmo* gera legendas da fala com o tempo calculado, para importar
+  no PawCut e ajustar. Rótulos do PawVoice viram capítulos do YouTube.
+- **Mais:** mover seções pela estrutura (botão direito), meta de duração do vídeo na barra de baixo e modo leitura
+  (F5) com a fala em letra grande rolando sozinha.
 
 ## PawPaint
 

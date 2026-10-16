@@ -226,6 +226,74 @@ pub fn move_section(text: &str, i: usize, up: bool) -> Option<(String, usize)> {
     Some((out, landed))
 }
 
+fn srt_time(secs: f32) -> String {
+    let ms = (secs.max(0.0) * 1000.0).round() as u64;
+    format!(
+        "{:02}:{:02}:{:02},{:03}",
+        ms / 3_600_000,
+        ms / 60_000 % 60,
+        ms / 1000 % 60,
+        ms % 1000
+    )
+}
+
+/// Legendas (SRT) a partir da fala do roteiro, com o tempo calculado pelo ritmo (`wpm`).
+/// Cada legenda tem até `max_chars` caracteres (quebradas em até 2 linhas); parágrafos novos
+/// ganham uma pequena pausa. Serve de ponto de partida: ajuste o tempo na edição.
+pub fn to_srt(text: &str, wpm: f32, max_chars: usize) -> String {
+    let max_chars = max_chars.max(20);
+    let mut out = String::new();
+    let (mut t, mut n) = (0.0f32, 0usize);
+    for paragraph in spoken(text).split("\n\n") {
+        let words: Vec<&str> = paragraph.split_whitespace().collect();
+        let mut i = 0;
+        while i < words.len() {
+            // junta palavras até encher a legenda (2 linhas de ~max_chars/2), preferindo parar
+            // depois de pontuação
+            let (mut len, mut j) = (0usize, i);
+            while j < words.len() && len + words[j].len() + usize::from(j > i) <= max_chars * 2 {
+                len += words[j].len() + usize::from(j > i);
+                j += 1;
+            }
+            j = j.max(i + 1);
+            if j < words.len()
+                && let Some(p) = (i + 1..j)
+                    .rev()
+                    .find(|k| words[*k - 1].ends_with(['.', '!', '?', ',', ';', ':']))
+                && p > i + (j - i) / 2
+            {
+                j = p;
+            }
+            let chunk = &words[i..j];
+            let dur = seconds(chunk.len(), wpm).max(0.8);
+            // quebra em duas linhas perto do meio
+            let text = chunk.join(" ");
+            let body = if text.len() > max_chars {
+                let mid = text.len() / 2;
+                let cut = text
+                    .char_indices()
+                    .filter(|(_, c)| *c == ' ')
+                    .map(|(k, _)| k)
+                    .min_by_key(|k| k.abs_diff(mid))
+                    .unwrap_or(mid);
+                format!("{}\n{}", &text[..cut], text[cut..].trim_start())
+            } else {
+                text
+            };
+            n += 1;
+            out.push_str(&format!(
+                "{n}\n{} --> {}\n{body}\n\n",
+                srt_time(t),
+                srt_time(t + dur)
+            ));
+            t += dur;
+            i = j;
+        }
+        t += 0.4;
+    }
+    out
+}
+
 /// Tempo de fala de `words` palavras a `wpm` palavras por minuto, em segundos.
 pub fn seconds(words: usize, wpm: f32) -> f32 {
     words as f32 / wpm.max(1.0) * 60.0
@@ -367,6 +435,34 @@ mod tests {
             move_section(t, 1, false).is_none(),
             "A1 não tem irmã abaixo"
         );
+    }
+
+    #[test]
+    fn subtitles_follow_the_speaking_pace() {
+        let srt = to_srt(
+            "# Título\nOlá, pessoal! Hoje eu vou mostrar três truques de edição que mudaram tudo.\n\n[B-roll] Fim.",
+            120.0,
+            42,
+        );
+        assert!(srt.starts_with("1\n00:00:00,000 --> "));
+        let blocks: Vec<&str> = srt.trim_end().split("\n\n").collect();
+        assert!(blocks.len() >= 2, "{srt}");
+        assert!(blocks[0].contains("Olá, pessoal!"));
+        assert!(
+            blocks
+                .iter()
+                .all(|b| b.lines().count() >= 3 && b.lines().count() <= 4)
+        );
+        assert!(!srt.contains("Título") && !srt.contains("B-roll"));
+        // legendas em ordem de tempo, sem sobrepor
+        let ends: Vec<&str> = blocks.iter().map(|b| b.lines().nth(1).unwrap()).collect();
+        let mut prev_end = String::new();
+        for e in ends {
+            let (a, b) = e.split_once(" --> ").unwrap();
+            assert!(a >= prev_end.as_str(), "{a} antes de {prev_end}");
+            prev_end = b.to_string();
+        }
+        assert_eq!(to_srt("", 150.0, 42), "");
     }
 
     #[test]

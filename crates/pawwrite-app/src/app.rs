@@ -94,6 +94,7 @@ enum Purpose {
     Open,
     SaveAs,
     ExportSpoken,
+    ExportSrt,
 }
 
 /// Algo a fazer na janela depois que um diálogo fecha.
@@ -293,6 +294,7 @@ impl WriteApp {
             Purpose::Open => 0,
             Purpose::SaveAs => 1,
             Purpose::ExportSpoken => 2,
+            Purpose::ExportSrt => 3,
         };
         std::thread::spawn(move || {
             let mut d = rfd::FileDialog::new().add_filter("Roteiro", &["md", "txt"]);
@@ -304,6 +306,11 @@ impl WriteApp {
                 1 => d
                     .set_title("Salvar roteiro")
                     .set_file_name(format!("{name}.md"))
+                    .save_file(),
+                3 => d
+                    .set_title("Exportar legendas")
+                    .add_filter("Legendas", &["srt"])
+                    .set_file_name(format!("{name}.srt"))
                     .save_file(),
                 _ => d
                     .set_title("Exportar só a fala")
@@ -330,6 +337,16 @@ impl WriteApp {
                     path.set_extension("md");
                 }
                 self.save_to(path);
+            }
+            Purpose::ExportSrt => {
+                if path.extension().is_none() {
+                    path.set_extension("srt");
+                }
+                let srt = core::to_srt(&self.text, self.settings.wpm, 42);
+                match std::fs::write(&path, srt) {
+                    Ok(()) => self.say("Legendas exportadas (importe no PawCut e ajuste o tempo)"),
+                    Err(e) => self.warn(format!("Não deu para exportar: {e}")),
+                }
             }
             Purpose::ExportSpoken => match std::fs::write(&path, core::spoken(&self.text)) {
                 Ok(()) => self.say("Fala exportada"),
@@ -614,6 +631,10 @@ impl WriteApp {
                 if item(ui, "Exportar só a fala (.txt)…", "", has) {
                     ui.close();
                     self.ask(Purpose::ExportSpoken);
+                }
+                if item(ui, "Exportar legendas (.srt) pelo ritmo…", "", has) {
+                    ui.close();
+                    self.ask(Purpose::ExportSrt);
                 }
                 if item(ui, "Copiar só a fala", "", has) {
                     ui.close();
