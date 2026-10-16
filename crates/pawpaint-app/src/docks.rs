@@ -623,6 +623,9 @@ pub fn tool_options(st: &mut State, ui: &mut egui::Ui) {
                     .small(),
             );
         }
+        Tool::Smudge => {
+            ui.label(RichText::new("Arraste sobre a pintura para borrar. O fluxo do pincel controla a força; dureza e tamanho valem como no pincel.").weak().small());
+        }
         Tool::Fill => {
             ui.add(egui::Slider::new(&mut o.fill_tolerance, 0.0..=1.0).text("Tolerância"));
             let mut op = o.fill_opacity * 100.0;

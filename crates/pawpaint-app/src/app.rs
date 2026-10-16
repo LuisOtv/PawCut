@@ -921,6 +921,14 @@ impl PaintApp {
                         open_filter(st, kind);
                     }
                 }
+                if item(ui, "Curvas…", "", has_doc) {
+                    ui.close();
+                    st.dialog = Some(Dialog::Curves {
+                        points: vec![(0.0, 0.0), (1.0, 1.0)],
+                        drag: None,
+                        applied: false,
+                    });
+                }
                 if item(ui, "Inverter cores", "Ctrl+I", has_doc) {
                     ui.close();
                     quick_filter(st, Filter::Invert, "Inverter cores");
@@ -993,7 +1001,7 @@ impl PaintApp {
             ui.add_space(4.0);
             ui.label(RichText::new(st.tool.label()).strong());
             ui.separator();
-            if st.tool.paints() || st.tool == Tool::Eraser || st.tool == Tool::Text {
+            if st.tool.paints() || st.tool == Tool::Text {
                 let name = st.brush.name.clone();
                 egui::ComboBox::from_id_salt("bar-preset")
                     .selected_text(name)
@@ -1388,6 +1396,7 @@ impl PaintApp {
             let key = match tool.key() {
                 "B" => Key::B,
                 "E" => Key::E,
+                "S" => Key::S,
                 "F" => Key::F,
                 "G" => Key::G,
                 "P" => Key::P,
@@ -1423,6 +1432,7 @@ impl PaintApp {
         let title = match &dialog {
             Dialog::New { .. } => "Nova imagem",
             Dialog::Filter { .. } => "Filtro",
+            Dialog::Curves { .. } => "Curvas",
             Dialog::CanvasSize { .. } => "Tamanho da tela",
             Dialog::ScaleImage { .. } => "Escalar imagem",
             Dialog::Feather(_) => "Suavizar borda da seleção",
@@ -1559,6 +1569,126 @@ impl PaintApp {
                                     if let Err(e) = d.ed.apply_filter(id, &f, label) {
                                         st.warn(e.to_string());
                                     }
+                                }
+                            }));
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            keep = false;
+                            then = Some(Box::new(move |st| {
+                                if applied_now && let Some(d) = st.doc_mut() {
+                                    d.ed.undo();
+                                }
+                            }));
+                        }
+                    });
+                }
+                Dialog::Curves {
+                    points,
+                    drag,
+                    applied,
+                } => {
+                    let side = 240.0;
+                    let (rect, resp) =
+                        ui.allocate_exact_size(vec2(side, side), egui::Sense::click_and_drag());
+                    let p = ui.painter();
+                    p.rect_filled(rect, 2.0, egui::Color32::from_gray(30));
+                    for i in 1..4 {
+                        let t = i as f32 / 4.0;
+                        let g = egui::Stroke::new(1.0, egui::Color32::from_gray(60));
+                        p.line_segment(
+                            [
+                                rect.lerp_inside(vec2(t, 0.0)),
+                                rect.lerp_inside(vec2(t, 1.0)),
+                            ],
+                            g,
+                        );
+                        p.line_segment(
+                            [
+                                rect.lerp_inside(vec2(0.0, t)),
+                                rect.lerp_inside(vec2(1.0, t)),
+                            ],
+                            g,
+                        );
+                    }
+                    let to_screen = |x: f32, y: f32| {
+                        egui::pos2(
+                            rect.left() + x * rect.width(),
+                            rect.bottom() - y * rect.height(),
+                        )
+                    };
+                    let lut = pawpaint_core::filters::curve_lut(points);
+                    let line: Vec<egui::Pos2> = (0..256)
+                        .map(|k| to_screen(k as f32 / 255.0, lut[k]))
+                        .collect();
+                    p.add(egui::Shape::line(
+                        line,
+                        egui::Stroke::new(2.0, theme::ACCENT),
+                    ));
+                    for (x, y) in points.iter() {
+                        p.circle_filled(to_screen(*x, *y), 4.5, egui::Color32::WHITE);
+                    }
+                    let norm = |pos: egui::Pos2| {
+                        (
+                            ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
+                            ((rect.bottom() - pos.y) / rect.height()).clamp(0.0, 1.0),
+                        )
+                    };
+                    let mut changed = false;
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        if resp.drag_started() || resp.clicked() {
+                            let near = points
+                                .iter()
+                                .position(|(x, y)| to_screen(*x, *y).distance(pos) < 10.0);
+                            *drag = Some(near.unwrap_or_else(|| {
+                                points.push(norm(pos));
+                                points.len() - 1
+                            }));
+                            changed = true;
+                        }
+                        if resp.dragged()
+                            && let Some(i) = *drag
+                            && i < points.len()
+                        {
+                            points[i] = norm(pos);
+                            changed = true;
+                        }
+                    }
+                    if resp.secondary_clicked()
+                        && let Some(pos) = resp.interact_pointer_pos()
+                        && let Some(i) = points
+                            .iter()
+                            .position(|(x, y)| to_screen(*x, *y).distance(pos) < 10.0)
+                    {
+                        points.remove(i);
+                        changed = true;
+                    }
+                    if resp.drag_stopped() {
+                        *drag = None;
+                    }
+                    ui.label(
+                        RichText::new("Clique cria um ponto, arraste move, botão direito apaga.")
+                            .small()
+                            .weak(),
+                    );
+                    let cur = st.cur;
+                    if changed && let Some(d) = st.docs.get_mut(cur) {
+                        if *applied {
+                            d.ed.undo();
+                        }
+                        let id = d.active;
+                        *applied =
+                            d.ed.apply_filter(id, &Filter::Curves(points.clone()), "Curvas")
+                                .is_ok();
+                    }
+                    let applied_now = *applied;
+                    let pts = points.clone();
+                    ui.horizontal(|ui| {
+                        if ui.button("Aplicar").clicked() {
+                            keep = false;
+                            then = Some(Box::new(move |st| {
+                                if !applied_now && let Some(d) = st.doc_mut() {
+                                    let id = d.active;
+                                    let _ = d.ed.apply_filter(id, &Filter::Curves(pts), "Curvas");
                                 }
                             }));
                         }
@@ -2115,6 +2245,37 @@ mod tests {
     }
 
     #[test]
+    fn smudge_tool_drags_paint_with_the_mouse() {
+        let mut h = Harness::new();
+        {
+            let d = h.app.st.doc_mut().unwrap();
+            let id = d.active;
+            d.ed.combine_selection(
+                pawpaint_core::Selection::rect(300, 200, 0, 0, 100, 200),
+                pawpaint_core::selection::SelOp::Replace,
+                "s",
+            );
+            d.ed.fill_selection(id, [255, 0, 0]).unwrap();
+            d.ed.deselect();
+        }
+        h.app.st.brush = Brush {
+            size: 24.0,
+            hardness: 0.8,
+            flow: 0.9,
+            spacing: 0.15,
+            ..Brush::basic()
+        };
+        set_tool(&mut h.app.st, Tool::Smudge);
+        h.drag((80.0, 100.0), (200.0, 100.0));
+        let p = h.px(130, 100);
+        assert!(
+            p[1] < 250 && p[0] == 255,
+            "o vermelho devia ter sido arrastado: {p:?}"
+        );
+        assert_eq!(h.app.st.doc().unwrap().ed.undo_label(), Some("Borrão"));
+    }
+
+    #[test]
     fn move_tool_drags_the_layer_and_transform_waits_for_enter() {
         let mut h = Harness::new();
         {
@@ -2206,6 +2367,13 @@ mod tests {
         h.frame(vec![]);
         h.frame(vec![]);
         assert!(h.app.st.doc().unwrap().ed.undo_label().is_some());
+        h.app.st.dialog = Some(Dialog::Curves {
+            points: vec![(0.0, 0.0), (0.5, 0.7), (1.0, 1.0)],
+            drag: None,
+            applied: false,
+        });
+        h.frame(vec![]);
+        h.frame(vec![]);
         h.app.st.dialog = None;
         for p in Panel::ALL {
             let mut layout = DockState::new(vec![Panel::Canvas]);

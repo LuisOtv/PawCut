@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use image::RgbaImage;
 
 use crate::blend::BlendMode;
-use crate::brush::{Brush, Stroker, commit_stroke};
+use crate::brush::{Brush, Smudger, Stroker, commit_stroke};
 use crate::composite::{self, Live};
 use crate::doc::{Doc, Layer, LayerId};
 use crate::fill::{self, GradientKind};
@@ -73,6 +73,11 @@ pub struct Floating {
     selection: Option<Selection>,
 }
 
+struct ActiveSmudge {
+    layer: LayerId,
+    smudger: Smudger,
+}
+
 struct ActiveStroke {
     layer: LayerId,
     stroker: Stroker,
@@ -89,6 +94,7 @@ pub struct Editor {
     saved_revision: u64,
     dirty: Dirty,
     stroke: Option<ActiveStroke>,
+    smudge: Option<ActiveSmudge>,
     mirror: (bool, bool),
     pixel_rev: u64,
 }
@@ -123,6 +129,7 @@ impl Editor {
             saved_revision: 0,
             dirty: Dirty::All,
             stroke: None,
+            smudge: None,
             mirror: (false, false),
             pixel_rev: 0,
         }
@@ -428,7 +435,38 @@ impl Editor {
     }
 
     pub fn stroke_active(&self) -> bool {
-        self.stroke.is_some()
+        self.stroke.is_some() || self.smudge.is_some()
+    }
+
+    /// Começa um borrão (arrastar cor) na camada.
+    pub fn begin_smudge(
+        &mut self,
+        layer: LayerId,
+        brush: Brush,
+        x: f32,
+        y: f32,
+    ) -> Result<(), EditError> {
+        let l = self.layer_checked(layer)?;
+        let mut smudger = Smudger::new(brush);
+        smudger.begin(&l.pixels, x, y);
+        self.checkpoint("Borrão");
+        self.smudge = Some(ActiveSmudge { layer, smudger });
+        Ok(())
+    }
+
+    pub fn smudge_point(&mut self, x: f32, y: f32) {
+        let Some(s) = &mut self.smudge else { return };
+        let sel = self.doc.selection.clone();
+        let Some(l) = self.doc.layer_mut(s.layer) else {
+            return;
+        };
+        let tiles = s.smudger.add_point(&mut l.pixels, sel.as_ref(), x, y);
+        self.pixel_rev += 1;
+        self.dirty_tiles(tiles);
+    }
+
+    pub fn end_smudge(&mut self) {
+        self.smudge = None;
     }
 
     pub fn stroke_point(&mut self, x: f32, y: f32) {

@@ -625,3 +625,197 @@ mod tests {
         assert_eq!(img.pixel(60 + 13, 50 - 13)[3], 255);
     }
 }
+
+/// Borrão: arrasta a cor de baixo do pincel ao longo do traço (mexe direto na camada).
+pub struct Smudger {
+    pub brush: Brush,
+    carried: Vec<[f32; 4]>,
+    side: usize,
+    last: Option<(f32, f32)>,
+    carry: f32,
+}
+
+impl Smudger {
+    pub fn new(brush: Brush) -> Self {
+        let side = (brush.size.ceil() as usize + 3).max(3);
+        Self {
+            brush,
+            carried: vec![[0.0; 4]; side * side],
+            side,
+            last: None,
+            carry: 0.0,
+        }
+    }
+
+    /// Posição de um pixel dentro do quadrado do pincel, ou `None` se estiver fora do disco.
+    fn weight(&self, dx: f32, dy: f32) -> f32 {
+        let r = (self.brush.size / 2.0).max(0.5);
+        let d = (dx * dx + dy * dy).sqrt() / r;
+        let hard = self.brush.hardness.clamp(0.0, 0.999);
+        if d >= 1.0 {
+            0.0
+        } else if d <= hard {
+            1.0
+        } else {
+            let t = (1.0 - d) / (1.0 - hard);
+            t * t * (3.0 - 2.0 * t)
+        }
+    }
+
+    fn px(img: &TiledImage, x: i64, y: i64) -> [f32; 4] {
+        if x < 0 || y < 0 {
+            return [0.0; 4];
+        }
+        let p = img.pixel(x as usize, y as usize);
+        [p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32]
+    }
+
+    /// Começa o traço: pega a cor que está embaixo do pincel.
+    pub fn begin(&mut self, pixels: &TiledImage, x: f32, y: f32) {
+        let half = (self.side / 2) as i64;
+        for j in 0..self.side {
+            for i in 0..self.side {
+                self.carried[j * self.side + i] = Self::px(
+                    pixels,
+                    x.round() as i64 + i as i64 - half,
+                    y.round() as i64 + j as i64 - half,
+                );
+            }
+        }
+        self.last = Some((x, y));
+        self.carry = 0.0;
+    }
+
+    /// Anda até (`x`, `y`) arrastando a cor. Devolve os blocos que mudaram.
+    pub fn add_point(
+        &mut self,
+        pixels: &mut TiledImage,
+        sel: Option<&Selection>,
+        x: f32,
+        y: f32,
+    ) -> HashSet<(usize, usize)> {
+        let mut touched = HashSet::new();
+        let Some(last) = self.last else {
+            self.begin(pixels, x, y);
+            return touched;
+        };
+        let step = (self.brush.spacing.max(0.05) * self.brush.size).max(1.0);
+        let (dx, dy) = (x - last.0, y - last.1);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= 0.0 {
+            return touched;
+        }
+        let (ux, uy) = (dx / len, dy / len);
+        let (mut travelled, mut remaining) = (0.0f32, len);
+        loop {
+            let need = step - self.carry;
+            if remaining < need {
+                self.carry += remaining;
+                break;
+            }
+            travelled += need;
+            remaining -= need;
+            self.dab(
+                pixels,
+                sel,
+                last.0 + ux * travelled,
+                last.1 + uy * travelled,
+                &mut touched,
+            );
+            self.carry = 0.0;
+        }
+        self.last = Some((x, y));
+        touched
+    }
+
+    fn dab(
+        &mut self,
+        pixels: &mut TiledImage,
+        sel: Option<&Selection>,
+        cx: f32,
+        cy: f32,
+        touched: &mut HashSet<(usize, usize)>,
+    ) {
+        let strength = (self.brush.flow * self.brush.opacity).clamp(0.02, 1.0);
+        let half = (self.side / 2) as i64;
+        let (ix, iy) = (cx.round() as i64, cy.round() as i64);
+        let keep = 0.8 * strength;
+        for j in 0..self.side {
+            for i in 0..self.side {
+                let (dx, dy) = (i as i64 - half, j as i64 - half);
+                let w = self.weight(dx as f32, dy as f32);
+                if w <= 0.0 {
+                    continue;
+                }
+                let (px, py) = (ix + dx, iy + dy);
+                if px < 0
+                    || py < 0
+                    || px as usize >= pixels.width()
+                    || py as usize >= pixels.height()
+                {
+                    continue;
+                }
+                let m = sel.map_or(1.0, |s| s.value(px as usize, py as usize) as f32 / 255.0);
+                let old = Self::px(pixels, px, py);
+                let c = &mut self.carried[j * self.side + i];
+                let a = w * strength * m;
+                if a > 0.0 {
+                    let new: [f32; 4] = std::array::from_fn(|k| old[k] + (c[k] - old[k]) * a);
+                    pixels.set_pixel(
+                        px as usize,
+                        py as usize,
+                        new.map(|v| v.round().clamp(0.0, 255.0) as u8),
+                    );
+                    touched.insert((px as usize / TILE, py as usize / TILE));
+                }
+                // O que carrega vai se misturando com o que acabou de passar.
+                for k in 0..4 {
+                    c[k] = c[k] * (1.0 - keep) + old[k] * keep;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod smudge_tests {
+    use super::*;
+
+    #[test]
+    fn smudging_drags_color_across_an_edge() {
+        let mut img = TiledImage::new(120, 40);
+        for y in 0..40 {
+            for x in 0..120 {
+                img.set_pixel(
+                    x,
+                    y,
+                    if x < 40 {
+                        [255, 0, 0, 255]
+                    } else {
+                        [0, 0, 255, 255]
+                    },
+                );
+            }
+        }
+        let b = Brush {
+            size: 20.0,
+            hardness: 0.8,
+            flow: 0.9,
+            opacity: 1.0,
+            spacing: 0.15,
+            ..Brush::basic()
+        };
+        let mut s = Smudger::new(b);
+        s.begin(&img, 25.0, 20.0);
+        let mut dirty = HashSet::new();
+        for x in (26..=80).step_by(2) {
+            dirty.extend(s.add_point(&mut img, None, x as f32, 20.0));
+        }
+        assert!(!dirty.is_empty());
+        // do lado azul, perto da borda, apareceu vermelho arrastado
+        assert!(img.pixel(50, 20)[0] > 60, "{:?}", img.pixel(50, 20));
+        // longe do traço nada mudou
+        assert_eq!(img.pixel(50, 38), [0, 0, 255, 255]);
+        assert_eq!(img.pixel(5, 20), [255, 0, 0, 255]);
+    }
+}

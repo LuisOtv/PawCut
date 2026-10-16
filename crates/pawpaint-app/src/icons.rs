@@ -43,6 +43,15 @@ pub fn paint_tool(p: &Painter, r: Rect, tool: Tool, c: Color32) {
             p.line_segment([at(r, 0.31, 0.38), at(r, 0.70, 0.64)], thin);
             p.line_segment([at(r, 0.50, 0.94), at(r, 0.90, 0.94)], thin);
         }
+        Tool::Smudge => {
+            for (i, y) in [0.3, 0.5, 0.7].into_iter().enumerate() {
+                p.line_segment(
+                    [at(r, 0.12, y), at(r, 0.55 + i as f32 * 0.1, y)],
+                    Stroke::new(2.0, c.gamma_multiply(1.0 - i as f32 * 0.25)),
+                );
+            }
+            p.circle_filled(at(r, 0.75, 0.5), r.width() * 0.17, c);
+        }
         Tool::Fill => {
             polyline(
                 p,

@@ -36,6 +36,65 @@ pub enum Filter {
     Pixelate(u32),
     Noise(f32),
     EdgeDetect,
+    /// Curva de tons: pontos (entrada, saída) de 0 a 1, em qualquer ordem.
+    Curves(Vec<(f32, f32)>),
+}
+
+/// Tabela de 256 valores da curva por interpolação cúbica monotônica (não faz ondas).
+pub fn curve_lut(points: &[(f32, f32)]) -> [f32; 256] {
+    let mut p: Vec<(f32, f32)> = points
+        .iter()
+        .map(|(x, y)| (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)))
+        .collect();
+    p.sort_by(|a, b| a.0.total_cmp(&b.0));
+    p.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-4);
+    if p.first().is_none_or(|f| f.0 > 0.0) {
+        p.insert(0, (0.0, 0.0));
+    }
+    if p.last().is_none_or(|l| l.0 < 1.0) {
+        p.push((1.0, 1.0));
+    }
+    let n = p.len();
+    let secants: Vec<f32> = (0..n - 1)
+        .map(|i| (p[i + 1].1 - p[i].1) / (p[i + 1].0 - p[i].0).max(1e-6))
+        .collect();
+    let mut m = vec![0.0f32; n];
+    m[0] = secants[0];
+    m[n - 1] = secants[n - 2];
+    for i in 1..n - 1 {
+        m[i] = if secants[i - 1] * secants[i] <= 0.0 {
+            0.0
+        } else {
+            (secants[i - 1] + secants[i]) / 2.0
+        };
+    }
+    for i in 0..n - 1 {
+        if secants[i] == 0.0 {
+            m[i] = 0.0;
+            m[i + 1] = 0.0;
+        } else {
+            let (a, b) = (m[i] / secants[i], m[i + 1] / secants[i]);
+            let h = (a * a + b * b).sqrt();
+            if h > 3.0 {
+                m[i] = 3.0 * a / h * secants[i];
+                m[i + 1] = 3.0 * b / h * secants[i];
+            }
+        }
+    }
+    let mut lut = [0.0f32; 256];
+    for (k, out) in lut.iter_mut().enumerate() {
+        let x = k as f32 / 255.0;
+        let i = p.partition_point(|q| q.0 <= x).saturating_sub(1).min(n - 2);
+        let (x0, x1) = (p[i].0, p[i + 1].0);
+        let (h, t) = (x1 - x0, ((x - x0) / (x1 - x0).max(1e-6)).clamp(0.0, 1.0));
+        let (t2, t3) = (t * t, t * t * t);
+        let v = (2.0 * t3 - 3.0 * t2 + 1.0) * p[i].1
+            + (t3 - 2.0 * t2 + t) * h * m[i]
+            + (-2.0 * t3 + 3.0 * t2) * p[i + 1].1
+            + (t3 - t2) * h * m[i + 1];
+        *out = v.clamp(0.0, 1.0);
+    }
+    lut
 }
 
 impl Filter {
@@ -235,6 +294,14 @@ fn run(f: &Filter, buf: &mut Buf, w: usize, h: usize) {
                 }
             }
         }
+        Filter::Curves(points) => {
+            let lut = curve_lut(points);
+            for p in buf.iter_mut() {
+                for v in &mut p[..3] {
+                    *v = lut[(*v * 255.0).round().clamp(0.0, 255.0) as usize];
+                }
+            }
+        }
         Filter::GaussianBlur(r) => blur(buf, w, h, r.max(0.1)),
         Filter::Sharpen { amount, radius } => {
             let mut soft = buf.clone();
@@ -431,6 +498,21 @@ mod tests {
             false,
         );
         assert!(t.pixel(1, 1)[0] < 5);
+    }
+
+    #[test]
+    fn curves_follow_the_points_and_stay_monotone() {
+        let id = curve_lut(&[]);
+        assert!((id[128] - 128.0 / 255.0).abs() < 0.01);
+        let lut = curve_lut(&[(0.5, 0.75)]);
+        assert!((lut[128] - 0.75).abs() < 0.02);
+        assert!(lut.windows(2).all(|w| w[1] >= w[0] - 1e-6));
+        assert_eq!((lut[0], lut[255]), (0.0, 1.0));
+        let inv = curve_lut(&[(0.0, 1.0), (1.0, 0.0)]);
+        assert!(inv[0] > 0.99 && inv[255] < 0.01);
+        let mut t = flat([128, 128, 128, 255]);
+        apply(&mut t, &Filter::Curves(vec![(0.5, 0.75)]), None, false);
+        assert!((t.pixel(3, 3)[0] as i32 - 191).abs() <= 6);
     }
 
     #[test]

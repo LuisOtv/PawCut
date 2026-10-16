@@ -62,6 +62,7 @@ impl Panel {
 pub enum Tool {
     Brush,
     Eraser,
+    Smudge,
     Fill,
     Gradient,
     Picker,
@@ -79,9 +80,10 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 16] = [
+    pub const ALL: [Tool; 17] = [
         Tool::Brush,
         Tool::Eraser,
+        Tool::Smudge,
         Tool::Fill,
         Tool::Gradient,
         Tool::Picker,
@@ -102,6 +104,7 @@ impl Tool {
         match self {
             Tool::Brush => "Pincel",
             Tool::Eraser => "Borracha",
+            Tool::Smudge => "Borrão (arrasta a cor)",
             Tool::Fill => "Balde de tinta",
             Tool::Gradient => "Degradê",
             Tool::Picker => "Conta-gotas",
@@ -123,6 +126,7 @@ impl Tool {
         match self {
             Tool::Brush => "B",
             Tool::Eraser => "E",
+            Tool::Smudge => "S",
             Tool::Fill => "F",
             Tool::Gradient => "G",
             Tool::Picker => "P",
@@ -143,7 +147,7 @@ impl Tool {
     pub fn paints(self) -> bool {
         matches!(
             self,
-            Tool::Brush | Tool::Eraser | Tool::Line | Tool::Rect | Tool::Ellipse
+            Tool::Brush | Tool::Eraser | Tool::Smudge | Tool::Line | Tool::Rect | Tool::Ellipse
         )
     }
 }
@@ -316,6 +320,11 @@ pub enum Dialog {
         keep: bool,
         ratio: f32,
     },
+    Curves {
+        points: Vec<(f32, f32)>,
+        drag: Option<usize>,
+        applied: bool,
+    },
     Feather(usize),
     Grow(i32),
     LayerProps(LayerId),
@@ -327,6 +336,7 @@ pub enum Dialog {
 /// O que o mouse está fazendo na tela, entre apertar e soltar.
 pub enum Interaction {
     Stroke,
+    Smudge,
     Gradient {
         start: (f32, f32),
         cur: (f32, f32),

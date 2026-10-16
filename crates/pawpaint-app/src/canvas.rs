@@ -517,7 +517,12 @@ pub fn canvas_panel(st: &mut State, ui: &mut egui::Ui) {
     }
 
     // Cursor: círculo do pincel nas ferramentas de pintura.
-    if over && st.interaction.is_none() || matches!(st.interaction, Some(Interaction::Stroke)) {
+    if over && st.interaction.is_none()
+        || matches!(
+            st.interaction,
+            Some(Interaction::Stroke | Interaction::Smudge)
+        )
+    {
         if let (Some(p), true) = (pos, st.tool.paints() || st.tool == Tool::Eraser) {
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(CursorIcon::None);
@@ -637,6 +642,7 @@ fn start_interaction(
             st.tool,
             Tool::Brush
                 | Tool::Eraser
+                | Tool::Smudge
                 | Tool::Fill
                 | Tool::Gradient
                 | Tool::Line
@@ -695,6 +701,13 @@ fn start_interaction(
                     st.docs[cur].ed.stroke_point(pt.0, pt.1);
                     st.interaction = Some(Interaction::Stroke);
                 }
+                Err(e) => st.warn(e.to_string()),
+            }
+        }
+        Tool::Smudge => {
+            let brush = st.brush.clone();
+            match st.docs[cur].ed.begin_smudge(active, brush, pt.0, pt.1) {
+                Ok(()) => st.interaction = Some(Interaction::Smudge),
                 Err(e) => st.warn(e.to_string()),
             }
         }
@@ -827,6 +840,7 @@ fn update_interaction(
     };
     match inter {
         Interaction::Stroke => st.docs[cur].ed.stroke_point(pt.0, pt.1),
+        Interaction::Smudge => st.docs[cur].ed.smudge_point(pt.0, pt.1),
         Interaction::Pan => {
             let d = &mut st.docs[cur];
             d.pan += ctx.input(|i| i.pointer.delta());
@@ -898,6 +912,7 @@ fn finish_interaction(st: &mut State, pt: (f32, f32), _mods: egui::Modifiers) {
     let active = st.docs[cur].active;
     match inter {
         Interaction::Stroke => st.docs[cur].ed.end_stroke(pt.0, pt.1),
+        Interaction::Smudge => st.docs[cur].ed.end_smudge(),
         Interaction::Gradient { start, cur: end } => {
             if (start.0 - end.0).hypot(start.1 - end.1) < 2.0 {
                 return;
