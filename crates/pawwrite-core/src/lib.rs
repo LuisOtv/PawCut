@@ -170,6 +170,62 @@ pub fn spoken(text: &str) -> String {
     lines.join("\n")
 }
 
+/// Intervalo (em bytes) do bloco da seção `i`: do título até o próximo título do mesmo nível
+/// ou de nível mais alto (as subseções vêm junto).
+fn block_range(a: &Analysis, i: usize, len: usize) -> Option<Range<usize>> {
+    let s = a.sections.get(i)?;
+    if s.level == 0 {
+        return None;
+    }
+    let end = a.sections[i + 1..]
+        .iter()
+        .find(|n| n.level <= s.level)
+        .map_or(len, |n| n.start);
+    Some(s.start..end)
+}
+
+/// Troca a seção `i` de lugar com a vizinha de cima (`up`) ou de baixo, levando as subseções.
+/// Devolve o texto novo e a posição (em bytes) onde a seção ficou.
+pub fn move_section(text: &str, i: usize, up: bool) -> Option<(String, usize)> {
+    let a = analyze(text);
+    let me = block_range(&a, i, text.len())?;
+    let level = a.sections[i].level;
+    let (first, second) = if up {
+        let prev = (0..i)
+            .rev()
+            .take_while(|k| a.sections[*k].level >= level || a.sections[*k].level == 0)
+            .find(|k| a.sections[*k].level == level)?;
+        (block_range(&a, prev, text.len())?, me)
+    } else {
+        let next = a.sections[i + 1..]
+            .iter()
+            .position(|n| n.level <= level)
+            .map(|p| p + i + 1)
+            .filter(|k| a.sections[*k].level == level)?;
+        (me, block_range(&a, next, text.len())?)
+    };
+    let fix = |r: Range<usize>| {
+        let t = &text[r];
+        if t.ends_with('\n') {
+            t.to_string()
+        } else {
+            format!("{t}\n")
+        }
+    };
+    let (x, y) = (fix(first.clone()), fix(second.clone()));
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push_str(&text[..first.start]);
+    out.push_str(&y);
+    let landed = if up {
+        first.start
+    } else {
+        first.start + y.len()
+    };
+    out.push_str(&x);
+    out.push_str(&text[second.end..]);
+    Some((out, landed))
+}
+
 /// Tempo de fala de `words` palavras a `wpm` palavras por minuto, em segundos.
 pub fn seconds(words: usize, wpm: f32) -> f32 {
     words as f32 / wpm.max(1.0) * 60.0
@@ -295,6 +351,22 @@ mod tests {
             "Olá, pessoal!\n\nHoje eu vou mostrar três truques.\n\nAbra o programa — fácil.\n\nTchau!"
         );
         assert_eq!(spoken(""), "");
+    }
+
+    #[test]
+    fn sections_move_with_their_subsections() {
+        let t = "# A\num\n## A1\ndois\n# B\ntres\n# C\nquatro\n";
+        let (down, at) = move_section(t, 0, false).unwrap();
+        assert_eq!(down, "# B\ntres\n# A\num\n## A1\ndois\n# C\nquatro\n");
+        assert!(down[at..].starts_with("# A"));
+        let (up, _) = move_section(t, 3, true).unwrap();
+        assert_eq!(up, "# A\num\n## A1\ndois\n# C\nquatro\n# B\ntres\n");
+        assert!(move_section(t, 0, true).is_none());
+        assert!(move_section(t, 3, false).is_none());
+        assert!(
+            move_section(t, 1, false).is_none(),
+            "A1 não tem irmã abaixo"
+        );
     }
 
     #[test]

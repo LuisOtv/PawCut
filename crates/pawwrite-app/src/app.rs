@@ -96,6 +96,12 @@ enum Purpose {
 /// Algo a fazer na janela depois que um diálogo fecha.
 type Action = Box<dyn FnOnce(&mut WriteApp)>;
 
+struct Reading {
+    offset: f32,
+    speed: f32,
+    playing: bool,
+}
+
 struct Find {
     needle: String,
     with: String,
@@ -115,6 +121,8 @@ pub struct WriteApp {
     dialog: Option<Dialog>,
     file: Option<(Purpose, Receiver<Option<PathBuf>>)>,
     find: Option<Find>,
+    /// Modo leitura (teleprompter): posição da rolagem, velocidade em px/s e se está andando.
+    reading: Option<Reading>,
     /// Seleção (em caracteres) a aplicar no editor no próximo quadro.
     jump: Option<(usize, usize)>,
     /// Cursor atual do editor, em bytes.
@@ -201,6 +209,7 @@ impl WriteApp {
             dialog: None,
             file: None,
             find: None,
+            reading: None,
             jump: None,
             cursor: 0,
             analysis: core::Analysis::default(),
@@ -419,6 +428,74 @@ impl WriteApp {
         }
     }
 
+    fn toggle_reading(&mut self) {
+        self.reading = match self.reading {
+            Some(_) => None,
+            None => Some(Reading {
+                offset: 0.0,
+                speed: self.settings.wpm * 0.3,
+                playing: false,
+            }),
+        };
+    }
+
+    /// Texto grande só com a fala, rolando sozinho: ensaio de leitura sem sair do PawWrite.
+    fn reading_view(&mut self, ui: &mut egui::Ui) {
+        let spoken = core::spoken(&self.text);
+        let size = (self.settings.font_size * 2.2).clamp(28.0, 96.0);
+        let Some(r) = &mut self.reading else { return };
+        let dt = ui.input(|i| i.stable_dt).min(0.1);
+        if r.playing {
+            r.offset += r.speed * dt;
+            ui.ctx().request_repaint();
+        }
+        if ui.input(|i| i.key_pressed(Key::Space)) {
+            r.playing = !r.playing;
+        }
+        if ui.input(|i| i.key_pressed(Key::ArrowUp)) {
+            r.speed = (r.speed + 5.0).min(400.0);
+        }
+        if ui.input(|i| i.key_pressed(Key::ArrowDown)) {
+            r.speed = (r.speed - 5.0).max(5.0);
+        }
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        r.offset = (r.offset - scroll).max(0.0);
+        let (speed, playing) = (r.speed, r.playing);
+        let offset = r.offset;
+        let exit = ui.input(|i| i.key_pressed(Key::Escape) || i.key_pressed(Key::F5));
+        ui.painter().rect_filled(ui.max_rect(), 0.0, Color32::BLACK);
+        let w = ui.available_width().min(980.0);
+        let margin = (ui.available_width() - w) / 2.0;
+        egui::ScrollArea::vertical()
+            .vertical_scroll_offset(offset)
+            .auto_shrink(false)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+                ui.add_space(ui.available_height() * 0.4);
+                ui.horizontal(|ui| {
+                    ui.add_space(margin);
+                    ui.add(
+                        egui::Label::new(RichText::new(&spoken).size(size).color(Color32::WHITE))
+                            .wrap_mode(egui::TextWrapMode::Wrap),
+                    );
+                });
+                ui.add_space(ui.available_height() + 600.0);
+            });
+        egui::Area::new(egui::Id::new("reading-hint")).anchor(Align2::CENTER_BOTTOM, vec2(0.0, -10.0)).show(ui.ctx(), |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "Espaço {} · ↑↓ velocidade ({speed:.0} px/s) · roda do mouse volta/avança · Esc sai",
+                    if playing { "pausa" } else { "começa" }
+                ))
+                .small()
+                .color(theme::TEXT_DIM),
+            );
+        });
+        if exit {
+            self.reading = None;
+        }
+    }
+
     fn find_next(&mut self) {
         let Some(f) = &self.find else { return };
         let from = self.cursor;
@@ -463,6 +540,9 @@ impl WriteApp {
         }
         if hit(ctrl, Key::F) {
             self.open_find(false);
+        }
+        if hit(Modifiers::NONE, Key::F5) && self.reading.is_none() {
+            self.toggle_reading();
         }
         if hit(ctrl, Key::H) {
             self.open_find(true);
@@ -558,6 +638,10 @@ impl WriteApp {
                 }
             });
             ui.menu_button("Ver", |ui| {
+                if item(ui, "Modo leitura (teleprompter)", "F5", true) {
+                    ui.close();
+                    self.toggle_reading();
+                }
                 if item(ui, "Estrutura e tempo", "Ctrl+\\", true) {
                     ui.close();
                     self.settings.outline = !self.settings.outline;
@@ -605,10 +689,11 @@ impl WriteApp {
         }
         let wpm = self.settings.wpm;
         let mut jump = None;
+        let mut mv: Option<(usize, bool)> = None;
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
-                for s in &a.sections {
+                for (idx, s) in a.sections.iter().enumerate() {
                     let indent = s.level.saturating_sub(1) as f32 * 14.0;
                     let (rect, resp) =
                         ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
@@ -657,8 +742,30 @@ impl WriteApp {
                     if resp.clicked() {
                         jump = Some(s.start);
                     }
+                    if s.level > 0 {
+                        resp.context_menu(|ui| {
+                            if ui.button("Subir seção (com as subseções)").clicked() {
+                                ui.close();
+                                mv = Some((idx, true));
+                            }
+                            if ui.button("Descer seção").clicked() {
+                                ui.close();
+                                mv = Some((idx, false));
+                            }
+                        });
+                    }
                 }
             });
+        if let Some((i, up)) = mv {
+            match core::move_section(&self.text, i, up) {
+                Some((text, at)) => {
+                    self.text = text;
+                    let c = char_of_byte(&self.text, at);
+                    self.jump = Some((c, c));
+                }
+                None => self.warn("Essa seção já está no limite"),
+            }
+        }
         if let Some(byte) = jump {
             let c = char_of_byte(&self.text, byte);
             self.jump = Some((c, c));
@@ -968,7 +1075,13 @@ impl WriteApp {
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::BG))
-            .show(ui, |ui| self.editor(ui));
+            .show(ui, |ui| {
+                if self.reading.is_some() {
+                    self.reading_view(ui);
+                } else {
+                    self.editor(ui);
+                }
+            });
         self.dialogs(&ctx);
         self.toasts.tick(&ctx);
         self.toasts.ui(&ctx);
@@ -1073,5 +1186,12 @@ mod tests {
             out.drop_without_applying_deltas();
         }
         assert_eq!(app.analysis.sections.len(), 2);
+        app.toggle_reading();
+        app.reading.as_mut().unwrap().playing = true;
+        for _ in 0..2 {
+            let out = ctx.run_ui(Default::default(), |ui| app.frame(ui));
+            out.drop_without_applying_deltas();
+        }
+        assert!(app.reading.is_some());
     }
 }
