@@ -208,6 +208,7 @@ e libclang. Se faltar o `libclang-dev`, o `.cargo/config.toml` aponta o bindgen 
 ```bash
 cargo test --workspace        # 140+ testes, incluindo cliques e arrastos simulados na interface
 cargo clippy --workspace --all-targets -- -D warnings
+scripts/ui-fuzz.sh pawcut 300 1 -- video.mp4   # cliques e atalhos aleatórios num display virtual; avisa se cair
 ```
 
 Os crates são:

@@ -134,6 +134,23 @@ em volta, nem vazar para fora da linha.
 10. **Enter confirma, Esc cancela**, em todo campo que valida o que foi digitado (timecode,
     duração, nome).
 
+### Painéis e janelas pequenos
+
+O app abre bem em 960 x 600 e continua usável.
+
+- Painéis têm largura mínima (`theme::PROPS_MIN_W`, 260 px no PawCut). Abaixo disso o Inspector
+  cortaria campos.
+- A coluna dos rótulos (`theme::row`) encolhe antes do campo de valor, e o rótulo é recortado na
+  própria coluna.
+- Menus e listas mais altos que a tela rolam (`ScrollArea` com `max_height`), em vez de cortar
+  os últimos itens.
+- Janelas abrem centralizadas na horizontal e perto do topo (o topo fica fixo se a altura
+  mudar). Se não couberem, **só as opções rolam**: o resumo e os botões de ação ficam sempre à
+  vista.
+- Nunca use `f32::clamp(min, max)` com limites que dependem do tamanho de algo na tela: se
+  `min > max` o app cai. Use um clamp seguro (`clamp_in`) que fica no meio quando o intervalo
+  se inverte.
+
 ## 5. Interação
 
 - **Atalhos editáveis** e iguais entre apps: Espaço toca e pausa, Ctrl+Z / Ctrl+Shift+Z,
@@ -197,6 +214,8 @@ Regras para qualquer app que toque ou grave som (`paw-audio` e o player do PawCu
 - Lógica de edição no `*-core`, sem egui, testada por unidade e por propriedade.
 - A interface tem testes com cliques e arrastos simulados (`egui_kittest`): um bug de
   interface corrigido ganha um teste.
+- `scripts/ui-fuzz.sh <app>` abre o app num display virtual e faz cliques, arrastos e atalhos
+  aleatórios. Todo crash que ele achar vira um teste que reproduz.
 - Mensagem de commit: `tipo(app): o que mudou` (`feat`, `fix`, `perf`, `polish`).
 
 ## 10. Checklist para uma tela nova
@@ -209,5 +228,6 @@ Regras para qualquer app que toque ou grave som (`paw-audio` e o player do PawCu
 - [ ] Com um campo de texto em foco, os atalhos não disparam.
 - [ ] Um gesto = um passo de desfazer.
 - [ ] Trabalho pesado fora da thread da interface.
-- [ ] Funciona com o painel pequeno e com o painel maximizado.
+- [ ] Funciona com o painel pequeno, a janela em 960 x 600 e o painel maximizado.
+- [ ] Passou pelo `scripts/ui-fuzz.sh` sem cair.
 - [ ] Texto em português, curto, sem traço longo.
