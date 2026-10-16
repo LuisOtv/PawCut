@@ -25,7 +25,10 @@ fn main() {
     }
     let t = Instant::now();
     let snap = ed.mixer();
-    println!("foto da sessão (mixer): {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "foto da sessão (mixer): {:.2} ms",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
     let len = ed.session().len();
     let t = Instant::now();
     let mut worst = 0.0f64;
@@ -46,5 +49,8 @@ fn main() {
     );
     let t = Instant::now();
     let _ = ed.mix(0, len.min(rate * 60 * 5));
-    println!("mixagem inteira de 5 min (o jeito antigo, na thread da tela): {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "mixagem inteira de 5 min (o jeito antigo, na thread da tela): {:.0} ms",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
 }

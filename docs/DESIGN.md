@@ -277,7 +277,7 @@ zero.
 | Clipe de 1 frame com a timeline afastada derrubava o app (`clamp` com min > max) | clamp seguro para tudo que depende de tamanho na tela |
 | Menu Editar sem os últimos itens em janela de 600 px | menus rolam |
 | Deliver com o botão Exportar fora da tela | só as opções rolam; ação principal sempre à vista |
-| WAV de 16 bits não abria no ffmpeg 6/7 (layout de canais vazio) | 6.9: reserva pela contagem de canais |
+| WAV de 16 bits não abria no ffmpeg 6/7 (layout de canais vazio) | 6.10: reserva pela contagem de canais |
 | Clipe desligado com arquivo sumido bloqueava a exportação | a checagem de mídia offline segue as mesmas regras do renderizador |
 | Atalhos escritos como `Shift+OpenBracket` | rótulos de tecla legíveis |
 | PawVoice: Ganho, Pan e envelope só valiam no próximo play, e apertar play numa sessão longa travava a janela | 6.1: mixagem ao vivo por `MixSource` |

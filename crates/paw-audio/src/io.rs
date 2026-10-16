@@ -51,6 +51,8 @@ pub struct Player {
     position: Arc<AtomicUsize>,
     /// Pico recente de cada canal (bits de f32), para o medidor de saída.
     levels: Arc<[AtomicU32; 2]>,
+    /// Desligado quando o `Player` é descartado: a thread de reprodução termina e solta a saída.
+    alive: Arc<AtomicBool>,
     pub has_device: Arc<AtomicBool>,
 }
 
@@ -71,12 +73,14 @@ impl Player {
         let position = Arc::new(AtomicUsize::new(0));
         let has_device = Arc::new(AtomicBool::new(false));
         let levels = Arc::new([AtomicU32::new(0), AtomicU32::new(0)]);
-        let (st, pl, pos, dev, lv) = (
+        let alive = Arc::new(AtomicBool::new(true));
+        let (st, pl, pos, dev, lv, al) = (
             state.clone(),
             playing.clone(),
             position.clone(),
             has_device.clone(),
             levels.clone(),
+            alive.clone(),
         );
         let ch = channels as usize;
         thread::Builder::new()
@@ -106,7 +110,7 @@ impl Player {
                 let mut cursor = 0usize;
                 // Fonte que gerou o último bloco: se mudou sem reinício, o bloco novo entra em crossfade.
                 let mut previous: Option<Arc<dyn MixSource>> = None;
-                loop {
+                while al.load(Ordering::SeqCst) {
                     if !pl.load(Ordering::SeqCst) {
                         if current != u64::MAX {
                             if let Some(d) = &device {
@@ -193,6 +197,7 @@ impl Player {
             playing,
             position,
             levels,
+            alive,
             has_device,
         }
     }
@@ -251,6 +256,14 @@ impl Player {
     /// Geração atual do play (cada `play` soma um; `update_live` não mexe). Para testes.
     pub fn generation(&self) -> u64 {
         self.state.lock().expect("estado do player").generation
+    }
+}
+
+impl Drop for Player {
+    fn drop(&mut self) {
+        // Trocar a saída cria outro `Player`; sem isto a thread antiga ficava acordando de 3 em
+        // 3 ms para sempre e segurando a conexão com o som.
+        self.alive.store(false, Ordering::SeqCst);
     }
 }
 
@@ -539,6 +552,16 @@ mod tests {
             "a fonte antiga continuou tocando"
         );
         player.stop();
+    }
+
+    #[test]
+    fn dropping_the_player_ends_its_thread() {
+        let player = Player::spawn(48_000, 2);
+        let state = Arc::downgrade(&player.state);
+        drop(player);
+        wait_until("a thread de reprodução não terminou", || {
+            state.upgrade().is_none()
+        });
     }
 
     #[test]
