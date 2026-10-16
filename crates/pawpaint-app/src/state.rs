@@ -235,6 +235,8 @@ pub struct DocView {
     /// Canto de cima à esquerda da imagem na janela (último quadro).
     pub view_origin: egui::Pos2,
     pub name: String,
+    /// Pintar na máscara da camada ativa (em vez dos pixels).
+    pub edit_mask: bool,
     /// Miniaturas das camadas: (versão dos pixels, textura).
     pub thumbs: std::collections::HashMap<LayerId, (u64, TextureHandle)>,
 }
@@ -258,6 +260,7 @@ impl DocView {
             cursor: None,
             view_origin: egui::Pos2::ZERO,
             name: "Sem título".to_string(),
+            edit_mask: false,
             thumbs: Default::default(),
         }
     }

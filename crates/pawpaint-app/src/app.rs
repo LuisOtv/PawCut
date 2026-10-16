@@ -2245,6 +2245,36 @@ mod tests {
     }
 
     #[test]
+    fn painting_on_a_mask_hides_dark_and_reveals_light() {
+        let mut h = Harness::new();
+        {
+            let d = h.app.st.doc_mut().unwrap();
+            let id = d.active;
+            d.ed.add_mask(id).unwrap();
+            d.edit_mask = true;
+        }
+        h.app.st.brush = Brush {
+            size: 20.0,
+            hardness: 1.0,
+            ..Brush::basic()
+        };
+        h.app.st.tool = Tool::Brush;
+        h.app.st.fg = [0, 0, 0];
+        h.drag((50.0, 100.0), (200.0, 100.0));
+        let flat =
+            |h: &Harness| pawpaint_core::composite::flatten(h.app.st.doc().unwrap().ed.doc());
+        assert_eq!(flat(&h).get_pixel(120, 100).0[3], 0, "preto esconde");
+        assert_eq!(
+            h.px(120, 100),
+            [255, 255, 255, 255],
+            "os pixels ficam intactos"
+        );
+        h.app.st.fg = [255, 255, 255];
+        h.drag((50.0, 100.0), (200.0, 100.0));
+        assert_eq!(flat(&h).get_pixel(120, 100).0[3], 255, "branco revela");
+    }
+
+    #[test]
     fn smudge_tool_drags_paint_with_the_mouse() {
         let mut h = Harness::new();
         {

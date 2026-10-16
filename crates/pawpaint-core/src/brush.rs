@@ -425,6 +425,31 @@ pub fn apply_stroke_tile(
     }
 }
 
+/// Aplica o traço na máscara: `reveal` tira o que estava escondido; senão esconde mais.
+pub fn apply_mask_stroke(
+    mask: &mut [u8],
+    scratch: &[u8],
+    opacity: f32,
+    reveal: bool,
+    sel: Option<&[u8]>,
+) {
+    for p in 0..TILE * TILE {
+        let a =
+            scratch[p * 4 + 3] as f32 / 255.0 * opacity * sel.map_or(1.0, |m| m[p] as f32 / 255.0);
+        if a <= 0.0 {
+            continue;
+        }
+        let m = mask[p * 4 + 3] as f32 / 255.0;
+        let v = if reveal {
+            m * (1.0 - a)
+        } else {
+            a + m * (1.0 - a)
+        };
+        let v = (v * 255.0).round() as u8;
+        mask[p * 4..p * 4 + 4].copy_from_slice(&[v, v, v, v]);
+    }
+}
+
 /// Aplica o traço inteiro na camada, respeitando seleção e trava de alfa.
 pub fn commit_stroke(
     pixels: &mut TiledImage,

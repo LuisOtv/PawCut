@@ -88,7 +88,7 @@ Editor de imagens no estilo do Krita: pintura, camadas, seleções, filtros e do
   Aquarela) e dá para salvar os seus. `[` e `]` mudam o tamanho; Ctrl+clique pega a cor.
 - **Ferramentas:** pincel (B), borracha (E), balde de tinta (F), degradê (G), conta-gotas (P), seleção retangular (J),
   elíptica (K), laço (L) e varinha mágica (W), mover (T), transformar (Ctrl+T), cortar (C), linha (I),
-  retângulo (U), elipse (O) e texto (Q). X troca frente e fundo, D volta ao preto e branco.
+  retângulo (U), elipse (O), borrão (S) e texto (Q). X troca frente e fundo, D volta ao preto e branco.
 - **Camadas:** pixels, 13 modos de mistura, opacidade, travar e travar alfa, mostrar/esconder, duplicar, unir,
   reordenar, importar imagem como camada. Copiar, recortar e colar entre documentos.
 - **Seleções:** somar (Shift), subtrair (Alt), inverter, suavizar a borda, expandir/contrair; limitam pincel,
@@ -100,7 +100,10 @@ Editor de imagens no estilo do Krita: pintura, camadas, seleções, filtros e do
   ou BMP, e *JPG com até 2 MB* para thumbnails do YouTube.
 - **Desfazer:** guarda o documento inteiro a cada passo sem gastar memória (os blocos de pixels são compartilhados).
 
-Ainda não tem: mesa digitalizadora com pressão, camadas de grupo/vetor/máscara, curvas e histograma.
+- **Mais:** máscaras de camada (preto esconde, branco revela), pintura com espelho, borrão, curvas, colar prints da
+  área de transferência do sistema, recuperação automática se o app fechar de repente.
+
+Ainda não tem: mesa digitalizadora com pressão, camadas de grupo e vetoriais, histograma.
 
 ---
 

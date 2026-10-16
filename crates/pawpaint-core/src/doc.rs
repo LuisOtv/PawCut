@@ -18,6 +18,8 @@ pub struct Layer {
     pub opacity: f32,
     pub mode: BlendMode,
     pub pixels: TiledImage,
+    /// Máscara da camada: o alfa de cada pixel é o quanto dela fica escondido (vazia = tudo visível).
+    pub mask: Option<TiledImage>,
 }
 
 impl Layer {
@@ -31,6 +33,7 @@ impl Layer {
             opacity: 1.0,
             mode: BlendMode::Normal,
             pixels: TiledImage::new(w, h),
+            mask: None,
         }
     }
 }

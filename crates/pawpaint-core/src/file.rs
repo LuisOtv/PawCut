@@ -38,6 +38,8 @@ struct LayerMeta {
     opacity: f32,
     mode: BlendMode,
     file: String,
+    #[serde(default)]
+    mask: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -69,6 +71,13 @@ pub fn save_project(ed: &Editor, path: &Path) -> Result<(), FileError> {
             let name = format!("layers/{}.png", l.id);
             zip.start_file(&name, opts)?;
             zip.write_all(&png_bytes(&l.pixels.to_rgba())?)?;
+            let mut mask_name = None;
+            if let Some(m) = &l.mask {
+                let mn = format!("layers/{}-mask.png", l.id);
+                zip.start_file(&mn, opts)?;
+                zip.write_all(&png_bytes(&m.to_rgba())?)?;
+                mask_name = Some(mn);
+            }
             metas.push(LayerMeta {
                 id: l.id,
                 name: l.name.clone(),
@@ -78,6 +87,7 @@ pub fn save_project(ed: &Editor, path: &Path) -> Result<(), FileError> {
                 opacity: l.opacity,
                 mode: l.mode,
                 file: name,
+                mask: mask_name,
             });
         }
         let meta = DocMeta {
@@ -120,6 +130,14 @@ pub fn load_project(path: &Path) -> Result<Editor, FileError> {
         l.opacity = m.opacity;
         l.mode = m.mode;
         l.pixels = TiledImage::from_rgba(&img);
+        if let Some(mn) = &m.mask {
+            let mut mb = Vec::new();
+            zip.by_name(mn)?.read_to_end(&mut mb)?;
+            // Na máscara só o alfa importa (quanto está escondido).
+            l.mask = Some(TiledImage::from_rgba(
+                &image::load_from_memory(&mb)?.to_rgba8(),
+            ));
+        }
         doc.layers.push(l);
     }
     doc.set_next_id(meta.next_id);

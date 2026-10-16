@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use image::RgbaImage;
 
 use crate::blend::BlendMode;
-use crate::brush::{Brush, Smudger, Stroker, commit_stroke};
+use crate::brush::{Brush, Smudger, Stroker, apply_mask_stroke, commit_stroke};
 use crate::composite::{self, Live};
 use crate::doc::{Doc, Layer, LayerId};
 use crate::fill::{self, GradientKind};
@@ -79,6 +79,7 @@ struct ActiveSmudge {
 }
 
 struct ActiveStroke {
+    on_mask: bool,
     layer: LayerId,
     stroker: Stroker,
     opacity: f32,
@@ -96,6 +97,7 @@ pub struct Editor {
     stroke: Option<ActiveStroke>,
     smudge: Option<ActiveSmudge>,
     mirror: (bool, bool),
+    paint_mask: bool,
     pixel_rev: u64,
 }
 
@@ -131,6 +133,7 @@ impl Editor {
             stroke: None,
             smudge: None,
             mirror: (false, false),
+            paint_mask: false,
             pixel_rev: 0,
         }
     }
@@ -160,6 +163,11 @@ impl Editor {
 
     pub fn set_mirror(&mut self, horizontal_axis: bool, vertical_axis: bool) {
         self.mirror = (horizontal_axis, vertical_axis);
+    }
+
+    /// O próximo traço pinta na máscara da camada (se ela tiver uma).
+    pub fn set_paint_mask(&mut self, on: bool) {
+        self.paint_mask = on;
     }
 
     pub fn mirror(&self) -> (bool, bool) {
@@ -361,6 +369,20 @@ impl Editor {
                 let Some(src) = top.pixels.tile(tx, ty) else {
                     continue;
                 };
+                // A máscara da camada de cima vale na união.
+                let masked: Vec<u8>;
+                let src: &[u8] = match top.mask.as_ref().and_then(|m| m.tile(tx, ty)) {
+                    Some(m) => {
+                        masked = (0..TILE * TILE * 4)
+                            .map(|i| {
+                                ((src[i] as u32 * (255 - m[i / 4 * 4 + 3] as u32) + 127) / 255)
+                                    as u8
+                            })
+                            .collect();
+                        &masked
+                    }
+                    None => src,
+                };
                 let dst = below.pixels.tile_mut(tx, ty);
                 for p in 0..TILE * TILE {
                     let k = p * 4;
@@ -391,6 +413,51 @@ impl Editor {
         l.pixels = TiledImage::from_rgba(&img);
         self.doc.layers = vec![l];
         self.dirty_all();
+    }
+
+    /// Põe uma máscara (vazia: tudo visível) na camada.
+    pub fn add_mask(&mut self, id: LayerId) -> Result<(), EditError> {
+        let l = self.doc.layer(id).ok_or(EditError::NoLayer)?;
+        if l.mask.is_some() {
+            return Ok(());
+        }
+        self.checkpoint("Nova máscara");
+        let (w, h) = (self.doc.width, self.doc.height);
+        self.doc.layer_mut(id).expect("existe").mask = Some(TiledImage::new(w, h));
+        self.dirty_all();
+        Ok(())
+    }
+
+    /// Tira a máscara; com `apply`, o que estava escondido some de vez dos pixels.
+    pub fn remove_mask(&mut self, id: LayerId, apply: bool) -> Result<(), EditError> {
+        self.doc
+            .layer(id)
+            .and_then(|l| l.mask.as_ref())
+            .ok_or(EditError::NoLayer)?;
+        self.checkpoint(if apply {
+            "Aplicar máscara"
+        } else {
+            "Apagar máscara"
+        });
+        let l = self.doc.layer_mut(id).expect("existe");
+        if let Some(mask) = l.mask.take()
+            && apply
+        {
+            for ty in 0..l.pixels.tile_dims().1 {
+                for tx in 0..l.pixels.tile_dims().0 {
+                    let Some(m) = mask.tile(tx, ty) else { continue };
+                    let dst = l.pixels.tile_mut(tx, ty);
+                    for p in 0..TILE * TILE {
+                        let k = 255 - m[p * 4 + 3] as u32;
+                        for c in 0..4 {
+                            dst[p * 4 + c] = ((dst[p * 4 + c] as u32 * k + 127) / 255) as u8;
+                        }
+                    }
+                }
+            }
+        }
+        self.dirty_all();
+        Ok(())
     }
 
     pub fn clear_layer(&mut self, id: LayerId) -> Result<(), EditError> {
@@ -425,7 +492,9 @@ impl Editor {
         let opacity = brush.opacity;
         stroker.begin(brush, color, erase);
         stroker.mirror = self.mirror;
+        let on_mask = self.paint_mask && self.doc.layer(layer).is_some_and(|l| l.mask.is_some());
         self.stroke = Some(ActiveStroke {
+            on_mask,
             layer,
             stroker,
             opacity,
@@ -496,15 +565,33 @@ impl Editor {
             self.doc.layer(s.layer).is_some_and(|l| l.alpha_lock),
         );
         if let Some(layer) = self.doc.layer_mut(s.layer) {
-            commit_stroke(
-                &mut layer.pixels,
-                &s.stroker.buf,
-                s.opacity,
-                s.stroker.erase,
-                s.mode,
-                selection.as_ref(),
-                alpha_lock,
-            );
+            if s.on_mask
+                && let Some(mask) = layer.mask.as_mut()
+            {
+                for (tx, ty) in s.stroker.buf.tile_keys().collect::<Vec<_>>() {
+                    let Some(scratch) = s.stroker.buf.tile(tx, ty) else {
+                        continue;
+                    };
+                    let sel = selection.as_ref().map(|m| m.tile_mask(tx, ty));
+                    apply_mask_stroke(
+                        mask.tile_mut(tx, ty),
+                        scratch,
+                        s.opacity,
+                        s.stroker.erase,
+                        sel.as_deref(),
+                    );
+                }
+            } else {
+                commit_stroke(
+                    &mut layer.pixels,
+                    &s.stroker.buf,
+                    s.opacity,
+                    s.stroker.erase,
+                    s.mode,
+                    selection.as_ref(),
+                    alpha_lock,
+                );
+            }
         }
         let tiles: Vec<_> = s.stroker.buf.tile_keys().collect();
         self.dirty_tiles(tiles);
@@ -519,6 +606,7 @@ impl Editor {
             opacity: s.opacity,
             erase: s.stroker.erase,
             mode: s.mode,
+            on_mask: s.on_mask,
         })
     }
 
@@ -1318,6 +1406,90 @@ mod tests {
         assert!(px.pixel(30, 15)[0] > 200);
         assert_eq!(px.pixel(70, 60), [0, 255, 0, 255]);
         assert!(e.doc().selection.as_ref().unwrap().value(35, 20) > 200);
+    }
+
+    #[test]
+    fn merge_down_respects_the_mask_of_the_top_layer() {
+        let mut e = Editor::new(100, 80, Background::Color([0, 0, 255]));
+        let top_id = e.add_layer(None, None);
+        e.fill_selection(top_id, [255, 0, 0]).unwrap();
+        e.add_mask(top_id).unwrap();
+        e.set_paint_mask(true);
+        e.begin_stroke(
+            top_id,
+            Brush {
+                size: 30.0,
+                hardness: 1.0,
+                ..Brush::basic()
+            },
+            [0; 3],
+            false,
+            BlendMode::Normal,
+        )
+        .unwrap();
+        e.stroke_point(50.0, 40.0);
+        e.end_stroke(50.0, 40.0);
+        let merged = e.merge_down(top_id).unwrap();
+        let px = &e.doc().layer(merged).unwrap().pixels;
+        assert_eq!(px.pixel(50, 40), [0, 0, 255, 255]);
+        assert_eq!(px.pixel(5, 5), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn masks_hide_reveal_and_apply() {
+        let mut e = ed();
+        let id = top(&e);
+        e.add_mask(id).unwrap();
+        e.set_paint_mask(true);
+        let b = Brush {
+            size: 30.0,
+            hardness: 1.0,
+            ..Brush::basic()
+        };
+        e.begin_stroke(id, b.clone(), [0; 3], false, BlendMode::Normal)
+            .unwrap();
+        e.stroke_point(50.0, 40.0);
+        // ao vivo, antes de soltar, já aparece escondido
+        let t = composite::composite_tile(e.doc(), 0, 0, e.live().as_ref());
+        assert_eq!(t[(40 * TILE + 50) * 4 + 3], 0);
+        e.end_stroke(50.0, 40.0);
+        assert_eq!(composite::flatten(e.doc()).get_pixel(50, 40).0[3], 0);
+        assert_eq!(
+            composite::flatten(e.doc()).get_pixel(5, 5).0,
+            [255, 255, 255, 255]
+        );
+        // os pixels continuam lá embaixo
+        assert_eq!(
+            e.doc().layer(id).unwrap().pixels.pixel(50, 40),
+            [255, 255, 255, 255]
+        );
+        // revelar de novo
+        e.begin_stroke(id, b, [0; 3], true, BlendMode::Normal)
+            .unwrap();
+        e.stroke_point(50.0, 40.0);
+        e.end_stroke(50.0, 40.0);
+        assert_eq!(composite::flatten(e.doc()).get_pixel(50, 40).0[3], 255);
+        // aplicar: esconde, aplica e some a máscara
+        e.begin_stroke(
+            id,
+            Brush {
+                size: 30.0,
+                hardness: 1.0,
+                ..Brush::basic()
+            },
+            [0; 3],
+            false,
+            BlendMode::Normal,
+        )
+        .unwrap();
+        e.stroke_point(50.0, 40.0);
+        e.end_stroke(50.0, 40.0);
+        e.remove_mask(id, true).unwrap();
+        assert!(e.doc().layer(id).unwrap().mask.is_none());
+        assert_eq!(e.doc().layer(id).unwrap().pixels.pixel(50, 40)[3], 0);
+        assert_eq!(e.doc().layer(id).unwrap().pixels.pixel(5, 5)[3], 255);
+        e.undo();
+        assert!(e.doc().layer(id).unwrap().mask.is_some());
     }
 
     #[test]

@@ -693,6 +693,16 @@ fn start_interaction(
             };
             let (brush, color) = (st.brush.clone(), st.fg);
             st.docs[cur].ed.set_mirror(st.mirror.0, st.mirror.1);
+            // Na máscara: cor escura esconde, cor clara revela (a borracha sempre revela).
+            let on_mask = st.docs[cur].edit_mask
+                && st.docs[cur]
+                    .ed
+                    .doc()
+                    .layer(active)
+                    .is_some_and(|l| l.mask.is_some());
+            st.docs[cur].ed.set_paint_mask(on_mask);
+            let lum = 0.299 * color[0] as f32 + 0.587 * color[1] as f32 + 0.114 * color[2] as f32;
+            let erase = erase || (on_mask && lum >= 128.0);
             match st.docs[cur]
                 .ed
                 .begin_stroke(active, brush, color, erase, mode)
@@ -1025,6 +1035,7 @@ fn commit_shape(st: &mut State, tool: Tool, a: (f32, f32), b: (f32, f32)) {
     }
     let (brush, color, mode) = (st.brush.clone(), st.fg, st.blend);
     st.docs[cur].ed.set_mirror(st.mirror.0, st.mirror.1);
+    st.docs[cur].ed.set_paint_mask(false);
     match st.docs[cur]
         .ed
         .begin_stroke(active, brush, color, false, mode)

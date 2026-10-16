@@ -3,7 +3,7 @@
 use image::RgbaImage;
 
 use crate::blend::{BlendMode, blend_over};
-use crate::brush::{StrokeBuffer, apply_stroke_tile};
+use crate::brush::{StrokeBuffer, apply_mask_stroke, apply_stroke_tile};
 use crate::doc::{Doc, LayerId};
 use crate::tile::{TILE, TILE_BYTES, unpremultiply};
 
@@ -14,6 +14,8 @@ pub struct Live<'a> {
     pub opacity: f32,
     pub erase: bool,
     pub mode: BlendMode,
+    /// O traço mexe na máscara da camada (`erase` quer dizer revelar).
+    pub on_mask: bool,
 }
 
 /// O bloco (`tx`, `ty`) com todas as camadas visíveis, sobre transparente (pré-multiplicado).
@@ -24,8 +26,12 @@ pub fn composite_tile(doc: &Doc, tx: usize, ty: usize, live: Option<&Live>) -> V
         let stroke = live
             .filter(|l| l.layer == layer.id)
             .and_then(|l| l.buf.tile(tx, ty).map(|s| (l, s)));
+        let (px_stroke, mask_stroke) = match stroke {
+            Some((l, s)) if l.on_mask => (None, Some((l, s))),
+            other => (other, None),
+        };
         let merged: Vec<u8>;
-        let src: &[u8] = match (base, stroke) {
+        let src: &[u8] = match (base, px_stroke) {
             (None, None) => continue,
             (Some(b), None) => b,
             (b, Some((l, s))) => {
@@ -44,10 +50,37 @@ pub fn composite_tile(doc: &Doc, tx: usize, ty: usize, live: Option<&Live>) -> V
                 &merged
             }
         };
+        // Máscara da camada (com o traço de máscara em andamento, se houver).
+        let mask_tile: Option<Vec<u8>> = match (
+            layer.mask.as_ref().and_then(|m| m.tile(tx, ty)),
+            mask_stroke,
+        ) {
+            (m, Some((l, s))) => {
+                let mut t = m.map_or_else(|| vec![0u8; TILE_BYTES], <[u8]>::to_vec);
+                let sel = doc.selection.as_ref().map(|s| s.tile_mask(tx, ty));
+                apply_mask_stroke(&mut t, s, l.opacity, l.erase, sel.as_deref());
+                Some(t)
+            }
+            (Some(m), None) => Some(m.to_vec()),
+            (None, None) => None,
+        };
         for p in 0..TILE * TILE {
             let i = p * 4;
             if src[i + 3] == 0 {
                 continue;
+            }
+            if let Some(m) = &mask_tile {
+                let hide = m[i + 3];
+                if hide == 255 {
+                    continue;
+                }
+                if hide > 0 {
+                    let k = 255 - hide as u32;
+                    let px: [u8; 4] =
+                        std::array::from_fn(|c| ((src[i + c] as u32 * k + 127) / 255) as u8);
+                    blend_over(&mut out[i..i + 4], &px, layer.opacity, layer.mode);
+                    continue;
+                }
             }
             blend_over(
                 &mut out[i..i + 4],
@@ -142,6 +175,7 @@ mod tests {
         s.add_point(20.0, 20.0);
         buf.clear();
         let live = Live {
+            on_mask: false,
             layer: 2,
             buf: &s.buf,
             opacity: 1.0,

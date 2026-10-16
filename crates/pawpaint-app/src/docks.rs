@@ -153,6 +153,36 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
             st.docs[st.cur].ed.end_change();
         }
     });
+    // Máscara da camada.
+    let has_mask = layer.mask.is_some();
+    ui.horizontal(|ui| {
+        let cur = st.cur;
+        if has_mask {
+            let mut on = st.docs[cur].edit_mask;
+            if ui
+                .toggle_value(&mut on, "Editar máscara")
+                .on_hover_text("Pinta preto para esconder e branco para mostrar")
+                .changed()
+            {
+                st.docs[cur].edit_mask = on;
+            }
+            if ui
+                .small_button("Aplicar")
+                .on_hover_text("Passa o que está escondido para os pixels")
+                .clicked()
+            {
+                let _ = st.docs[cur].ed.remove_mask(active, true);
+                st.docs[cur].edit_mask = false;
+            }
+            if ui.small_button("Apagar máscara").clicked() {
+                let _ = st.docs[cur].ed.remove_mask(active, false);
+                st.docs[cur].edit_mask = false;
+            }
+        } else if ui.button("Adicionar máscara").clicked() {
+            let _ = st.docs[cur].ed.add_mask(active);
+            st.docs[cur].edit_mask = true;
+        }
+    });
     ui.add_space(4.0);
     let h = (ui.available_height() - 36.0).max(60.0);
     egui::ScrollArea::vertical()
@@ -352,7 +382,8 @@ fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64) {
         }
     } else {
         let tag = format!(
-            "{}{}{}",
+            "{}{}{}{}",
+            if l.mask.is_some() { "[M] " } else { "" },
             if l.locked { "🔒 " } else { "" },
             if l.alpha_lock { "α " } else { "" },
             l.name
