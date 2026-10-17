@@ -942,10 +942,16 @@ impl Editor {
         if pieces.is_empty() {
             return Err(EditError::EmptyRange);
         }
+        let lens = pieces
+            .iter()
+            .map(|(_, p)| p.iter().map(Vec::len).max().unwrap_or(0))
+            .collect();
         Ok(ProcessJob {
             a,
             revision: self.revision,
             pieces,
+            lens,
+            resized: false,
         })
     }
 
@@ -961,14 +967,23 @@ impl Editor {
         }
         self.checkpoint(label);
         let a = job.a;
-        for (id, mut planar) in job.pieces {
+        for ((id, mut planar), old_len) in job.pieces.into_iter().zip(job.lens) {
             let len = planar.iter().map(Vec::len).max().unwrap_or(0);
             for ch in &mut planar {
                 ch.resize(len, 0.0);
             }
             let seg = self.add_source(&planar);
             let t = self.track_mut(id)?;
-            t.segments = overwrite(&t.segments, a, &[seg]);
+            if job.resized && len != old_len {
+                // Troca o trecho antigo pelo novo e empurra o resto (e o envelope junto).
+                let old_b = a + old_len;
+                t.segments = ripple_delete(&t.segments, a, old_b);
+                t.segments = insert(&t.segments, a, &[seg]);
+                env_delete(&mut t.envelope, a, old_b);
+                env_insert(&mut t.envelope, a, len);
+            } else {
+                t.segments = overwrite(&t.segments, a, &[seg]);
+            }
         }
         self.prune();
         Ok(())
@@ -1011,6 +1026,10 @@ pub struct ProcessJob {
     a: usize,
     revision: u64,
     pieces: Vec<(u64, Planar)>,
+    /// Tamanho original de cada trecho (para o efeito que muda a duração).
+    lens: Vec<usize>,
+    /// O efeito mudou a duração: o resultado entra no lugar do trecho e empurra o resto.
+    resized: bool,
 }
 
 impl ProcessJob {
@@ -1024,6 +1043,20 @@ impl ProcessJob {
                 ch.resize(len, 0.0);
             }
         }
+    }
+
+    /// Como `run`, mas o resultado pode ter outro tamanho (velocidade, tempo): ele entra no
+    /// lugar do trecho e o resto da faixa anda para frente ou para trás. Os canais de um
+    /// trecho ficam do mesmo tamanho (o menor é completado com silêncio).
+    pub fn run_resize(&mut self, mut f: impl FnMut(&mut [Vec<f32>])) {
+        for (_, planar) in &mut self.pieces {
+            f(planar);
+            let len = planar.iter().map(Vec::len).max().unwrap_or(0);
+            for ch in planar.iter_mut() {
+                ch.resize(len, 0.0);
+            }
+        }
+        self.resized = true;
     }
 
     /// Total de amostras (todos os canais de todos os trechos): mede o tamanho do trabalho.
@@ -1152,6 +1185,41 @@ mod tests {
 
     fn mono(e: &Editor, id: u64) -> Vec<f32> {
         e.render(id).into_iter().next().unwrap_or_default()
+    }
+
+    #[test]
+    fn resizing_effect_replaces_the_range_and_shifts_the_rest() {
+        let mut e = Editor::new(Session::new(48_000), BTreeMap::new());
+        let id = e.add_track(ramp(100), 0, None);
+        // trecho [20, 60) vira 10 amostras iguais a -1: a faixa encolhe 30
+        let mut job = e.begin_process(&[id], 20, 60).unwrap();
+        job.run_resize(|p| {
+            for ch in p {
+                *ch = vec![-1.0; 10];
+            }
+        });
+        e.finish_process(job, "Tempo").unwrap();
+        let out = mono(&e, id);
+        assert_eq!(out.len(), 70);
+        assert_eq!(out[19], 20.0);
+        assert!(out[20..30].iter().all(|v| *v == -1.0));
+        assert_eq!(out[30], 61.0);
+        assert_eq!(out[69], 100.0);
+        // e dá para desfazer
+        assert!(e.undo());
+        assert_eq!(
+            mono(&e, id),
+            (1..=100).map(|i| i as f32).collect::<Vec<_>>()
+        );
+        // crescer também
+        let mut job = e.begin_process(&[id], 90, 100).unwrap();
+        job.run_resize(|p| {
+            for ch in p {
+                *ch = vec![5.0; 30];
+            }
+        });
+        e.finish_process(job, "Tempo").unwrap();
+        assert_eq!(mono(&e, id).len(), 120);
     }
 
     #[test]

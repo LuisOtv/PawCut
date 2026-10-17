@@ -163,6 +163,8 @@ enum Dialog {
         treble: f32,
     },
     Limiter(f32),
+    /// Efeitos extras (equalizador, reverb, tempo…): ver `fx_dialogs`.
+    Fx(crate::fx_dialogs::FxDialog),
     DeEss {
         threshold: f32,
         reduction: f32,
@@ -747,6 +749,17 @@ impl VoiceApp {
     pub fn apply_effect(
         &mut self,
         label: &'static str,
+        f: impl FnMut(&mut [Vec<f32>]) + Send + 'static,
+    ) {
+        self.apply_effect_ex(label, false, f);
+    }
+
+    /// Como `apply_effect`; com `resize` o efeito pode mudar a duração do trecho (o resto da
+    /// faixa anda junto).
+    pub fn apply_effect_ex(
+        &mut self,
+        label: &'static str,
+        resize: bool,
         mut f: impl FnMut(&mut [Vec<f32>]) + Send + 'static,
     ) {
         self.stop();
@@ -765,7 +778,11 @@ impl VoiceApp {
             }
         };
         if job.samples() <= INLINE_EFFECT_SAMPLES {
-            job.run(&mut f);
+            if resize {
+                job.run_resize(&mut f);
+            } else {
+                job.run(&mut f);
+            }
             self.finish_effect(job, label);
             return;
         }
@@ -773,7 +790,11 @@ impl VoiceApp {
         std::thread::Builder::new()
             .name("pawvoice-effect".into())
             .spawn(move || {
-                job.run(f);
+                if resize {
+                    job.run_resize(f);
+                } else {
+                    job.run(f);
+                }
                 let _ = tx.send(job);
             })
             .expect("não foi possível criar a thread do efeito");
@@ -2112,8 +2133,50 @@ impl VoiceApp {
                     treble: 0.0,
                 });
             }
+            if ui.button("Equalizador…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::equalizer()));
+            }
+            if ui.button("Notch (zumbido, apito)…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::notch()));
+            }
+            if ui.button("Reparar áudio estourado…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Declip(0.97)));
+            }
             ui.separator();
-            ui.label(RichText::new("Tempo").weak().small());
+            ui.label(RichText::new("Espaço e modulação").weak().small());
+            if ui.button("Reverb…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::reverb()));
+            }
+            if ui.button("Tremolo…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::tremolo()));
+            }
+            if ui.button("Phaser…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::phaser()));
+            }
+            if ui.button("Wah-wah…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::wah()));
+            }
+            ui.separator();
+            ui.label(RichText::new("Tempo e tom").weak().small());
+            if ui.button("Velocidade…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Speed(1.25)));
+            }
+            if ui.button("Tempo (sem mudar o tom)…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Tempo(1.1)));
+            }
+            if ui.button("Tom (sem mudar o tempo)…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Pitch(2.0)));
+            }
             if ui.button("Truncar silêncio…").clicked() {
                 ui.close();
                 self.dialog = Some(Dialog::Silences {
@@ -4178,6 +4241,7 @@ impl VoiceApp {
             Dialog::BassTreble { .. } => "Graves e agudos",
             Dialog::Limiter(_) => "Limitador",
             Dialog::DeEss { .. } => "De-esser",
+            Dialog::Fx(d) => d.title(),
             Dialog::ConfirmClose => "Sair sem salvar?",
             Dialog::ConfirmDiscard(_) => "Descartar as mudanças?",
             Dialog::Recover(_) => "Recuperação automática",
@@ -4188,6 +4252,10 @@ impl VoiceApp {
             matches!(dialog, Dialog::Recover(_)),
         );
         let ready = !matches!(dialog, Dialog::NoiseReduction { .. }) || noise_info.is_some();
+        let width = match dialog {
+            Dialog::Fx(d) => d.width(),
+            _ => 360.0,
+        };
         let body = |ui: &mut egui::Ui| {
             // Largura fixa para o valor de cada slider: ele não cresce nem encolhe com os dígitos.
             ui.spacing_mut().interact_size.x = theme::NUM_W + 12.0;
@@ -4292,6 +4360,7 @@ impl VoiceApp {
                             .suffix(" dB"),
                     );
                 }
+                Dialog::Fx(d) => d.ui(ui, RATE),
                 Dialog::Limiter(db) => {
                     ui.label(RichText::new("Nada passa deste nível.").weak());
                     ui.add(
@@ -4349,7 +4418,7 @@ impl VoiceApp {
         if is_confirm || is_recover {
             paw_ui::dialog::modal(ctx, "voice", title, 380.0, body);
         } else {
-            paw_ui::dialog::window(ctx, "voice", title, 360.0, body);
+            paw_ui::dialog::window(ctx, "voice", title, width, body);
         }
         // Esc cancela e Enter aplica, como em qualquer diálogo. Esc não descarta a recuperação
         // (apagaria as gravações) e Enter não confirma "Sair sem salvar" nem a recuperação.
@@ -4412,6 +4481,10 @@ impl VoiceApp {
             }) => self.apply_effect("De-esser", move |p| {
                 effects::each(p, |s| dsp::de_ess(s, RATE, 5500.0, threshold, reduction))
             }),
+            Some(Dialog::Fx(d)) => {
+                let (label, job) = d.job(RATE);
+                self.apply_effect_ex(label, d.resizes(), job);
+            }
             Some(Dialog::Limiter(db)) => self.apply_effect("Limitador", move |p| {
                 effects::each(p, |s| dsp::limit(s, RATE, db))
             }),
@@ -4590,6 +4663,48 @@ mod tests {
 
     fn mono(app: &VoiceApp, id: u64) -> Vec<f32> {
         app.ed.render(id).remove(0)
+    }
+
+    /// Os efeitos extras passam pelo diálogo e pelo editor: tempo encurta a faixa e o desfazer volta.
+    #[test]
+    fn extra_effects_apply_through_the_dialog_and_undo() {
+        let sine: Vec<f32> = (0..48_000)
+            .map(|i| 0.3 * (std::f32::consts::TAU * 300.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        let (mut app, id) = app_with(sine.clone());
+        app.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Tempo(2.0)));
+        let ctx = egui::Context::default();
+        // Enter aplica (não há campo de texto em foco)
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 700.0))),
+            events: vec![egui::Event::Key {
+                key: Key::Enter,
+                physical_key: Some(Key::Enter),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        ctx.run_ui(raw, |ui| {
+            let c = ui.ctx().clone();
+            app.dialogs(&c);
+        })
+        .drop_without_applying_deltas();
+        let len = mono(&app, id).len();
+        assert!(
+            (len as i64 - 24_000).abs() <= 2,
+            "tempo 2× deixa metade: {len}"
+        );
+        assert!(app.ed.undo());
+        assert_eq!(mono(&app, id).len(), 48_000);
+        // equalizador mantém o tamanho
+        app.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::equalizer()));
+        if let Some(Dialog::Fx(d)) = app.dialog.take() {
+            let (label, job) = d.job(RATE);
+            app.apply_effect_ex(label, d.resizes(), job);
+        }
+        assert_eq!(mono(&app, id).len(), 48_000);
     }
 
     /// Desenha os menus da faixa (mono e estéreo) e o da área vazia sem travar.
