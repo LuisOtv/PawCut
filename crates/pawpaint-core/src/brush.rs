@@ -1016,7 +1016,7 @@ mod tests {
                 9477292715354680785,
                 15890544401212262641,
                 12698941806583515267,
-                // os antigos seguem idênticos
+                // (o índice do preset escolhe borracha/espelho no teste, por isso mudam de lugar)
                 4187682486068578447,
                 10352106225972257635,
                 9612605382220453586,
