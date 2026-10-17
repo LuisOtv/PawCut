@@ -25,6 +25,38 @@ fn clip_pcm(project: &Project, clip: &Clip) -> Option<(Pcm, i64, i64)> {
     Some((pcm, src0, src0 + len))
 }
 
+/// Quantos frames o clipe `other` precisa andar para o som dele casar com o de `reference`
+/// (os dois tocando a mesma coisa gravada por aparelhos diferentes). Compara os primeiros
+/// 2 minutos do que cada clipe mostra, a 4 kHz. Devolve também a confiança (≥ 1; abaixo de
+/// ~6 não dá para confiar).
+pub fn align_by_audio(project: &Project, reference: &Clip, other: &Clip) -> Option<(Frame, f32)> {
+    const RATE: u32 = 4000;
+    let excerpt = |clip: &Clip| -> Option<Vec<f32>> {
+        let ClipSource::Media(id) = &clip.source else {
+            return None;
+        };
+        let media = project.media(*id)?;
+        let pcm = load_audio(&media.info.path, RATE, 1.0, default_cache_dir().as_deref()).ok()?;
+        let fps = project.settings.fps.as_f64();
+        let a = (clip.source_start / fps * RATE as f64).round() as i64;
+        let len = ((clip.duration as f64 / fps) * RATE as f64).min(120.0 * RATE as f64) as i64;
+        Some(
+            (a..a + len)
+                .map(|i| {
+                    let [l, r] = pcm.frame(i);
+                    (l + r) * 0.5
+                })
+                .collect(),
+        )
+    };
+    let (r, o) = (excerpt(reference)?, excerpt(other)?);
+    let max_lag = RATE as usize * 60;
+    let (lag, conf) = paw_audio::fx::align_lag(&r, &o, max_lag)?;
+    let delta_start =
+        reference.start + (lag as f64 / RATE as f64 * project.settings.fps.as_f64()).round() as i64;
+    Some((delta_start - other.start, conf))
+}
+
 /// Pico absoluto do trecho do clipe (0..1).
 pub fn clip_peak(project: &Project, clip: &Clip) -> Option<f32> {
     let (pcm, a, b) = clip_pcm(project, clip)?;

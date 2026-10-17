@@ -491,6 +491,58 @@ pub fn declip(s: &mut [f32], level: f32, min_run: usize) -> usize {
     fixed
 }
 
+// ------------------------------------------------------------------ sincronia
+
+/// Quanto `other` está atrasado em relação a `reference`: `lag > 0` quando o mesmo som aparece
+/// `lag` amostras mais tarde em `reference` do que em `other` (para alinhar, empurre `other`
+/// `lag` amostras para frente). Correlação cruzada por FFT; `max_lag` limita a busca.
+/// Devolve também a confiança (o pico dividido pela média dos picos vizinhos, ≥ 1).
+pub fn align_lag(reference: &[f32], other: &[f32], max_lag: usize) -> Option<(i64, f32)> {
+    use rustfft::{FftPlanner, num_complex::Complex};
+    if reference.len() < 64 || other.len() < 64 {
+        return None;
+    }
+    let n = (reference.len() + other.len()).next_power_of_two();
+    let prep = |x: &[f32]| -> Vec<Complex<f32>> {
+        let mean = x.iter().sum::<f32>() / x.len() as f32;
+        let mut v: Vec<Complex<f32>> = x.iter().map(|s| Complex::new(s - mean, 0.0)).collect();
+        v.resize(n, Complex::new(0.0, 0.0));
+        v
+    };
+    let (mut r, mut o) = (prep(reference), prep(other));
+    let mut planner = FftPlanner::<f32>::new();
+    let fwd = planner.plan_fft_forward(n);
+    let inv = planner.plan_fft_inverse(n);
+    fwd.process(&mut r);
+    fwd.process(&mut o);
+    for (a, b) in r.iter_mut().zip(&o) {
+        *a *= b.conj();
+    }
+    inv.process(&mut r);
+    // índice k >= 0: lag k; índice n-k: lag -k
+    let max_lag = max_lag.min(n / 2 - 1);
+    let at = |lag: i64| -> f32 {
+        let i = if lag >= 0 { lag as usize } else { n - (-lag) as usize };
+        r[i].re / n as f32
+    };
+    let mut best = (0i64, f32::MIN);
+    let mut sum_abs = 0.0f64;
+    let mut count = 0usize;
+    for lag in -(max_lag as i64)..=max_lag as i64 {
+        let v = at(lag);
+        sum_abs += v.abs() as f64;
+        count += 1;
+        if v > best.1 {
+            best = (lag, v);
+        }
+    }
+    let mean_abs = (sum_abs / count.max(1) as f64) as f32;
+    if mean_abs <= 1e-12 || best.1 <= 0.0 {
+        return None;
+    }
+    Some((best.0, best.1 / mean_abs))
+}
+
 // ------------------------------------------------------------------ ducking
 
 /// Abaixa `music` enquanto `control` (a voz) está acima de `threshold_db`: o ganho cai
@@ -987,5 +1039,31 @@ mod tests {
             "{}",
             zero_hz(&l)
         );
+    }
+
+    #[test]
+    fn align_lag_finds_the_offset_between_two_recordings() {
+        // ruído determinístico: o "microfone" começou 0,25 s depois da "câmera"
+        let noise = gen_noise(8000, NoiseKind::White, 6.0, 0.5);
+        let camera = &noise[..];
+        let offset = 2000; // 0,25 s a 8 kHz
+        let mic = &noise[offset..];
+        let (lag, conf) = align_lag(camera, mic, 8000 * 2).unwrap();
+        assert_eq!(lag, offset as i64, "confiança {conf}");
+        assert!(conf > 10.0, "{conf}");
+        // ao contrário o sinal inverte
+        let (back, _) = align_lag(mic, camera, 8000 * 2).unwrap();
+        assert_eq!(back, -(offset as i64));
+        // com ruído por cima ainda acha
+        let noisy: Vec<f32> = mic
+            .iter()
+            .zip(gen_noise(8000, NoiseKind::Pink, 6.0, 0.8))
+            .map(|(a, b)| a + b * 0.5)
+            .collect();
+        let (lag, _) = align_lag(camera, &noisy, 8000 * 2).unwrap();
+        assert!((lag - offset as i64).abs() <= 1, "{lag}");
+        // curtos demais ou sem nada em comum
+        assert!(align_lag(&[0.0; 10], &[0.0; 10], 5).is_none());
+        assert!(align_lag(&vec![0.0; 4000], &vec![0.0; 4000], 100).is_none());
     }
 }

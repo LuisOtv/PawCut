@@ -55,6 +55,7 @@ pub enum Action {
     AddDissolve,
     ExtractInOut,
     LiftInOut,
+    AlignAudio,
     NudgeLeft,
     NudgeRight,
     NudgeLeft10,
@@ -149,7 +150,7 @@ impl Action {
         })
     }
 
-    pub const ALL: [Action; 62] = [
+    pub const ALL: [Action; 63] = [
         Action::PlayPause,
         Action::PlayForward,
         Action::Stop,
@@ -197,6 +198,7 @@ impl Action {
         Action::AddDissolve,
         Action::ExtractInOut,
         Action::LiftInOut,
+        Action::AlignAudio,
         Action::NudgeLeft,
         Action::NudgeRight,
         Action::NudgeLeft10,
@@ -262,6 +264,7 @@ impl Action {
             Action::NextMarker => "Próximo marcador",
             Action::AddDissolve => "Cross dissolve no corte",
             Action::ExtractInOut => "Extrair In/Out (apaga e fecha)",
+            Action::AlignAudio => "Alinhar clipes pelo áudio",
             Action::LiftInOut => "Levantar In/Out (apaga e deixa o buraco)",
             Action::NudgeLeft => "Empurrar clipe 1 frame para trás",
             Action::NudgeRight => "Empurrar clipe 1 frame para frente",

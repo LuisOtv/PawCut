@@ -261,3 +261,23 @@ pub fn speech_with_pause(dir: &Path) -> PathBuf {
     ]);
     out
 }
+
+/// WAV mono 48 kHz de ruído branco (sempre o mesmo), a partir de `start` s do ruído: dois
+/// arquivos com `start` diferente são o mesmo som com o começo deslocado (para testar sincronia).
+pub fn noise_audio(dir: &Path, name: &str, start: f32, secs: f32) -> PathBuf {
+    let out = dir.join(name);
+    let filter = format!(
+        "anoisesrc=d={}:c=white:r=48000:seed=7:a=0.5,atrim=start={start},asetpts=PTS-STARTPTS",
+        start + secs
+    );
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        &filter,
+        "-c:a",
+        "pcm_f32le",
+        out.to_str().unwrap(),
+    ]);
+    out
+}

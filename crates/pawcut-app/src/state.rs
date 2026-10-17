@@ -756,6 +756,56 @@ impl AppState {
         }
     }
 
+    /// Alinha os clipes selecionados pelo som: o primeiro selecionado é a referência (a câmera)
+    /// e os outros (o microfone) andam até o som casar. O vídeo ligado vai junto.
+    pub fn align_selection_by_audio(&mut self) {
+        let p = self.project().clone();
+        let ids: Vec<ClipId> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|id| p.clip(*id).is_some_and(|c| matches!(c.source, ClipSource::Media(_))))
+            .collect();
+        let [first, rest @ ..] = ids.as_slice() else {
+            self.warn("Selecione pelo menos dois clipes com áudio (o primeiro é a referência)");
+            return;
+        };
+        if rest.is_empty() {
+            self.warn("Selecione pelo menos dois clipes com áudio (o primeiro é a referência)");
+            return;
+        }
+        let reference = p.clip(*first).expect("clipe existe").clone();
+        let mut moved = 0;
+        let mut weak = 0;
+        for id in rest {
+            let Some(other) = p.clip(*id) else { continue };
+            match crate::analysis::align_by_audio(&p, &reference, other) {
+                Some((delta, conf)) if conf >= 6.0 => {
+                    if delta != 0 {
+                        let group = p.expand_linked(&[*id]);
+                        self.apply_coalescing(
+                            Edit::Move {
+                                clips: group,
+                                delta,
+                                video_track_delta: 0,
+                                audio_track_delta: 0,
+                            },
+                            "align-audio",
+                        );
+                    }
+                    moved += 1;
+                }
+                _ => weak += 1,
+            }
+        }
+        self.editor.end_coalescing();
+        match (moved, weak) {
+            (0, _) => self.warn("Não achei o mesmo som nos clipes (precisam ter áudio parecido)"),
+            (n, 0) => self.say(format!("{n} clipe(s) alinhado(s) pelo áudio")),
+            (n, w) => self.say(format!("{n} alinhado(s); {w} sem som em comum")),
+        }
+    }
+
     /// Cria uma faixa de vídeo nova em cima com uma legenda (estilo "Legenda") por fala.
     pub fn import_subtitles(&mut self, cues: &[Cue]) -> usize {
         if cues.is_empty() {
@@ -1535,6 +1585,37 @@ mod tests {
         s.set_playhead(140);
         s.add_dissolve();
         assert_eq!(s.project().video_tracks[0].clips[1].dissolve_in, 30);
+    }
+
+    #[test]
+    fn align_by_audio_moves_the_second_clip_to_match_the_sound() {
+        let dir = tempfile::tempdir().unwrap();
+        // a mesma gravação; a segunda começa 0,5 s depois no som
+        let cam = paw_testkit::noise_audio(dir.path(), "cam.wav", 0.0, 8.0);
+        let mic = paw_testkit::noise_audio(dir.path(), "mic.wav", 0.5, 7.5);
+        let mut s = state();
+        assert_eq!(s.import(&[cam, mic]), 2);
+        let (m_cam, m_mic) = (s.project().media[0].id, s.project().media[1].id);
+        s.drop_media(m_cam, TrackKind::Audio, 0, 0);
+        s.drop_media(m_mic, TrackKind::Audio, 1, 300); // mic solto 10 s adiante, em outra faixa
+        let ids: Vec<_> = s.project().all_tracks().flat_map(|t| t.clips.iter().map(|c| c.id)).collect();
+        assert_eq!(ids.len(), 2);
+        let (cam_clip, mic_clip) = (
+            s.project().audio_tracks[0].clips[0].id,
+            s.project().audio_tracks[1].clips[0].id,
+        );
+        s.selection = vec![cam_clip, mic_clip];
+        s.align_selection_by_audio();
+        let start = s.project().clip(mic_clip).unwrap().start;
+        // o mic perdeu os primeiros 0,5 s do som, então ele deve ficar 0,5 s (15 frames) depois
+        assert!((start - 15).abs() <= 1, "começou em {start}");
+        // um desfazer volta
+        s.undo();
+        assert_eq!(s.project().clip(mic_clip).unwrap().start, 300);
+        // uma seleção só avisa e não mexe
+        s.selection = vec![cam_clip];
+        s.align_selection_by_audio();
+        assert_eq!(s.project().clip(mic_clip).unwrap().start, 300);
     }
 
     #[test]

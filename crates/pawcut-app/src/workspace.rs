@@ -776,6 +776,7 @@ impl Workspace {
             Action::NextMarker => st.go_to_marker(true),
             Action::AddDissolve => st.add_dissolve(),
             Action::ExtractInOut => st.extract_in_out(true),
+            Action::AlignAudio => st.align_selection_by_audio(),
             Action::LiftInOut => st.extract_in_out(false),
             Action::NudgeLeft => st.nudge(-1),
             Action::NudgeRight => st.nudge(1),
