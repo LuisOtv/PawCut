@@ -75,6 +75,36 @@ pub fn save_brush_preset(st: &mut State, ctx: &egui::Context) {
     st.say("Pincel salvo");
 }
 
+/// Prévia de filtro mais lenta que isso (ms) só é refeita quando o slider é solto.
+const SLOW_PREVIEW_MS: f32 = 60.0;
+
+#[derive(Debug, PartialEq, Eq)]
+enum PreviewAction {
+    Nothing,
+    /// Refaz a prévia agora.
+    Apply,
+    /// Mudou, mas o filtro é lento e o slider ainda está sendo arrastado: espera soltar.
+    Wait,
+}
+
+fn preview_action(
+    preview: bool,
+    changed: bool,
+    waiting: bool,
+    applied: bool,
+    last_ms: f32,
+    dragging: bool,
+) -> PreviewAction {
+    if !preview || !(changed || waiting || !applied) {
+        return PreviewAction::Nothing;
+    }
+    if applied && last_ms > SLOW_PREVIEW_MS && dragging {
+        PreviewAction::Wait
+    } else {
+        PreviewAction::Apply
+    }
+}
+
 // ---------------------------------------------------------------- recuperação automática
 
 fn autosave_dir() -> PathBuf {
@@ -94,16 +124,59 @@ fn autosave_file(uid: u64) -> PathBuf {
 }
 
 /// Guarda uma cópia dos documentos com mudanças, para recuperar se o app fechar de repente.
+///
+/// Salvar uma foto grande com várias camadas leva segundos, então isso roda numa thread, com uma
+/// cópia do documento (copiar só copia ponteiros dos blocos, ~2 ms): a pintura nunca espera o
+/// disco. Se o anterior ainda não terminou, tenta de novo em 10 s.
 fn autosave(st: &mut State) {
+    if st.autosave_job.as_ref().is_some_and(|j| !j.is_finished()) {
+        st.last_autosave = std::time::Instant::now() - std::time::Duration::from_secs(35);
+        return;
+    }
+    st.autosave_job = None;
     st.last_autosave = std::time::Instant::now();
     let _ = std::fs::create_dir_all(autosave_dir());
+    let mut jobs = Vec::new();
     for d in &st.docs {
         let f = autosave_file(d.uid);
         if d.ed.is_dirty() && d.float.is_none() {
-            let _ = file::save_project(&d.ed, &f);
+            jobs.push((d.uid, d.ed.doc().clone(), f));
         } else if !d.ed.is_dirty() {
             let _ = std::fs::remove_file(&f);
         }
+    }
+    if jobs.is_empty() {
+        return;
+    }
+    let closed = st.autosave_closed.clone();
+    let is_closed = move |uid: u64| closed.lock().is_ok_and(|c| c.contains(&uid));
+    let handle = std::thread::spawn(move || {
+        for (uid, doc, f) in jobs {
+            if is_closed(uid) {
+                continue;
+            }
+            let _ = file::save_doc(&doc, &f, file::SaveSpeed::Fast);
+            // Fechou durante o salvamento: apaga o que acabou de escrever.
+            if is_closed(uid) {
+                let _ = std::fs::remove_file(&f);
+            }
+        }
+    });
+    st.autosave_job = Some(handle);
+}
+
+/// Apaga o autosave de um documento fechado e impede que um salvamento atrasado o recrie.
+fn forget_autosave(st: &State, uid: u64) {
+    if let Ok(mut c) = st.autosave_closed.lock() {
+        c.insert(uid);
+    }
+    let _ = std::fs::remove_file(autosave_file(uid));
+}
+
+/// Espera o autosave em andamento terminar (ao fechar o app e nos testes).
+fn finish_autosave(st: &mut State) {
+    if let Some(j) = st.autosave_job.take() {
+        let _ = j.join();
     }
 }
 
@@ -192,15 +265,25 @@ impl TabViewer for Viewer<'_> {
             .show(ui, |ui| {
                 ui.set_min_size(size - egui::vec2(PAD * 2.0, PAD * 2.0));
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                // Sliders acompanham a largura do docker (o padrão de 100 px cortava o valor
+                // quando o docker ficava estreito).
+                ui.spacing_mut().slider_width = (ui.available_width() - 150.0).clamp(50.0, 200.0);
+                // Dockers com mais conteúdo que altura rolam em vez de cortar (o quadrado de cor
+                // perdia as amostras embaixo).
+                let scroll = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink(false)
+                        .show(ui, |ui| add(ui));
+                };
                 match tab {
                     Panel::Canvas => {}
                     Panel::Toolbox => docks::toolbox(st, ui),
                     Panel::Layers => docks::layers(st, ui),
                     Panel::BrushPresets => docks::brush_presets(st, ui),
                     Panel::BrushEditor => docks::brush_editor(st, ui),
-                    Panel::ToolOptions => docks::tool_options(st, ui),
-                    Panel::Color => docks::color(st, ui),
-                    Panel::Palette => docks::palette(st, ui),
+                    Panel::ToolOptions => scroll(ui, &mut |ui| docks::tool_options(st, ui)),
+                    Panel::Color => scroll(ui, &mut |ui| docks::color(st, ui)),
+                    Panel::Palette => scroll(ui, &mut |ui| docks::palette(st, ui)),
                     Panel::Overview => docks::overview(st, ui),
                     Panel::History => docks::history(st, ui),
                 }
@@ -292,6 +375,8 @@ impl PaintApp {
                 allow_close: false,
                 tool_changed: false,
                 last_autosave: std::time::Instant::now(),
+                autosave_job: None,
+                autosave_closed: Default::default(),
                 popup_palette: None,
             },
             last_title: String::new(),
@@ -303,6 +388,22 @@ impl PaintApp {
 }
 
 // ---------------------------------------------------------------- operações de estado
+
+/// Espelho e Borracha da barra do pincel (dentro de um menu quando a janela é estreita).
+fn mirror_and_eraser(st: &mut State, ui: &mut egui::Ui) {
+    ui.toggle_value(&mut st.mirror.0, "Espelho ↔")
+        .on_hover_text("Pinta também refletido na vertical (eixo no meio)");
+    ui.toggle_value(&mut st.mirror.1, "Espelho ↕")
+        .on_hover_text("Pinta também refletido na horizontal (eixo no meio)");
+    let mut erasing = st.tool == Tool::Eraser;
+    if ui
+        .toggle_value(&mut erasing, "Borracha")
+        .on_hover_text("Alterna borracha (E)")
+        .changed()
+    {
+        set_tool(st, if erasing { Tool::Eraser } else { Tool::Brush });
+    }
+}
 
 pub fn set_tool(st: &mut State, tool: Tool) {
     if st.tool == tool {
@@ -336,7 +437,7 @@ pub fn request_close_doc(st: &mut State, i: usize) {
 fn close_doc(st: &mut State, i: usize) {
     if i < st.docs.len() {
         let removed = st.docs.remove(i);
-        let _ = std::fs::remove_file(autosave_file(removed.uid));
+        forget_autosave(st, removed.uid);
         st.cur = st.cur.min(st.docs.len().saturating_sub(1));
         st.interaction = None;
     }
@@ -570,6 +671,8 @@ fn open_filter(st: &mut State, kind: FilterKind) {
         c,
         preview: true,
         applied: false,
+        last_ms: 0.0,
+        waiting: false,
     });
 }
 
@@ -1011,7 +1114,14 @@ impl PaintApp {
     /// Barra de cima com as opções do pincel (como a do Krita).
     fn brush_bar(&mut self, ui: &mut egui::Ui) {
         let st = &mut self.st;
+        // Janela estreita: os sliders encolhem e Espelho/Borracha vão para um menu "⋯"; antes
+        // eles saíam da tela e não dava para alcançá-los.
+        let compact = ui.available_width() < 1180.0;
         ui.horizontal_centered(|ui| {
+            if compact {
+                ui.spacing_mut().slider_width =
+                    ((ui.available_width() - 770.0) / 3.0).clamp(44.0, 110.0);
+            }
             ui.add_space(4.0);
             ui.label(RichText::new(st.tool.label()).strong());
             ui.separator();
@@ -1069,18 +1179,12 @@ impl PaintApp {
                 );
                 st.brush.flow = f / 100.0;
                 ui.separator();
-                ui.separator();
-                ui.toggle_value(&mut st.mirror.0, "Espelho ↔")
-                    .on_hover_text("Pinta também refletido na vertical (eixo no meio)");
-                ui.toggle_value(&mut st.mirror.1, "Espelho ↕")
-                    .on_hover_text("Pinta também refletido na horizontal (eixo no meio)");
-                let mut erasing = st.tool == Tool::Eraser;
-                if ui
-                    .toggle_value(&mut erasing, "Borracha")
-                    .on_hover_text("Alterna borracha (E)")
-                    .changed()
-                {
-                    set_tool(st, if erasing { Tool::Eraser } else { Tool::Brush });
+                if compact {
+                    ui.menu_button("⋯", |ui| mirror_and_eraser(st, ui))
+                        .response
+                        .on_hover_text("Espelho e Borracha");
+                } else {
+                    mirror_and_eraser(st, ui);
                 }
             } else {
                 ui.label(
@@ -1528,6 +1632,8 @@ impl PaintApp {
                     c,
                     preview,
                     applied,
+                    last_ms,
+                    waiting,
                 } => {
                     let mut changed = false;
                     let mut slider =
@@ -1568,15 +1674,22 @@ impl PaintApp {
                     ui.checkbox(preview, "Prévia na tela");
                     let (f, label) = filter_of(kind, *a, *b, *c);
                     let cur = st.cur;
-                    if (changed || (*preview && !*applied))
-                        && *preview
+                    let dragging = ui.input(|i| i.pointer.any_down());
+                    let action =
+                        preview_action(*preview, changed, *waiting, *applied, *last_ms, dragging);
+                    if action == PreviewAction::Wait {
+                        *waiting = true;
+                    } else if action == PreviewAction::Apply
                         && let Some(d) = st.docs.get_mut(cur)
                     {
+                        let started = std::time::Instant::now();
                         if *applied {
                             d.ed.undo();
                         }
                         let id = d.active;
                         *applied = d.ed.apply_filter(id, &f, label).is_ok();
+                        *last_ms = started.elapsed().as_secs_f32() * 1000.0;
+                        *waiting = false;
                     } else if changed
                         && !*preview
                         && *applied
@@ -1584,6 +1697,7 @@ impl PaintApp {
                     {
                         d.ed.undo();
                         *applied = false;
+                        *waiting = false;
                     }
                     ui.add_space(8.0);
                     let applied_now = *applied;
@@ -2010,8 +2124,9 @@ impl PaintApp {
             && (self.st.allow_close || !self.st.docs.iter().any(|d| d.ed.is_dirty()))
         {
             for d in &self.st.docs {
-                let _ = std::fs::remove_file(autosave_file(d.uid));
+                forget_autosave(&self.st, d.uid);
             }
+            finish_autosave(&mut self.st);
         }
         if ctx.input(|i| i.viewport().close_requested())
             && !self.st.allow_close
@@ -2467,6 +2582,7 @@ mod tests {
         let id = d.active;
         d.ed.fill_selection(id, [1, 2, 3]).unwrap();
         autosave(&mut h.app.st);
+        finish_autosave(&mut h.app.st);
         let mine = autosave_file(uid);
         assert!(mine.exists());
         assert!(
@@ -2481,7 +2597,101 @@ mod tests {
         let _ = std::fs::remove_file(&dead);
         h.app.st.doc_mut().unwrap().ed.mark_saved();
         autosave(&mut h.app.st);
+        finish_autosave(&mut h.app.st);
         assert!(!mine.exists());
+    }
+
+    #[test]
+    fn slow_filter_previews_wait_for_the_slider_to_be_released() {
+        use PreviewAction::*;
+        // Primeira prévia sempre sai, mesmo arrastando.
+        assert_eq!(preview_action(true, true, false, false, 0.0, true), Apply);
+        // Filtro rápido acompanha o arraste.
+        assert_eq!(preview_action(true, true, false, true, 10.0, true), Apply);
+        // Filtro lento espera enquanto arrasta e refaz ao soltar, mesmo sem mudança nova.
+        assert_eq!(preview_action(true, true, false, true, 900.0, true), Wait);
+        assert_eq!(preview_action(true, false, true, true, 900.0, true), Wait);
+        assert_eq!(preview_action(true, false, true, true, 900.0, false), Apply);
+        // Sem mudança e sem pendência não faz nada; prévia desligada também não.
+        assert_eq!(
+            preview_action(true, false, false, true, 900.0, false),
+            Nothing
+        );
+        assert_eq!(
+            preview_action(false, true, false, true, 900.0, false),
+            Nothing
+        );
+    }
+
+    #[test]
+    fn selection_outline_is_kept_while_painting_and_rebuilt_when_the_selection_changes() {
+        let mut h = Harness::new();
+        let ctx = egui::Context::default();
+        let d = h.app.st.doc_mut().unwrap();
+        let id = d.active;
+        d.ed.set_selection(
+            Some(pawpaint_core::Selection::rect(300, 200, 10, 10, 50, 50)),
+            "Selecionar",
+        );
+        canvas::selection_overlay(&ctx, d);
+        let first = d
+            .sel_overlay
+            .as_ref()
+            .map(|(_, t, o)| (t.id(), *o))
+            .unwrap();
+        // Mexer nos pixels não muda a seleção: o contorno é o mesmo, sem recalcular.
+        d.ed.fill_selection(id, [1, 2, 3]).unwrap();
+        canvas::selection_overlay(&ctx, d);
+        assert_eq!(
+            d.sel_overlay.as_ref().map(|(_, t, o)| (t.id(), *o)),
+            Some(first)
+        );
+        // Outra seleção: contorno novo, no lugar novo.
+        d.ed.set_selection(
+            Some(pawpaint_core::Selection::rect(300, 200, 20, 30, 60, 70)),
+            "Selecionar",
+        );
+        canvas::selection_overlay(&ctx, d);
+        let second = d
+            .sel_overlay
+            .as_ref()
+            .map(|(_, t, o)| (t.id(), *o))
+            .unwrap();
+        assert_ne!(second, first);
+        assert_eq!(second.1, (19, 29));
+        d.ed.deselect();
+        canvas::selection_overlay(&ctx, d);
+        assert!(d.sel_overlay.is_none());
+    }
+
+    #[test]
+    fn autosave_runs_off_the_ui_thread_and_a_closed_document_is_not_resurrected() {
+        let mut h = Harness::new();
+        let uid = h.app.st.doc().unwrap().uid;
+        let d = h.app.st.doc_mut().unwrap();
+        let id = d.active;
+        d.ed.fill_selection(id, [9, 8, 7]).unwrap();
+        // Fechou o documento antes de o salvamento em segundo plano começar a escrever.
+        autosave(&mut h.app.st);
+        forget_autosave(&h.app.st, uid);
+        finish_autosave(&mut h.app.st);
+        assert!(
+            !autosave_file(uid).exists(),
+            "autosave de documento fechado voltou"
+        );
+        // Pintar enquanto o salvamento roda não mexe no que está sendo salvo.
+        let mut h = Harness::new();
+        let uid = h.app.st.doc().unwrap().uid;
+        let d = h.app.st.doc_mut().unwrap();
+        let id = d.active;
+        d.ed.fill_selection(id, [5, 5, 5]).unwrap();
+        autosave(&mut h.app.st);
+        let d = h.app.st.doc_mut().unwrap();
+        d.ed.fill_selection(id, [200, 200, 200]).unwrap();
+        finish_autosave(&mut h.app.st);
+        let saved = file::load_project(&autosave_file(uid)).unwrap();
+        assert_eq!(saved.doc().layers[0].pixels.pixel(5, 5), [5, 5, 5, 255]);
+        forget_autosave(&h.app.st, uid);
     }
 
     #[test]
@@ -2501,6 +2711,8 @@ mod tests {
             c: 0.0,
             preview: true,
             applied: false,
+            last_ms: 0.0,
+            waiting: false,
         });
         h.frame(vec![]);
         h.frame(vec![]);

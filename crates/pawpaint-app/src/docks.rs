@@ -595,7 +595,10 @@ pub fn brush_presets(st: &mut State, ui: &mut egui::Ui) {
                 };
                 let w = ui.available_width() - 4.0;
                 let (rect, resp) = ui.allocate_exact_size(vec2(w, 46.0), Sense::click());
-                let p = ui.painter();
+                // Num docker estreito a miniatura encolhe (o nome não fica mais cortado) e o texto
+                // é recortado na própria linha.
+                let thumb_w = (w * 0.55).clamp(64.0, 150.0);
+                let p = ui.painter_at(rect);
                 if selected {
                     p.rect_filled(rect, 3.0, theme::ACCENT.gamma_multiply(0.35));
                 } else if resp.hovered() {
@@ -603,12 +606,12 @@ pub fn brush_presets(st: &mut State, ui: &mut egui::Ui) {
                 }
                 p.image(
                     tex.id(),
-                    Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(150.0, 38.0)),
+                    Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(thumb_w, 38.0)),
                     Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                     Color32::WHITE,
                 );
                 p.text(
-                    rect.min + vec2(162.0, 23.0),
+                    rect.min + vec2(thumb_w + 12.0, 23.0),
                     Align2::LEFT_CENTER,
                     &b.name,
                     theme::text(12.5),
@@ -1104,9 +1107,10 @@ pub fn overview(st: &mut State, ui: &mut egui::Ui) {
             rect.left() + cx * rect.width(),
             rect.top() + cy * rect.height(),
         ),
+        // O que o canvas mostra, em pixels da imagem: tamanho da área dividido pelo zoom.
         vec2(
-            rect.width() / d.zoom.max(0.05) * 0.5,
-            rect.height() / d.zoom.max(0.05) * 0.5,
+            d.canvas_size.x / d.zoom.max(0.01) * k,
+            d.canvas_size.y / d.zoom.max(0.01) * k,
         ),
     )
     .intersect(rect);

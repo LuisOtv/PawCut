@@ -25,25 +25,63 @@ fn tile_image(tile: &[u8], tw: usize, th: usize) -> egui::ColorImage {
     egui::ColorImage::from_rgba_premultiplied([tw, th], &px)
 }
 
+/// A imagem inteira composta. Cada faixa de blocos vira uma tarefa e escreve direto nas suas
+/// linhas, então numa foto grande (filtro, desfazer, preencher) o trabalho se divide entre os
+/// núcleos em vez de parar a interface por dezenas de milissegundos.
+fn full_image(
+    doc: &pawpaint_core::Doc,
+    live: Option<&pawpaint_core::composite::Live>,
+) -> egui::ColorImage {
+    let (w, h) = (doc.width, doc.height);
+    let mut img = egui::ColorImage::filled([w, h], Color32::TRANSPARENT);
+    let band = |ty: usize, rows: &mut [Color32]| {
+        for tx in 0..w.div_ceil(TILE) {
+            let t = composite_tile(doc, tx, ty, live);
+            let (tw, th) = (TILE.min(w - tx * TILE), TILE.min(h - ty * TILE));
+            for y in 0..th {
+                let src = &t[y * TILE * 4..y * TILE * 4 + tw * 4];
+                let dst = &mut rows[y * w + tx * TILE..y * w + tx * TILE + tw];
+                for (d, p) in dst.iter_mut().zip(src.chunks_exact(4)) {
+                    *d = Color32::from_rgba_premultiplied(p[0], p[1], p[2], p[3]);
+                }
+            }
+        }
+    };
+    let mut bands: Vec<(usize, &mut [Color32])> =
+        img.pixels.chunks_mut(TILE * w).enumerate().collect();
+    let workers = if w * h < 1_000_000 {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .clamp(1, 8)
+    };
+    if workers == 1 {
+        for (ty, rows) in &mut bands {
+            band(*ty, rows);
+        }
+    } else {
+        let per = bands.len().div_ceil(workers);
+        std::thread::scope(|scope| {
+            for group in bands.chunks_mut(per) {
+                scope.spawn(|| {
+                    for (ty, rows) in group.iter_mut() {
+                        band(*ty, rows);
+                    }
+                });
+            }
+        });
+    }
+    img
+}
+
 /// Põe na textura o que mudou no documento desde o último quadro.
 pub fn sync_texture(ctx: &egui::Context, d: &mut DocView) {
     let (w, h) = (d.ed.doc().width, d.ed.doc().height);
     let dirty = d.ed.take_dirty();
     let need_full = d.tex.is_none() || d.tex_size != (w, h) || dirty == Dirty::All;
     if need_full {
-        let mut img = egui::ColorImage::filled([w, h], Color32::TRANSPARENT);
-        let live = d.ed.live();
-        for ty in 0..h.div_ceil(TILE) {
-            for tx in 0..w.div_ceil(TILE) {
-                let t = composite_tile(d.ed.doc(), tx, ty, live.as_ref());
-                let (tw, th) = (TILE.min(w - tx * TILE), TILE.min(h - ty * TILE));
-                let ti = tile_image(&t, tw, th);
-                for y in 0..th {
-                    let dst = (ty * TILE + y) * w + tx * TILE;
-                    img.pixels[dst..dst + tw].copy_from_slice(&ti.pixels[y * tw..(y + 1) * tw]);
-                }
-            }
-        }
+        let img = full_image(d.ed.doc(), d.ed.live().as_ref());
         match &mut d.tex {
             Some(t) if d.tex_size == (w, h) => t.set(img, TextureOptions::NEAREST),
             _ => {
@@ -93,21 +131,28 @@ fn checker(ctx: &egui::Context) -> TextureHandle {
 }
 
 /// Contorno da seleção como textura: pontos pretos e brancos alternados na borda.
-fn selection_overlay(ctx: &egui::Context, d: &mut DocView) {
-    let rev = d.ed.revision();
-    if d.sel_overlay.as_ref().is_some_and(|(r, _, _)| *r == rev) {
+pub fn selection_overlay(ctx: &egui::Context, d: &mut DocView) {
+    // O contorno só depende da máscara: pintar, preencher ou desfazer outra coisa com a seleção
+    // ativa não pode recalculá-lo (numa foto grande são milhões de pixels).
+    let Some(sel) = d.ed.doc().selection.clone() else {
+        d.sel_overlay = None;
+        return;
+    };
+    if d.sel_overlay
+        .as_ref()
+        .is_some_and(|(s, _, _)| s.same_mask(&sel))
+    {
         return;
     }
     d.sel_overlay = None;
-    let Some(sel) = &d.ed.doc().selection else {
-        return;
-    };
     let Some((x0, y0, x1, y1)) = sel.bounds() else {
         return;
     };
     let (w, h) = (x1 - x0 + 2, y1 - y0 + 2);
     let mut img = egui::ColorImage::filled([w, h], Color32::TRANSPARENT);
-    let inside = |x: i64, y: i64| x >= 0 && y >= 0 && sel.value(x as usize, y as usize) >= 128;
+    let (mw, mh, mask) = (sel.width() as i64, sel.height() as i64, sel.mask());
+    let inside =
+        |x: i64, y: i64| x >= 0 && y >= 0 && x < mw && y < mh && mask[(y * mw + x) as usize] >= 128;
     for y in 0..h {
         for x in 0..w {
             let (px, py) = (x0 as i64 + x as i64 - 1, y0 as i64 + y as i64 - 1);
@@ -128,7 +173,7 @@ fn selection_overlay(ctx: &egui::Context, d: &mut DocView) {
         }
     }
     let t = ctx.load_texture(format!("sel{}", d.uid), img, TextureOptions::NEAREST);
-    d.sel_overlay = Some((rev, t, (x0.saturating_sub(1), y0.saturating_sub(1))));
+    d.sel_overlay = Some((sel, t, (x0.saturating_sub(1), y0.saturating_sub(1))));
 }
 
 // ---------------------------------------------------------------- pedaço solto
@@ -210,6 +255,7 @@ pub fn canvas_panel(st: &mut State, ui: &mut egui::Ui) {
     }
     sync_texture(&ctx, &mut st.docs[cur]);
     selection_overlay(&ctx, &mut st.docs[cur]);
+    st.docs[cur].canvas_size = area.size();
     let (cw, ch) = (
         st.docs[cur].ed.doc().width as f32,
         st.docs[cur].ed.doc().height as f32,
@@ -1268,5 +1314,42 @@ fn popup_palette(st: &mut State, ctx: &egui::Context) {
             .is_some_and(|p| !area.response.rect.contains(p));
     if close || outside {
         st.popup_palette = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pawpaint_core::editor::Background;
+
+    #[test]
+    fn full_image_matches_the_tile_by_tile_composite_on_a_threaded_size() {
+        // 1100 x 1000 passa de 1 milhão de pixels (várias threads) e não é múltiplo do bloco.
+        let mut ed = Editor::new(1100, 1000, Background::White);
+        let id = ed.doc().layers[0].id;
+        let top = ed.add_layer(None, None);
+        ed.fill_selection(id, [10, 60, 200]).unwrap();
+        ed.set_selection(
+            Some(Selection::rect(1100, 1000, 100, 70, 900, 930)),
+            "Selecionar",
+        );
+        ed.fill_selection(top, [220, 30, 30]).unwrap();
+        let img = full_image(ed.doc(), None);
+        assert_eq!(img.size, [1100, 1000]);
+        for (x, y) in [
+            (0, 0),
+            (1099, 999),
+            (500, 500),
+            (99, 69),
+            (100, 70),
+            (63, 64),
+            (64, 63),
+            (1090, 990),
+        ] {
+            let t = composite_tile(ed.doc(), x / TILE, y / TILE, None);
+            let o = ((y % TILE) * TILE + x % TILE) * 4;
+            let want = Color32::from_rgba_premultiplied(t[o], t[o + 1], t[o + 2], t[o + 3]);
+            assert_eq!(img.pixels[y * 1100 + x], want, "pixel {x},{y}");
+        }
     }
 }

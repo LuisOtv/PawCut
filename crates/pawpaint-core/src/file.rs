@@ -61,47 +61,128 @@ struct DocMeta {
     layers: Vec<LayerMeta>,
 }
 
-fn png_bytes(img: &RgbaImage) -> Result<Vec<u8>, FileError> {
+type PngResult = Result<Vec<u8>, FileError>;
+
+/// Quão rápido salvar: `Fast` (autosave) troca um arquivo um pouco maior por bem menos tempo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveSpeed {
+    Best,
+    Fast,
+}
+
+fn png_bytes_with(img: &RgbaImage, speed: SaveSpeed) -> Result<Vec<u8>, FileError> {
+    use image::ExtendedColorType;
+    use image::ImageEncoder;
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    let (compression, filter) = match speed {
+        SaveSpeed::Best => (CompressionType::Default, FilterType::Adaptive),
+        SaveSpeed::Fast => (CompressionType::Fast, FilterType::Sub),
+    };
     let mut out = Vec::new();
-    img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
+    PngEncoder::new_with_quality(&mut out, compression, filter).write_image(
+        img.as_raw(),
+        img.width(),
+        img.height(),
+        ExtendedColorType::Rgba8,
+    )?;
     Ok(out)
 }
 
 pub fn save_project(ed: &Editor, path: &Path) -> Result<(), FileError> {
-    let doc = ed.doc();
+    save_doc(ed.doc(), path, SaveSpeed::Best)
+}
+
+/// Salva um documento (uma cópia dele serve: copiar só copia ponteiros dos blocos, então dá
+/// para salvar de outra thread sem travar a pintura).
+///
+/// Cada camada vira um PNG, codificados em paralelo (um por núcleo, cada um converte e codifica
+/// a sua camada, então a memória extra é de uma camada por núcleo). Os PNGs entram no zip sem
+/// recompressão: comprimir de novo um PNG não ganha nada e custava mais da metade do tempo.
+pub fn save_doc(doc: &Doc, path: &Path, speed: SaveSpeed) -> Result<(), FileError> {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    enum Job<'a> {
+        Pixels(&'a TiledImage),
+        Merged,
+    }
+    let mut jobs: Vec<(String, Job)> = Vec::new();
+    let mut metas = Vec::new();
+    for l in &doc.layers {
+        let name = format!("layers/{}.png", l.id);
+        jobs.push((name.clone(), Job::Pixels(&l.pixels)));
+        let mut mask_name = None;
+        if let Some(m) = &l.mask {
+            let mn = format!("layers/{}-mask.png", l.id);
+            jobs.push((mn.clone(), Job::Pixels(m)));
+            mask_name = Some(mn);
+        }
+        metas.push(LayerMeta {
+            id: l.id,
+            name: l.name.clone(),
+            visible: l.visible,
+            locked: l.locked,
+            alpha_lock: l.alpha_lock,
+            opacity: l.opacity,
+            mode: l.mode,
+            file: name,
+            mask: mask_name,
+            is_group: l.is_group,
+            parent: l.parent,
+            expanded: l.expanded,
+        });
+    }
+    // Imagem final, para miniaturas em gerenciadores de arquivos.
+    jobs.push(("merged.png".to_string(), Job::Merged));
+
+    let results: Mutex<Vec<Option<PngResult>>> =
+        Mutex::new((0..jobs.len()).map(|_| None).collect());
+    let next = AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism()
+        .map_or(2, |n| n.get())
+        .clamp(1, 6)
+        .min(jobs.len());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::SeqCst);
+                    let Some((_, job)) = jobs.get(i) else { break };
+                    let png = match job {
+                        Job::Pixels(t) => png_bytes_with(&t.to_rgba(), speed),
+                        Job::Merged => png_bytes_with(&composite::flatten(doc), speed),
+                    };
+                    results.lock().expect("resultados")[i] = Some(png);
+                }
+            });
+        }
+    });
+    let results: Vec<PngResult> = results
+        .into_inner()
+        .expect("resultados")
+        .into_iter()
+        .map(|r| r.expect("todo trabalho termina"))
+        .collect();
+
     // Primeiro num arquivo temporário: um erro no meio não estraga o projeto antigo.
     let tmp = path.with_extension("pawpaint.tmp");
     {
         let file = std::fs::File::create(&tmp)?;
-        let mut zip = zip::ZipWriter::new(file);
-        let opts = zip::write::SimpleFileOptions::default()
+        let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .large_file(true);
+        let deflated = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
-        let mut metas = Vec::new();
-        for l in &doc.layers {
-            let name = format!("layers/{}.png", l.id);
-            zip.start_file(&name, opts)?;
-            zip.write_all(&png_bytes(&l.pixels.to_rgba())?)?;
-            let mut mask_name = None;
-            if let Some(m) = &l.mask {
-                let mn = format!("layers/{}-mask.png", l.id);
-                zip.start_file(&mn, opts)?;
-                zip.write_all(&png_bytes(&m.to_rgba())?)?;
-                mask_name = Some(mn);
-            }
-            metas.push(LayerMeta {
-                id: l.id,
-                name: l.name.clone(),
-                visible: l.visible,
-                locked: l.locked,
-                alpha_lock: l.alpha_lock,
-                opacity: l.opacity,
-                mode: l.mode,
-                file: name,
-                mask: mask_name,
-                is_group: l.is_group,
-                parent: l.parent,
-                expanded: l.expanded,
-            });
+        let mut done = results.into_iter();
+        let mut write_png = |zip: &mut zip::ZipWriter<_>, name: &str| -> Result<(), FileError> {
+            let png = done.next().expect("um resultado por trabalho");
+            zip.start_file(name, stored)?;
+            zip.write_all(&png?)?;
+            Ok(())
+        };
+        for (name, _) in jobs.iter().filter(|(n, _)| n != "merged.png") {
+            write_png(&mut zip, name)?;
         }
         let meta = DocMeta {
             version: VERSION,
@@ -110,11 +191,9 @@ pub fn save_project(ed: &Editor, path: &Path) -> Result<(), FileError> {
             next_id: doc.next_id(),
             layers: metas,
         };
-        zip.start_file("doc.json", opts)?;
+        zip.start_file("doc.json", deflated)?;
         zip.write_all(serde_json::to_string_pretty(&meta)?.as_bytes())?;
-        // Imagem final, para miniaturas em gerenciadores de arquivos.
-        zip.start_file("merged.png", opts)?;
-        zip.write_all(&png_bytes(&composite::flatten(doc))?)?;
+        write_png(&mut zip, "merged.png")?;
         zip.finish()?;
     }
     std::fs::rename(&tmp, path)?;
@@ -239,6 +318,39 @@ mod tests {
         assert_eq!(l.pixels.pixel(100, 60), [10, 20, 30, 255]);
         assert_eq!(back.doc().next_id(), e.doc().next_id());
         assert!(!path.with_extension("pawpaint.tmp").exists());
+    }
+
+    #[test]
+    fn fast_save_of_a_doc_copy_loads_back_identical_with_masks_and_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rapido.pawpaint");
+        let mut e = Editor::new(150, 90, Background::White);
+        let id = e.add_layer(Some("Tinta".into()), None);
+        e.fill_selection(id, [90, 40, 10]).unwrap();
+        let copy = e.doc().clone();
+        // Pintar depois da cópia não pode aparecer no arquivo salvo dela.
+        e.fill_selection(id, [1, 2, 3]).unwrap();
+        save_doc(&copy, &path, SaveSpeed::Fast).unwrap();
+        let back = load_project(&path).unwrap();
+        assert_eq!(back.doc().layers.len(), copy.layers.len());
+        assert_eq!(
+            back.doc().layer(id).unwrap().pixels.pixel(70, 40),
+            [90, 40, 10, 255]
+        );
+        assert!(!path.with_extension("pawpaint.tmp").exists());
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_old_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.pawpaint");
+        let e = Editor::new(40, 40, Background::White);
+        save_project(&e, &path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        // Uma pasta no lugar do temporário faz a criação do arquivo falhar.
+        std::fs::create_dir(path.with_extension("pawpaint.tmp")).unwrap();
+        assert!(save_project(&e, &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
