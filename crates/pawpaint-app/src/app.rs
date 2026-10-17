@@ -441,6 +441,7 @@ impl TabViewer for Viewer<'_> {
                     Panel::Palette => scroll(ui, &mut |ui| docks::palette(st, ui)),
                     Panel::Overview => docks::overview(st, ui),
                     Panel::History => docks::history(st, ui),
+                    Panel::Reference => docks::reference(st, ui),
                 }
             });
     }
@@ -537,6 +538,7 @@ impl PaintApp {
                 tool_changed: false,
                 last_autosave: std::time::Instant::now(),
                 pen: None,
+                reference: None,
                 new_adjust: None,
                 autosave_job: None,
                 autosave_closed: Default::default(),
@@ -688,6 +690,10 @@ fn open_path(st: &mut State, p: &Path) {
     }
 }
 
+pub fn ask_reference(st: &mut State) {
+    ask(st, Purpose::Reference);
+}
+
 fn ask(st: &mut State, purpose: Purpose) {
     if st.file.is_some() {
         return;
@@ -733,6 +739,12 @@ fn ask(st: &mut State, purpose: Purpose) {
                 .add_filter("BMP", &["bmp"])
                 .set_file_name(format!("{name}.png"))
                 .save_file()
+                .into_iter()
+                .collect(),
+            Purpose::Reference => d
+                .set_title("Imagem de referência")
+                .add_filter("Imagens", &["png", "jpg", "jpeg", "webp", "bmp"])
+                .pick_file()
                 .into_iter()
                 .collect(),
             Purpose::ExportJpg => d
@@ -784,6 +796,19 @@ fn poll_file(st: &mut State) {
                 }
             }
         }
+        Purpose::Reference => match file::open_image(&paths[0]) {
+            Ok(img) => {
+                let name = paths[0]
+                    .file_name()
+                    .map_or("referência".into(), |n| n.to_string_lossy().into_owned());
+                st.reference = Some(crate::state::Reference {
+                    name,
+                    img,
+                    tex: None,
+                });
+            }
+            Err(e) => st.warn(e.to_string()),
+        },
         Purpose::Export => {
             let Some(d) = st.doc() else { return };
             match file::export_image(d.ed.doc(), &paths[0], 92) {
@@ -1072,6 +1097,14 @@ impl PaintApp {
                 if item(ui, "Importar como camada…", "", has_doc) {
                     ui.close();
                     ask(st, Purpose::ImportLayer);
+                }
+                if item(ui, "Abrir imagem de referência…", "", true) {
+                    ui.close();
+                    ask(st, Purpose::Reference);
+                    // o painel aparece junto
+                    if self.dock.find_tab(&Panel::Reference).is_none() {
+                        st.dock_commands.push(DockCommand::Toggle(Panel::Reference));
+                    }
                 }
                 ui.separator();
                 if item(ui, "Salvar", "Ctrl+S", has_doc) {
@@ -2886,6 +2919,59 @@ mod tests {
         assert!(h.px(150 + 100, 100)[1] > 200, "e não à direita");
         // visão girada não muda a imagem: salvar e desfazer seguem normais
         assert!(h.app.st.doc().unwrap().ed.is_dirty());
+    }
+
+    #[test]
+    fn reference_panel_picks_colors_from_its_image() {
+        let mut h = Harness::new();
+        let mut img = image::RgbaImage::new(2, 1);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.put_pixel(1, 0, image::Rgba([0, 0, 255, 255]));
+        h.app.st.reference = Some(crate::state::Reference {
+            name: "teste.png".into(),
+            img,
+            tex: None,
+        });
+        let ctx = egui::Context::default();
+        let mut run = |st: &mut State, events: Vec<Event>| {
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |ui| {
+                egui::CentralPanel::default().show_inside(ui, |ui| docks::reference(st, ui));
+            })
+            .drop_without_applying_deltas();
+        };
+        let mut st = std::mem::replace(&mut h.app.st, PaintApp::empty().st);
+        let click = |p: Pos2| {
+            vec![
+                Event::PointerMoved(p),
+                Event::PointerButton {
+                    pos: p,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                },
+                Event::PointerButton {
+                    pos: p,
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Modifiers::NONE,
+                },
+            ]
+        };
+        run(&mut st, vec![]);
+        run(&mut st, vec![]);
+        run(&mut st, click(pos2(30.0, 30.0)));
+        assert_eq!(st.fg, [255, 0, 0], "esquerda é vermelha");
+        run(&mut st, vec![]);
+        run(&mut st, click(pos2(360.0, 30.0)));
+        assert_eq!(st.fg, [0, 0, 255], "direita é azul");
+        // sem imagem mostra o convite e não quebra
+        st.reference = None;
+        run(&mut st, vec![]);
     }
 
     #[test]

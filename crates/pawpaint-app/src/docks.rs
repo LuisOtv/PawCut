@@ -1336,3 +1336,78 @@ pub fn history(st: &mut State, ui: &mut egui::Ui) {
 
 #[allow(dead_code)]
 fn unused(_: Pos2) {}
+
+// ---------------------------------------------------------------- referência
+
+/// Painel Referência: uma imagem para olhar enquanto pinta. Clicar nela pega a cor.
+pub fn reference(st: &mut State, ui: &mut egui::Ui) {
+    if st.reference.is_none() {
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("Abra uma foto ou desenho para ter ao lado da tela (ela não entra no documento). Clique nela para pegar uma cor.")
+                .color(theme::TEXT_DIM),
+        );
+        ui.add_space(6.0);
+        if ui.button("Abrir imagem de referência…").clicked() {
+            crate::app::ask_reference(st);
+        }
+        return;
+    }
+    let ctx = ui.ctx().clone();
+    let mut change = false;
+    let mut remove = false;
+    let mut picked: Option<[u8; 3]> = None;
+    if let Some(r) = &mut st.reference {
+        if r.tex.is_none() {
+            let (w, h) = (r.img.width() as usize, r.img.height() as usize);
+            let color = egui::ColorImage::from_rgba_unmultiplied([w, h], r.img.as_raw());
+            r.tex = Some(ctx.load_texture("reference", color, egui::TextureOptions::LINEAR));
+        }
+        let avail = ui.available_size();
+        let (iw, ih) = (r.img.width() as f32, r.img.height() as f32);
+        let k = (avail.x / iw).min((avail.y - 22.0) / ih).max(0.01);
+        let (rect, resp) = ui.allocate_exact_size(vec2(iw * k, ih * k), Sense::click());
+        if let Some(t) = &r.tex {
+            ui.painter().image(
+                t.id(),
+                rect,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        if let Some(pos) = resp.hover_pos() {
+            let (x, y) = (
+                (((pos.x - rect.left()) / k) as u32).min(r.img.width() - 1),
+                (((pos.y - rect.top()) / k) as u32).min(r.img.height() - 1),
+            );
+            let p = r.img.get_pixel(x, y).0;
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            resp.clone()
+                .on_hover_text(format!("#{:02x}{:02x}{:02x}", p[0], p[1], p[2]));
+            if resp.clicked() {
+                picked = Some([p[0], p[1], p[2]]);
+            }
+        }
+        ui.label(RichText::new(&r.name).small().color(theme::TEXT_DIM));
+        resp.context_menu(|ui| {
+            if ui.button("Trocar a imagem…").clicked() {
+                ui.close();
+                change = true;
+            }
+            if ui.button("Tirar a referência").clicked() {
+                ui.close();
+                remove = true;
+            }
+        });
+    }
+    if let Some(c) = picked {
+        st.fg = c;
+        st.hsv = rgb_to_hsv(c);
+    }
+    if change {
+        crate::app::ask_reference(st);
+    }
+    if remove {
+        st.reference = None;
+    }
+}

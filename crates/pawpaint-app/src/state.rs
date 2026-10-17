@@ -26,10 +26,12 @@ pub enum Panel {
     Palette,
     Overview,
     History,
+    /// Imagem de referência para olhar (e pegar cores), fora do documento.
+    Reference,
 }
 
 impl Panel {
-    pub const ALL: [Panel; 10] = [
+    pub const ALL: [Panel; 11] = [
         Panel::Canvas,
         Panel::Toolbox,
         Panel::Layers,
@@ -40,6 +42,7 @@ impl Panel {
         Panel::Palette,
         Panel::Overview,
         Panel::History,
+        Panel::Reference,
     ];
 
     pub fn title(self) -> &'static str {
@@ -54,6 +57,7 @@ impl Panel {
             Panel::Palette => "Paleta",
             Panel::Overview => "Visão geral",
             Panel::History => "Histórico",
+            Panel::Reference => "Referência",
         }
     }
 }
@@ -335,6 +339,7 @@ pub enum Purpose {
     ImportLayer,
     Export,
     ExportJpg,
+    Reference,
 }
 
 #[derive(Clone)]
@@ -482,6 +487,9 @@ pub struct State {
     pub last_autosave: std::time::Instant,
     /// Pressão da caneta (0..1) enquanto ela toca a tela; `None` com mouse.
     pub pen: Option<f32>,
+    /// Imagem de referência (o painel Referência): a imagem e, depois de desenhada pela primeira
+    /// vez, a textura dela.
+    pub reference: Option<Reference>,
     /// Camada de ajuste recém-criada cujo diálogo está aberto: guarda a camada que estava ativa
     /// antes, para o Cancelar desfazer a criação por completo.
     pub new_adjust: Option<LayerId>,
@@ -581,4 +589,11 @@ mod tests {
             }
         }
     }
+}
+
+/// A imagem do painel Referência.
+pub struct Reference {
+    pub name: String,
+    pub img: image::RgbaImage,
+    pub tex: Option<TextureHandle>,
 }
