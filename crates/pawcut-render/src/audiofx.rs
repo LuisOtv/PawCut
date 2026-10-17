@@ -12,8 +12,13 @@ pub fn process_audio_fx(pcm: Pcm, effects: &[AudioFx]) -> Pcm {
         return pcm;
     }
     let rate = pcm.sample_rate;
-    let (mut l, mut r): (Vec<f32>, Vec<f32>) =
-        pcm.samples.chunks_exact(2).map(|f| (f[0], f[1])).unzip();
+    let (mut l, mut r): (Vec<f32>, Vec<f32>) = pcm
+        .samples
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|f| (f[0], f[1]))
+        .unzip();
     for e in effects {
         match e {
             AudioFx::HighPass { hz } => {
