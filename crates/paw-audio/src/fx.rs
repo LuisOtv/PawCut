@@ -1070,4 +1070,51 @@ mod tests {
         assert!(align_lag(&[0.0; 10], &[0.0; 10], 5).is_none());
         assert!(align_lag(&vec![0.0; 4000], &vec![0.0; 4000], 100).is_none());
     }
+
+    /// Parâmetros absurdos (zero, negativos, enormes, NaN) nunca derrubam nem travam um efeito.
+    #[test]
+    fn extreme_parameters_never_panic_or_hang() {
+        let base = sine(300.0, 0.15, 0.5);
+        let weird = [0.0f32, -1.0, 1e9, f32::NAN, f32::INFINITY, 1.0];
+        for &a in &weird {
+            for &b in &weird {
+                let mut s = base.clone();
+                equalize(&mut s, SR, &[EqBand::new(EqKind::Peak, a, b, a)]);
+                notch(&mut s.clone(), SR, a, b);
+                reverb(&mut s.clone(), SR, a, b, a, 0);
+                tremolo(&mut s.clone(), SR, a, b);
+                phaser(&mut s.clone(), SR, a, b, a);
+                wahwah(&mut s.clone(), SR, a, b, a);
+                adjustable_fade(&mut s.clone(), a, b, a);
+                spectral_delete(&mut s.clone(), SR, a, b, a);
+                declip(&mut s.clone(), a, 3);
+                find_clipping(&base, a, 0);
+                let mut m = base.clone();
+                duck(&mut m, &base, SR, a, b, a, b);
+                // velocidade/tempo/tom com fatores malucos (limitados por dentro)
+                let r = resample(&base, a);
+                assert!(r.len() <= base.len() * 25 + 2, "resample não explode: {}", r.len());
+                let t = time_stretch(&base, SR, a);
+                assert!(t.len() <= base.len() * 5 + 2, "stretch não explode: {}", t.len());
+                let mut p = base.clone();
+                pitch_shift(&mut p, SR, a);
+                assert_eq!(p.len(), base.len());
+                let _ = gen_tone(SR, a, 0.01, b);
+                let _ = gen_clicks(SR, a, 3, 1, b);
+            }
+        }
+        // entradas vazias e minúsculas
+        for n in [0usize, 1, 2, 63, 64, 65] {
+            let mut s = vec![0.25f32; n];
+            equalize(&mut s, SR, &[EqBand::new(EqKind::LowCut, 100.0, 0.0, 0.7)]);
+            reverb(&mut s, SR, 0.5, 0.5, -6.0, 0);
+            pitch_shift(&mut s, SR, 3.0);
+            spectral_delete(&mut s, SR, 100.0, 200.0, 20.0);
+            assert_eq!(s.len(), n);
+            assert!(resample(&s, 1.5).len() <= n + 1);
+            let _ = time_stretch(&s, SR, 0.5);
+            let _ = declip(&mut s, 0.9, 3);
+            let _ = align_lag(&s, &s, 10);
+        }
+    }
 }
