@@ -467,7 +467,7 @@ pub fn declip(s: &mut [f32], level: f32, min_run: usize) -> usize {
             s[b + 1] as f64,
         ];
         let sign = s[a].signum();
-        for i in a..b {
+        for (i, v) in s.iter_mut().enumerate().take(b).skip(a) {
             let x = i as f64;
             // Lagrange de 4 pontos
             let mut y = 0.0;
@@ -482,11 +482,9 @@ pub fn declip(s: &mut [f32], level: f32, min_run: usize) -> usize {
             }
             // só pode passar do teto, nunca voltar para dentro dele
             let y = y as f32;
-            s[i] = if y.signum() == sign && y.abs() > s[i].abs() {
-                y.clamp(-4.0, 4.0)
-            } else {
-                s[i]
-            };
+            if y.signum() == sign && y.abs() > v.abs() {
+                *v = y.clamp(-4.0, 4.0);
+            }
         }
         fixed += 1;
     }
@@ -525,6 +523,185 @@ pub fn duck(
         let k = if want < g { att } else { rel };
         g = want + (g - want) * k;
         *m *= g;
+    }
+}
+
+// ------------------------------------------------------------------ edição espectral
+
+/// Apaga as frequências entre `lo` e `hi` Hz (STFT com máscara suave): tira um apito, um
+/// zumbido largo ou uma nota solta sem cortar o tempo.
+pub fn spectral_delete(s: &mut [f32], sample_rate: u32, lo: f32, hi: f32, amount_db: f32) {
+    use rustfft::{FftPlanner, num_complex::Complex};
+    let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+    if s.len() < 64 || hi <= 0.0 {
+        return;
+    }
+    let n = 2048usize;
+    let hop = n / 4;
+    let keep = 10f32.powf(-amount_db.abs() / 20.0);
+    let bin_hz = sample_rate as f32 / n as f32;
+    // máscara com bordas de 3 bins para não "estalar"
+    let edge = 3.0 * bin_hz;
+    let mask = |hz: f32| -> f32 {
+        if hz < lo - edge || hz > hi + edge {
+            1.0
+        } else if hz >= lo && hz <= hi {
+            keep
+        } else {
+            let d = if hz < lo { lo - hz } else { hz - hi };
+            keep + (1.0 - keep) * (d / edge)
+        }
+    };
+    let window: Vec<f32> = (0..n)
+        .map(|i| 0.5 - 0.5 * (TAU as f32 * i as f32 / n as f32).cos())
+        .collect();
+    let mut planner = FftPlanner::<f32>::new();
+    let fwd = planner.plan_fft_forward(n);
+    let inv = planner.plan_fft_inverse(n);
+    let total = s.len() + n;
+    let mut out = vec![0.0f32; total];
+    let mut norm = vec![0.0f32; total];
+    let mut pos = 0usize;
+    while pos < s.len() {
+        let mut buf: Vec<Complex<f32>> = (0..n)
+            .map(|i| Complex::new(s.get(pos + i).copied().unwrap_or(0.0) * window[i], 0.0))
+            .collect();
+        fwd.process(&mut buf);
+        for (k, c) in buf.iter_mut().enumerate() {
+            let bin = if k <= n / 2 { k } else { n - k };
+            *c *= mask(bin as f32 * bin_hz);
+        }
+        inv.process(&mut buf);
+        for i in 0..n {
+            out[pos + i] += buf[i].re / n as f32 * window[i];
+            norm[pos + i] += window[i] * window[i];
+        }
+        pos += hop;
+    }
+    for (i, v) in s.iter_mut().enumerate() {
+        *v = if norm[i] > 1e-6 {
+            out[i] / norm[i]
+        } else {
+            0.0
+        };
+    }
+}
+
+// ------------------------------------------------------------------ fade ajustável
+
+/// Rampa de volume ao longo do trecho: vai de `start_db` a `end_db`. `curve` de −1 (cai/sobe
+/// rápido no começo) a 1 (devagar no começo); 0 é linear em dB.
+pub fn adjustable_fade(s: &mut [f32], start_db: f32, end_db: f32, curve: f32) {
+    let n = s.len().max(2) as f32 - 1.0;
+    let curve = curve.clamp(-1.0, 1.0);
+    for (i, v) in s.iter_mut().enumerate() {
+        let t = i as f32 / n;
+        let t = if curve >= 0.0 {
+            t.powf(1.0 + curve * 2.0)
+        } else {
+            1.0 - (1.0 - t).powf(1.0 - curve * 2.0)
+        };
+        let db = start_db + (end_db - start_db) * t;
+        *v *= if db <= -80.0 {
+            0.0
+        } else {
+            10f32.powf(db / 20.0)
+        };
+    }
+}
+
+// ------------------------------------------------------------------ geradores
+
+/// Tom senoidal de `secs` segundos com fade curto nas pontas (sem estalo).
+pub fn gen_tone(sample_rate: u32, hz: f32, secs: f32, amp: f32) -> Vec<f32> {
+    let n = (secs.max(0.0) * sample_rate as f32) as usize;
+    let ramp = (sample_rate as f32 * 0.005) as usize;
+    (0..n)
+        .map(|i| {
+            let edge = i.min(n - 1 - i);
+            let g = if edge < ramp {
+                edge as f32 / ramp.max(1) as f32
+            } else {
+                1.0
+            };
+            g * amp * (TAU as f32 * hz * i as f32 / sample_rate as f32).sin()
+        })
+        .collect()
+}
+
+/// Ruído branco, rosa (mais grave) ou marrom (ainda mais grave). Determinístico.
+pub fn gen_noise(sample_rate: u32, kind: NoiseKind, secs: f32, amp: f32) -> Vec<f32> {
+    let n = (secs.max(0.0) * sample_rate as f32) as usize;
+    let mut x = 0x2545_F491u32;
+    let mut white = || {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        x as f32 / u32::MAX as f32 * 2.0 - 1.0
+    };
+    let mut out = Vec::with_capacity(n);
+    match kind {
+        NoiseKind::White => out.extend((0..n).map(|_| white() * amp)),
+        NoiseKind::Pink => {
+            // Paul Kellet
+            let (mut b0, mut b1, mut b2, mut b3, mut b4, mut b5, mut b6) =
+                (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            for _ in 0..n {
+                let w = white();
+                b0 = 0.99886 * b0 + w * 0.0555179;
+                b1 = 0.99332 * b1 + w * 0.0750759;
+                b2 = 0.96900 * b2 + w * 0.153852;
+                b3 = 0.86650 * b3 + w * 0.3104856;
+                b4 = 0.55000 * b4 + w * 0.5329522;
+                b5 = -0.7616 * b5 - w * 0.0168980;
+                let v = b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362;
+                b6 = w * 0.115926;
+                out.push(v * 0.11 * amp);
+            }
+        }
+        NoiseKind::Brown => {
+            let mut last = 0.0f32;
+            for _ in 0..n {
+                last = (last + 0.02 * white()) / 1.02;
+                out.push(last * 3.5 * amp);
+            }
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoiseKind {
+    White,
+    Pink,
+    Brown,
+}
+
+/// Faixa de metrônomo: um clique por tempo, o primeiro de cada compasso mais agudo.
+pub fn gen_clicks(sample_rate: u32, bpm: f32, beats_per_bar: u32, bars: u32, amp: f32) -> Vec<f32> {
+    let bpm = bpm.clamp(20.0, 400.0);
+    let beat = (sample_rate as f32 * 60.0 / bpm) as usize;
+    let beats = (beats_per_bar.max(1) * bars.max(1)) as usize;
+    let mut out = vec![0.0f32; beat * beats];
+    let len = (sample_rate as f32 * 0.03) as usize;
+    for b in 0..beats {
+        let accent = (b as u32).is_multiple_of(beats_per_bar.max(1));
+        let hz = if accent { 1600.0 } else { 1000.0 };
+        for i in 0..len.min(beat) {
+            let env = (-(i as f32) / (len as f32 * 0.25)).exp();
+            out[b * beat + i] +=
+                amp * env * (TAU as f32 * hz * i as f32 / sample_rate as f32).sin();
+        }
+    }
+    out
+}
+
+/// Tira a voz do meio de uma música estéreo (karaokê): o que é igual nos dois lados some.
+pub fn remove_center(left: &mut [f32], right: &mut [f32]) {
+    for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+        let side = (*l - *r) * 0.5;
+        *l = side;
+        *r = -side;
     }
 }
 
@@ -727,5 +904,88 @@ mod tests {
             "{during}"
         );
         assert!((music[n - 1] - 0.5).abs() < 0.01, "volta depois da voz");
+    }
+
+    #[test]
+    fn spectral_delete_removes_a_band_and_keeps_the_rest() {
+        let mut mix: Vec<f32> = sine(500.0, 1.0, 0.3)
+            .iter()
+            .zip(sine(3000.0, 1.0, 0.3))
+            .map(|(a, b)| a + b)
+            .collect();
+        spectral_delete(&mut mix, SR, 2500.0, 3500.0, 60.0);
+        // sobra só o tom de 500 Hz: amplitude 0,3 => rms ≈ 0,212
+        let mid = &mix[SR as usize / 4..SR as usize * 3 / 4];
+        assert!((rms(mid) - 0.212).abs() < 0.03, "{}", rms(mid));
+        assert!((zero_hz(mid) - 500.0).abs() < 20.0);
+        assert_eq!(mix.len(), SR as usize);
+        // faixa invertida e vazia não quebram
+        let mut s = sine(440.0, 0.1, 0.5);
+        spectral_delete(&mut s, SR, 5000.0, 100.0, 40.0);
+        assert!(s.iter().all(|v| v.is_finite()));
+        let mut tiny = vec![0.5f32; 10];
+        spectral_delete(&mut tiny, SR, 100.0, 200.0, 40.0);
+        assert_eq!(tiny, vec![0.5f32; 10]);
+    }
+
+    #[test]
+    fn adjustable_fade_ramps_between_the_levels() {
+        let mut s = vec![1.0f32; 1001];
+        adjustable_fade(&mut s, 0.0, -80.0, 0.0);
+        assert!((s[0] - 1.0).abs() < 1e-3);
+        assert_eq!(s[1000], 0.0);
+        assert!((s[500] - 10f32.powf(-40.0 / 20.0)).abs() < 1e-3);
+        let mut up = vec![1.0f32; 100];
+        adjustable_fade(&mut up, -20.0, 0.0, 1.0);
+        assert!(up[0] < 0.11 && (up[99] - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn generators_make_what_they_say() {
+        let t = gen_tone(SR, 1000.0, 0.5, 0.5);
+        assert_eq!(t.len(), SR as usize / 2);
+        assert!((zero_hz(&t) - 1000.0).abs() < 25.0);
+        assert!(
+            t[0].abs() < 0.05 && t[t.len() - 1].abs() < 0.05,
+            "sem estalo nas pontas"
+        );
+        for kind in [NoiseKind::White, NoiseKind::Pink, NoiseKind::Brown] {
+            let n = gen_noise(SR, kind, 1.0, 0.5);
+            assert!(
+                rms(&n) > 0.01 && n.iter().all(|v| v.abs() <= 1.0),
+                "{kind:?}"
+            );
+        }
+        // 120 bpm, 4/4, 2 compassos = 8 tempos de 0,5 s
+        let c = gen_clicks(SR, 120.0, 4, 2, 0.8);
+        assert_eq!(c.len(), SR as usize / 2 * 8);
+        assert!(c[10].abs() + c[20].abs() > 0.1);
+        assert!(
+            rms(&c[SR as usize / 2 - 2000..SR as usize / 2 - 100]) < 1e-4,
+            "silêncio entre cliques"
+        );
+        assert!(gen_tone(SR, 440.0, 0.0, 1.0).is_empty());
+    }
+
+    #[test]
+    fn remove_center_cancels_what_is_equal_in_both_channels() {
+        let voice = sine(300.0, 0.2, 0.5);
+        let mut l: Vec<f32> = voice
+            .iter()
+            .zip(sine(900.0, 0.2, 0.2))
+            .map(|(a, b)| a + b)
+            .collect();
+        let mut r: Vec<f32> = voice
+            .iter()
+            .zip(sine(900.0, 0.2, 0.2))
+            .map(|(a, b)| a - b)
+            .collect();
+        remove_center(&mut l, &mut r);
+        // a voz (igual nos dois lados) some; sobra o tom que estava em oposição
+        assert!(
+            rms(&l) > 0.1 && (zero_hz(&l) - 900.0).abs() < 60.0,
+            "{}",
+            zero_hz(&l)
+        );
     }
 }

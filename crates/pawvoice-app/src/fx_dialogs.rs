@@ -4,7 +4,7 @@
 
 use egui::{Color32, RichText, Sense, Stroke, Ui, pos2, vec2};
 use paw_audio::dsp;
-use paw_audio::fx::{self, EqBand, EqKind};
+use paw_audio::fx::{self, EqBand, EqKind, NoiseKind};
 use paw_ui::{Slider, theme};
 
 /// Função que o editor aplica a cada trecho (em canais separados).
@@ -46,6 +46,44 @@ pub enum FxDialog {
     Pitch(f32),
     /// Reparo de áudio estourado: a partir de que nível conta como cortado.
     Declip(f32),
+    /// Apaga uma faixa de frequências (edição espectral).
+    SpectralDelete {
+        lo: f32,
+        hi: f32,
+        amount: f32,
+    },
+    /// Rampa de volume ao longo da seleção.
+    Fade {
+        start: f32,
+        end: f32,
+        curve: f32,
+    },
+    /// Repete a seleção `n` vezes no total.
+    Repeat(u32),
+    /// Tira o que é igual nos dois canais (voz no meio da música).
+    RemoveCenter,
+    /// Cria uma faixa nova (tom, ruído ou metrônomo) em vez de processar a seleção.
+    Generate(Gen),
+}
+
+/// O que gerar.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Gen {
+    Tone {
+        hz: f32,
+        secs: f32,
+        amp: f32,
+    },
+    Noise {
+        kind: NoiseKind,
+        secs: f32,
+        amp: f32,
+    },
+    Clicks {
+        bpm: f32,
+        beats: u32,
+        bars: u32,
+    },
 }
 
 /// Presets do equalizador: nome e bandas.
@@ -155,6 +193,29 @@ impl FxDialog {
             FxDialog::Tempo(_) => "Tempo (sem mudar o tom)",
             FxDialog::Pitch(_) => "Tom (sem mudar o tempo)",
             FxDialog::Declip(_) => "Reparar áudio estourado",
+            FxDialog::SpectralDelete { .. } => "Apagar faixa de frequências",
+            FxDialog::Fade { .. } => "Fade ajustável",
+            FxDialog::Repeat(_) => "Repetir",
+            FxDialog::RemoveCenter => "Tirar voz do centro",
+            FxDialog::Generate(Gen::Tone { .. }) => "Gerar tom",
+            FxDialog::Generate(Gen::Noise { .. }) => "Gerar ruído",
+            FxDialog::Generate(Gen::Clicks { .. }) => "Gerar metrônomo",
+        }
+    }
+
+    /// Faixa nova com o áudio gerado (só nos geradores).
+    pub fn generated(&self, rate: u32) -> Option<Vec<f32>> {
+        match self {
+            FxDialog::Generate(Gen::Tone { hz, secs, amp }) => {
+                Some(fx::gen_tone(rate, *hz, *secs, *amp))
+            }
+            FxDialog::Generate(Gen::Noise { kind, secs, amp }) => {
+                Some(fx::gen_noise(rate, *kind, *secs, *amp))
+            }
+            FxDialog::Generate(Gen::Clicks { bpm, beats, bars }) => {
+                Some(fx::gen_clicks(rate, *bpm, *beats, *bars, 0.8))
+            }
+            _ => None,
         }
     }
 
@@ -168,7 +229,10 @@ impl FxDialog {
 
     /// Esse efeito muda a duração do trecho?
     pub fn resizes(&self) -> bool {
-        matches!(self, FxDialog::Speed(_) | FxDialog::Tempo(_))
+        matches!(
+            self,
+            FxDialog::Speed(_) | FxDialog::Tempo(_) | FxDialog::Repeat(_)
+        )
     }
 
     pub fn ui(&mut self, ui: &mut Ui, rate: u32) {
@@ -253,6 +317,88 @@ impl FxDialog {
                         .max_decimals(1),
                 );
             }
+            FxDialog::SpectralDelete { lo, hi, amount } => {
+                ui.label(
+                    RichText::new("Apaga o que estiver entre as duas frequências, só no trecho.")
+                        .weak(),
+                );
+                ui.add(
+                    Slider::new(lo, 20.0..=20_000.0)
+                        .logarithmic(true)
+                        .text("de")
+                        .suffix(" Hz"),
+                );
+                ui.add(
+                    Slider::new(hi, 20.0..=20_000.0)
+                        .logarithmic(true)
+                        .text("até")
+                        .suffix(" Hz"),
+                );
+                ui.add(Slider::new(amount, 6.0..=80.0).text("quanto").suffix(" dB"));
+            }
+            FxDialog::Fade { start, end, curve } => {
+                ui.label(
+                    RichText::new("O volume vai de um nível ao outro ao longo do trecho.").weak(),
+                );
+                ui.add(
+                    Slider::new(start, -80.0..=12.0)
+                        .text("começa em")
+                        .suffix(" dB"),
+                );
+                ui.add(
+                    Slider::new(end, -80.0..=12.0)
+                        .text("termina em")
+                        .suffix(" dB"),
+                );
+                ui.add(Slider::new(curve, -1.0..=1.0).text("curva").max_decimals(2));
+            }
+            FxDialog::Repeat(n) => {
+                ui.label(RichText::new("Cola cópias da seleção uma depois da outra.").weak());
+                ui.add(Slider::new(n, 2..=32).text("vezes no total"));
+            }
+            FxDialog::RemoveCenter => {
+                ui.label(
+                    RichText::new(
+                        "Tira o que é igual nos dois lados (a voz de uma música). Só faz sentido \
+                         em faixa estéreo; o resultado fica quase mono.",
+                    )
+                    .weak(),
+                );
+            }
+            FxDialog::Generate(g) => match g {
+                Gen::Tone { hz, secs, amp } => {
+                    ui.add(
+                        Slider::new(hz, 20.0..=20_000.0)
+                            .logarithmic(true)
+                            .text("frequência")
+                            .suffix(" Hz"),
+                    );
+                    ui.add(Slider::new(secs, 0.1..=60.0).text("duração").suffix(" s"));
+                    ui.add(Slider::new(amp, 0.01..=1.0).text("volume").max_decimals(2));
+                }
+                Gen::Noise { kind, secs, amp } => {
+                    ui.horizontal(|ui| {
+                        for (k, name) in [
+                            (NoiseKind::White, "Branco"),
+                            (NoiseKind::Pink, "Rosa"),
+                            (NoiseKind::Brown, "Marrom"),
+                        ] {
+                            ui.selectable_value(kind, k, name);
+                        }
+                    });
+                    ui.add(Slider::new(secs, 0.1..=60.0).text("duração").suffix(" s"));
+                    ui.add(Slider::new(amp, 0.01..=1.0).text("volume").max_decimals(2));
+                }
+                Gen::Clicks { bpm, beats, bars } => {
+                    ui.add(
+                        Slider::new(bpm, 30.0..=300.0)
+                            .text("andamento")
+                            .suffix(" bpm"),
+                    );
+                    ui.add(Slider::new(beats, 1..=12).text("tempos por compasso"));
+                    ui.add(Slider::new(bars, 1..=64).text("compassos"));
+                }
+            },
             FxDialog::Declip(level) => {
                 ui.label(
                     RichText::new(
@@ -284,6 +430,11 @@ impl FxDialog {
             FxDialog::Tempo(_) => "Tempo",
             FxDialog::Pitch(_) => "Tom",
             FxDialog::Declip(_) => "Reparar estouro",
+            FxDialog::SpectralDelete { .. } => "Apagar frequências",
+            FxDialog::Fade { .. } => "Fade ajustável",
+            FxDialog::Repeat(_) => "Repetir",
+            FxDialog::RemoveCenter => "Tirar voz do centro",
+            FxDialog::Generate(_) => "Gerar",
         };
         let job: Job = Box::new(move |p: &mut [Vec<f32>]| match &me {
             FxDialog::Equalizer { bands } => {
@@ -339,6 +490,30 @@ impl FxDialog {
                     fx::pitch_shift(ch, rate, *st);
                 }
             }
+            FxDialog::SpectralDelete { lo, hi, amount } => {
+                for ch in p.iter_mut() {
+                    fx::spectral_delete(ch, rate, *lo, *hi, *amount);
+                }
+            }
+            FxDialog::Fade { start, end, curve } => {
+                for ch in p.iter_mut() {
+                    fx::adjustable_fade(ch, *start, *end, *curve);
+                }
+            }
+            FxDialog::Repeat(n) => {
+                for ch in p.iter_mut() {
+                    let once = ch.clone();
+                    for _ in 1..*n {
+                        ch.extend_from_slice(&once);
+                    }
+                }
+            }
+            FxDialog::RemoveCenter => {
+                if let [l, r, ..] = p {
+                    fx::remove_center(l, r);
+                }
+            }
+            FxDialog::Generate(_) => {}
             FxDialog::Declip(level) => {
                 for ch in p.iter_mut() {
                     fx::declip(ch, *level, 3);
@@ -503,6 +678,18 @@ mod tests {
             FxDialog::Tempo(0.8),
             FxDialog::Pitch(3.0),
             FxDialog::Declip(0.9),
+            FxDialog::SpectralDelete {
+                lo: 1000.0,
+                hi: 2000.0,
+                amount: 40.0,
+            },
+            FxDialog::Fade {
+                start: 0.0,
+                end: -30.0,
+                curve: 0.3,
+            },
+            FxDialog::Repeat(3),
+            FxDialog::RemoveCenter,
         ];
         for d in all {
             let (label, mut job) = d.job(48_000);
@@ -530,6 +717,36 @@ mod tests {
         let mut p = vec![tone(440.0, 48_000)];
         slower(&mut p);
         assert!((p[0].len() as i64 - 96_000).abs() <= 2);
+    }
+
+    #[test]
+    fn repeat_multiplies_the_length_and_generators_build_tracks() {
+        let (_, mut rep) = FxDialog::Repeat(3).job(48_000);
+        let mut p = vec![tone(440.0, 1000), tone(440.0, 1000)];
+        rep(&mut p);
+        assert_eq!((p[0].len(), p[1].len()), (3000, 3000));
+        assert!(FxDialog::Repeat(3).resizes());
+        let g = FxDialog::Generate(Gen::Clicks {
+            bpm: 120.0,
+            beats: 4,
+            bars: 2,
+        });
+        assert_eq!(g.generated(48_000).unwrap().len(), 24_000 * 8);
+        assert!(FxDialog::Pitch(1.0).generated(48_000).is_none());
+        for g in [
+            Gen::Tone {
+                hz: 440.0,
+                secs: 0.2,
+                amp: 0.5,
+            },
+            Gen::Noise {
+                kind: NoiseKind::Pink,
+                secs: 0.2,
+                amp: 0.5,
+            },
+        ] {
+            assert!(!FxDialog::Generate(g).generated(48_000).unwrap().is_empty());
+        }
     }
 
     #[test]

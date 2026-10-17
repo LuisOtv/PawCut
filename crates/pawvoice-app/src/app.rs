@@ -1982,6 +1982,34 @@ impl VoiceApp {
                     ui.close();
                     self.ed.add_label_track();
                 }
+                ui.menu_button("Gerar", |ui| {
+                    use crate::fx_dialogs::{FxDialog, Gen};
+                    use paw_audio::fx::NoiseKind;
+                    if ui.button("Tom…").clicked() {
+                        ui.close();
+                        self.dialog = Some(Dialog::Fx(FxDialog::Generate(Gen::Tone {
+                            hz: 440.0,
+                            secs: 5.0,
+                            amp: 0.5,
+                        })));
+                    }
+                    if ui.button("Ruído…").clicked() {
+                        ui.close();
+                        self.dialog = Some(Dialog::Fx(FxDialog::Generate(Gen::Noise {
+                            kind: NoiseKind::Pink,
+                            secs: 5.0,
+                            amp: 0.3,
+                        })));
+                    }
+                    if ui.button("Metrônomo…").clicked() {
+                        ui.close();
+                        self.dialog = Some(Dialog::Fx(FxDialog::Generate(Gen::Clicks {
+                            bpm: 120.0,
+                            beats: 4,
+                            bars: 8,
+                        })));
+                    }
+                });
                 if item(
                     ui,
                     "Apagar faixas selecionadas",
@@ -2141,9 +2169,29 @@ impl VoiceApp {
                 ui.close();
                 self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::notch()));
             }
+            if ui.button("Apagar faixa de frequências…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::SpectralDelete {
+                    lo: 2000.0,
+                    hi: 4000.0,
+                    amount: 40.0,
+                }));
+            }
             if ui.button("Reparar áudio estourado…").clicked() {
                 ui.close();
                 self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Declip(0.97)));
+            }
+            if ui.button("Fade ajustável…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Fade {
+                    start: 0.0,
+                    end: -40.0,
+                    curve: 0.0,
+                }));
+            }
+            if ui.button("Tirar voz do centro (karaokê)…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::RemoveCenter));
             }
             ui.separator();
             ui.label(RichText::new("Espaço e modulação").weak().small());
@@ -2165,6 +2213,10 @@ impl VoiceApp {
             }
             ui.separator();
             ui.label(RichText::new("Tempo e tom").weak().small());
+            if ui.button("Repetir…").clicked() {
+                ui.close();
+                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Repeat(2)));
+            }
             if ui.button("Velocidade…").clicked() {
                 ui.close();
                 self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Speed(1.25)));
@@ -4482,8 +4534,15 @@ impl VoiceApp {
                 effects::each(p, |s| dsp::de_ess(s, RATE, 5500.0, threshold, reduction))
             }),
             Some(Dialog::Fx(d)) => {
-                let (label, job) = d.job(RATE);
-                self.apply_effect_ex(label, d.resizes(), job);
+                if let Some(samples) = d.generated(RATE) {
+                    self.stop();
+                    let at = self.cursor.min(self.ed.session().len());
+                    let id = self.ed.add_track(vec![samples], at, Some(d.title().into()));
+                    self.selected = vec![id];
+                } else {
+                    let (label, job) = d.job(RATE);
+                    self.apply_effect_ex(label, d.resizes(), job);
+                }
             }
             Some(Dialog::Limiter(db)) => self.apply_effect("Limitador", move |p| {
                 effects::each(p, |s| dsp::limit(s, RATE, db))
