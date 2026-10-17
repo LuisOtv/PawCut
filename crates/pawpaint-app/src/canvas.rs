@@ -312,11 +312,11 @@ pub fn canvas_panel(st: &mut State, ui: &mut egui::Ui) {
         (cw, ch),
     );
     let identity = xf.identity;
-    let origin = xf.to_screen(0.0, 0.0);
+    let origin = xf.project(0.0, 0.0);
     let size = vec2(cw, ch) * zoom;
     let canvas = Rect::from_min_size(origin, size);
-    let to_doc = move |p: Pos2| xf.to_doc(p);
-    let to_screen = move |x: f32, y: f32| xf.to_screen(x, y);
+    let to_doc = move |p: Pos2| xf.unproject(p);
+    let to_screen = move |x: f32, y: f32| xf.project(x, y);
     let clip = ui.painter().with_clip_rect(area);
     // os quatro cantos da imagem na janela (girada ou não)
     let corners = [
@@ -1479,7 +1479,7 @@ impl ViewXf {
         self.center
     }
 
-    pub fn to_screen(&self, x: f32, y: f32) -> Pos2 {
+    pub fn project(&self, x: f32, y: f32) -> Pos2 {
         if self.identity {
             return self.center - self.half * self.zoom + vec2(x, y) * self.zoom;
         }
@@ -1494,7 +1494,7 @@ impl ViewXf {
         self.center + r * self.zoom
     }
 
-    pub fn to_doc(&self, p: Pos2) -> Pos2 {
+    pub fn unproject(&self, p: Pos2) -> Pos2 {
         if self.identity {
             return ((p - (self.center - self.half * self.zoom)) / self.zoom).to_pos2();
         }

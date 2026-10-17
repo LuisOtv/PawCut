@@ -2671,7 +2671,7 @@ mod tests {
         let to_screen = |h: &Harness, x: f32, y: f32| {
             let d = h.app.st.doc().unwrap();
             canvas::ViewXf::new(d.view_center, d.zoom, d.view_rot, d.view_flip, (300.0, 200.0))
-                .to_screen(x, y)
+                .project(x, y)
         };
         // Girada 90°: um traço na janela, da esquerda para a direita, vira vertical na imagem
         // (a imagem aparece deitada).
@@ -2690,7 +2690,7 @@ mod tests {
         // o ponto de tela do centro da imagem cai no centro dela
         let d = h.app.st.doc().unwrap();
         let back = canvas::ViewXf::new(d.view_center, d.zoom, d.view_rot, d.view_flip, (300.0, 200.0));
-        let p = back.to_doc(to_screen(&h, 77.0, 33.0));
+        let p = back.unproject(to_screen(&h, 77.0, 33.0));
         assert!((p.x - 77.0).abs() < 1e-3 && (p.y - 33.0).abs() < 1e-3);
 
         // Espelhada: um traço que vai até o lado direito da janela pinta o lado esquerdo.
