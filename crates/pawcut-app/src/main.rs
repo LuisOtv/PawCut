@@ -23,7 +23,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("PawCut")
             .with_app_id("pawcut")
-            .with_inner_size([1600.0, 950.0])
+            .with_inner_size(paw_ui::initial_window_size([1600.0, 950.0]))
             .with_min_inner_size([960.0, 600.0])
             .with_drag_and_drop(true),
         // O winit só implementa "soltar arquivos na janela" no X11: no Wayland o app roda via

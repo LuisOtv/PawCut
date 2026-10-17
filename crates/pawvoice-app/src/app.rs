@@ -811,11 +811,11 @@ impl VoiceApp {
     /// faria o resultado entrar sobre áudio velho).
     fn effect_overlay(&mut self, ctx: &egui::Context) {
         let Some(job) = &self.effect else { return };
-        egui::Modal::new(egui::Id::new("effect-running")).show(ctx, |ui| {
-            ui.set_width(280.0);
+        let title = job.label.to_string();
+        paw_ui::dialog::modal(ctx, "effect-running", &title, 300.0, |ui| {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(RichText::new(format!("Aplicando {}…", job.label)).strong());
+                ui.label("Aplicando…");
             });
             ui.label(
                 RichText::new(format!("{:.0} s", job.started.elapsed().as_secs_f32()))
@@ -4188,156 +4188,169 @@ impl VoiceApp {
             matches!(dialog, Dialog::Recover(_)),
         );
         let ready = !matches!(dialog, Dialog::NoiseReduction { .. }) || noise_info.is_some();
-        egui::Window::new(title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                // Largura fixa para o valor de cada slider: ele não cresce nem encolhe com os dígitos.
-                ui.spacing_mut().interact_size.x = theme::NUM_W + 12.0;
-                match dialog {
-                    Dialog::Gain(db) => {
-                        ui.add(
-                            paw_ui::Slider::new(db, -24.0..=24.0)
-                                .text("amplificação")
-                                .suffix(" dB"),
-                        );
-                    }
-                    Dialog::Gate {
-                        threshold,
-                        reduction,
-                    } => {
-                        ui.label(
-                            RichText::new(
-                                "Abaixa o som onde ele fica abaixo do limiar (as pausas).",
-                            )
+        let body = |ui: &mut egui::Ui| {
+            // Largura fixa para o valor de cada slider: ele não cresce nem encolhe com os dígitos.
+            ui.spacing_mut().interact_size.x = theme::NUM_W + 12.0;
+            match dialog {
+                Dialog::Gain(db) => {
+                    ui.add(
+                        paw_ui::Slider::new(db, -24.0..=24.0)
+                            .text("amplificação")
+                            .suffix(" dB"),
+                    );
+                }
+                Dialog::Gate {
+                    threshold,
+                    reduction,
+                } => {
+                    ui.label(
+                        RichText::new("Abaixa o som onde ele fica abaixo do limiar (as pausas).")
                             .weak(),
-                        );
-                        ui.add(
-                            paw_ui::Slider::new(threshold, -80.0..=-10.0)
-                                .text("limiar")
-                                .suffix(" dB"),
-                        );
-                        ui.add(
-                            paw_ui::Slider::new(reduction, 3.0..=40.0)
-                                .text("redução")
-                                .suffix(" dB"),
-                        );
-                    }
-                    Dialog::Compressor(c) => {
-                        ui.label(RichText::new("Deixa a voz mais uniforme.").weak());
-                        ui.horizontal(|ui| {
-                            for k in [Compression::Light, Compression::Medium, Compression::Strong]
-                            {
-                                ui.selectable_value(c, k, k.label());
-                            }
-                        });
-                    }
-                    Dialog::Silences { threshold, min } => {
-                        ui.label(
-                            RichText::new("Corta as pausas longas (sobra um respiro de 0,12 s).")
-                                .weak(),
-                        );
-                        ui.add(
-                            paw_ui::Slider::new(threshold, -70.0..=-20.0)
-                                .text("abaixo de")
-                                .suffix(" dB"),
-                        );
-                        ui.add(
-                            paw_ui::Slider::new(min, 0.2..=3.0)
-                                .text("por pelo menos")
-                                .suffix(" s"),
-                        );
-                    }
-                    Dialog::NoiseReduction {
-                        reduction,
-                        sensitivity,
-                    } => {
-                        ui.label(
+                    );
+                    ui.add(
+                        paw_ui::Slider::new(threshold, -80.0..=-10.0)
+                            .text("limiar")
+                            .suffix(" dB"),
+                    );
+                    ui.add(
+                        paw_ui::Slider::new(reduction, 3.0..=40.0)
+                            .text("redução")
+                            .suffix(" dB"),
+                    );
+                }
+                Dialog::Compressor(c) => {
+                    ui.label(RichText::new("Deixa a voz mais uniforme.").weak());
+                    ui.horizontal(|ui| {
+                        for k in [Compression::Light, Compression::Medium, Compression::Strong] {
+                            ui.selectable_value(c, k, k.label());
+                        }
+                    });
+                }
+                Dialog::Silences { threshold, min } => {
+                    ui.label(
+                        RichText::new("Corta as pausas longas (sobra um respiro de 0,12 s).")
+                            .weak(),
+                    );
+                    ui.add(
+                        paw_ui::Slider::new(threshold, -70.0..=-20.0)
+                            .text("abaixo de")
+                            .suffix(" dB"),
+                    );
+                    ui.add(
+                        paw_ui::Slider::new(min, 0.2..=3.0)
+                            .text("por pelo menos")
+                            .suffix(" s"),
+                    );
+                }
+                Dialog::NoiseReduction {
+                    reduction,
+                    sensitivity,
+                } => {
+                    ui.label(
                             RichText::new(
                                 "Passo 1: selecione um trecho só de ruído (sem fala) e clique em Obter perfil.",
                             )
                             .weak(),
                         );
-                        ui.horizontal(|ui| {
-                            if ui.button("Obter perfil de ruído").clicked() {
-                                capture = true;
-                            }
-                            ui.label(match noise_info {
-                                Some(s) => RichText::new(format!("perfil de {s:.1} s guardado"))
-                                    .color(Color32::from_rgb(120, 220, 120)),
-                                None => RichText::new("sem perfil ainda").weak(),
-                            });
+                    ui.horizontal(|ui| {
+                        if ui.button("Obter perfil de ruído").clicked() {
+                            capture = true;
+                        }
+                        ui.label(match noise_info {
+                            Some(s) => RichText::new(format!("perfil de {s:.1} s guardado"))
+                                .color(Color32::from_rgb(120, 220, 120)),
+                            None => RichText::new("sem perfil ainda").weak(),
                         });
-                        ui.separator();
-                        ui.label(
-                            RichText::new(
-                                "Passo 2: selecione o que quer limpar (ou nada, para tudo) e aplique.",
-                            )
-                            .weak(),
-                        );
-                        ui.add(
-                            paw_ui::Slider::new(reduction, 3.0..=40.0)
-                                .text("redução")
-                                .suffix(" dB"),
-                        );
-                        ui.add(
-                            paw_ui::Slider::new(sensitivity, 0.0..=24.0)
-                                .text("sensibilidade")
-                                .suffix(" dB"),
-                        );
-                    }
-                    Dialog::BassTreble { bass, treble } => {
-                        ui.add(
-                            paw_ui::Slider::new(bass, -15.0..=15.0)
-                                .text("graves (250 Hz)")
-                                .suffix(" dB"),
-                        );
-                        ui.add(
-                            paw_ui::Slider::new(treble, -15.0..=15.0)
-                                .text("agudos (4 kHz)")
-                                .suffix(" dB"),
-                        );
-                    }
-                    Dialog::Limiter(db) => {
-                        ui.label(RichText::new("Nada passa deste nível.").weak());
-                        ui.add(paw_ui::Slider::new(db, -12.0..=0.0).text("teto").suffix(" dB"));
-                    }
-                    Dialog::DeEss { threshold, reduction } => {
-                        ui.label(RichText::new("Abaixa só os agudos quando o S estoura.").weak());
-                        ui.add(paw_ui::Slider::new(threshold, -50.0..=-15.0).text("limiar").suffix(" dB"));
-                        ui.add(paw_ui::Slider::new(reduction, 3.0..=24.0).text("redução máxima").suffix(" dB"));
-                    }
-                    Dialog::ConfirmClose | Dialog::ConfirmDiscard(_) => {
-                        ui.label("O projeto tem mudanças que não foram salvas.");
-                    }
-                    Dialog::Recover(files) => {
-                        ui.label(format!(
-                            "{} gravação(ões) não terminou(aram) direito da última vez.",
-                            files.len()
-                        ));
-                        ui.label(RichText::new("Dá para recuperar como faixas.").weak());
-                    }
+                    });
+                    ui.separator();
+                    ui.label(
+                        RichText::new(
+                            "Passo 2: selecione o que quer limpar (ou nada, para tudo) e aplique.",
+                        )
+                        .weak(),
+                    );
+                    ui.add(
+                        paw_ui::Slider::new(reduction, 3.0..=40.0)
+                            .text("redução")
+                            .suffix(" dB"),
+                    );
+                    ui.add(
+                        paw_ui::Slider::new(sensitivity, 0.0..=24.0)
+                            .text("sensibilidade")
+                            .suffix(" dB"),
+                    );
                 }
-                paw_ui::theme::dialog_actions(ui, |ui| {
-                    let (ok, cancel) = match dialog {
-                        Dialog::ConfirmClose => ("Sair sem salvar", "Cancelar"),
-                        Dialog::ConfirmDiscard(_) => ("Descartar e continuar", "Cancelar"),
-                        Dialog::Recover(_) => ("Recuperar", "Descartar"),
-                        _ => ("Aplicar", "Cancelar"),
-                    };
-                    if ui
-                        .add_enabled_ui(ready, |ui| paw_ui::theme::primary_button(ui, ok))
-                        .inner
-                        .clicked()
-                    {
-                        apply = true;
-                    }
-                    if ui.button(cancel).clicked() {
-                        close = true;
-                    }
-                });
+                Dialog::BassTreble { bass, treble } => {
+                    ui.add(
+                        paw_ui::Slider::new(bass, -15.0..=15.0)
+                            .text("graves (250 Hz)")
+                            .suffix(" dB"),
+                    );
+                    ui.add(
+                        paw_ui::Slider::new(treble, -15.0..=15.0)
+                            .text("agudos (4 kHz)")
+                            .suffix(" dB"),
+                    );
+                }
+                Dialog::Limiter(db) => {
+                    ui.label(RichText::new("Nada passa deste nível.").weak());
+                    ui.add(
+                        paw_ui::Slider::new(db, -12.0..=0.0)
+                            .text("teto")
+                            .suffix(" dB"),
+                    );
+                }
+                Dialog::DeEss {
+                    threshold,
+                    reduction,
+                } => {
+                    ui.label(RichText::new("Abaixa só os agudos quando o S estoura.").weak());
+                    ui.add(
+                        paw_ui::Slider::new(threshold, -50.0..=-15.0)
+                            .text("limiar")
+                            .suffix(" dB"),
+                    );
+                    ui.add(
+                        paw_ui::Slider::new(reduction, 3.0..=24.0)
+                            .text("redução máxima")
+                            .suffix(" dB"),
+                    );
+                }
+                Dialog::ConfirmClose | Dialog::ConfirmDiscard(_) => {
+                    ui.label("O projeto tem mudanças que não foram salvas.");
+                }
+                Dialog::Recover(files) => {
+                    ui.label(format!(
+                        "{} gravação(ões) não terminou(aram) direito da última vez.",
+                        files.len()
+                    ));
+                    ui.label(RichText::new("Dá para recuperar como faixas.").weak());
+                }
+            }
+            paw_ui::theme::dialog_actions(ui, |ui| {
+                let (ok, cancel) = match dialog {
+                    Dialog::ConfirmClose => ("Sair sem salvar", "Cancelar"),
+                    Dialog::ConfirmDiscard(_) => ("Descartar e continuar", "Cancelar"),
+                    Dialog::Recover(_) => ("Recuperar", "Descartar"),
+                    _ => ("Aplicar", "Cancelar"),
+                };
+                if ui
+                    .add_enabled_ui(ready, |ui| paw_ui::theme::primary_button(ui, ok))
+                    .inner
+                    .clicked()
+                {
+                    apply = true;
+                }
+                if ui.button(cancel).clicked() {
+                    close = true;
+                }
             });
+        };
+        if is_confirm || is_recover {
+            paw_ui::dialog::modal(ctx, "voice", title, 380.0, body);
+        } else {
+            paw_ui::dialog::window(ctx, "voice", title, 360.0, body);
+        }
         // Esc cancela e Enter aplica, como em qualquer diálogo. Esc não descarta a recuperação
         // (apagaria as gravações) e Enter não confirma "Sair sem salvar" nem a recuperação.
         if !ctx.text_edit_focused() {

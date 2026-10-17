@@ -13,7 +13,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("PawVoice")
             .with_app_id("pawvoice")
-            .with_inner_size([1360.0, 820.0])
+            .with_inner_size(paw_ui::initial_window_size([1360.0, 820.0]))
             .with_min_inner_size([900.0, 560.0])
             .with_drag_and_drop(true),
         // Igual ao PawCut: X11 para soltar arquivos na janela (PAW_WAYLAND=1 usa Wayland).

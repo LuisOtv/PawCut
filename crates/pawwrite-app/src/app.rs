@@ -1205,93 +1205,103 @@ impl WriteApp {
         };
         let mut keep = true;
         let mut action: Option<Action> = None;
-        egui::Window::new(title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
-            .show(ctx, |ui| match &dialog {
-                Dialog::Unsaved(then) => {
-                    let then = *then;
-                    ui.label("O roteiro tem mudanças que não foram salvas.");
-                    paw_ui::theme::dialog_actions(ui, |ui| {
-                        if paw_ui::theme::primary_button(ui, "Salvar").clicked() {
-                            keep = false;
-                            action = Some(Box::new(move |me| {
-                                if me.path.is_some() {
-                                    me.save();
-                                    me.run(then);
-                                } else {
-                                    me.after_save = Some(then);
-                                    me.save();
-                                }
-                            }));
-                        }
-                        if ui.button("Descartar").clicked() {
-                            keep = false;
-                            action = Some(Box::new(move |me| me.run(then)));
-                        }
-                        if ui.button("Cancelar").clicked() {
-                            keep = false;
-                        }
-                    });
-                }
-                Dialog::UnsavedDrop(path) => {
-                    ui.label("O roteiro tem mudanças que não foram salvas.");
-                    ui.label(
-                        RichText::new(format!(
-                            "Abrir {} descarta o que está na tela.",
-                            path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())
-                        ))
-                        .weak(),
-                    );
-                    paw_ui::theme::dialog_actions(ui, |ui| {
-                        if paw_ui::theme::primary_button(ui, "Descartar e abrir").clicked() {
-                            keep = false;
-                            let path = path.clone();
-                            action = Some(Box::new(move |me| me.open_path(&path)));
-                        }
-                        if ui.button("Cancelar").clicked() {
-                            keep = false;
-                        }
-                    });
-                }
-                Dialog::Recover { text, path } => {
-                    ui.label("Da última vez o app fechou antes de você salvar.");
-                    ui.label(RichText::new(format!("{} palavras de texto", core::count_words(text))).weak());
-                    paw_ui::theme::dialog_actions(ui, |ui| {
-                        if paw_ui::theme::primary_button(ui, "Recuperar").clicked() {
-                            keep = false;
-                            let (text, path) = (text.clone(), path.clone());
-                            action = Some(Box::new(move |me| {
-                                me.text = text;
-                                me.path = path;
-                                me.saved = String::new();
-                                me.say("Texto recuperado. Salve o roteiro (Ctrl+S).");
-                            }));
-                        }
-                        if ui.button("Descartar").clicked() {
-                            keep = false;
-                            action = Some(Box::new(|me| me.clear_autosave()));
-                        }
-                    });
-                }
-                Dialog::Syntax => {
-                    ui.label(RichText::new("# Título").strong().color(theme::ACCENT));
-                    ui.label("Abre uma seção. Ela aparece na estrutura, com o tempo de fala.");
-                    ui.add_space(6.0);
-                    ui.label(RichText::new("[B-roll: mesa de trabalho]").strong().color(CUE_COLOR));
-                    ui.label("Nota de edição. Não conta no tempo e não vai para o teleprompter.");
-                    ui.add_space(6.0);
-                    ui.label(RichText::new("// lembrete").strong().color(theme::TEXT_DIM));
-                    ui.label("Comentário só seu: a linha inteira fica de fora.");
-                    ui.add_space(6.0);
-                    ui.label("O resto é a fala. Arquivo → Abrir no PawVoice manda só a fala para o teleprompter.");
-                    ui.add_space(8.0);
-                    if ui.button("Fechar").clicked() {
+        let blocking = !matches!(dialog, Dialog::Syntax);
+        let body = |ui: &mut egui::Ui| match &dialog {
+            Dialog::Unsaved(then) => {
+                let then = *then;
+                ui.label("O roteiro tem mudanças que não foram salvas.");
+                paw_ui::theme::dialog_actions(ui, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Salvar").clicked() {
+                        keep = false;
+                        action = Some(Box::new(move |me| {
+                            if me.path.is_some() {
+                                me.save();
+                                me.run(then);
+                            } else {
+                                me.after_save = Some(then);
+                                me.save();
+                            }
+                        }));
+                    }
+                    if ui.button("Descartar").clicked() {
+                        keep = false;
+                        action = Some(Box::new(move |me| me.run(then)));
+                    }
+                    if ui.button("Cancelar").clicked() {
                         keep = false;
                     }
-                }
-            });
+                });
+            }
+            Dialog::UnsavedDrop(path) => {
+                ui.label("O roteiro tem mudanças que não foram salvas.");
+                ui.label(
+                    RichText::new(format!(
+                        "Abrir {} descarta o que está na tela.",
+                        path.file_name()
+                            .map_or(String::new(), |n| n.to_string_lossy().into_owned())
+                    ))
+                    .weak(),
+                );
+                paw_ui::theme::dialog_actions(ui, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Descartar e abrir").clicked() {
+                        keep = false;
+                        let path = path.clone();
+                        action = Some(Box::new(move |me| me.open_path(&path)));
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        keep = false;
+                    }
+                });
+            }
+            Dialog::Recover { text, path } => {
+                ui.label("Da última vez o app fechou antes de você salvar.");
+                ui.label(
+                    RichText::new(format!("{} palavras de texto", core::count_words(text))).weak(),
+                );
+                paw_ui::theme::dialog_actions(ui, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Recuperar").clicked() {
+                        keep = false;
+                        let (text, path) = (text.clone(), path.clone());
+                        action = Some(Box::new(move |me| {
+                            me.text = text;
+                            me.path = path;
+                            me.saved = String::new();
+                            me.say("Texto recuperado. Salve o roteiro (Ctrl+S).");
+                        }));
+                    }
+                    if ui.button("Descartar").clicked() {
+                        keep = false;
+                        action = Some(Box::new(|me| me.clear_autosave()));
+                    }
+                });
+            }
+            Dialog::Syntax => {
+                ui.label(RichText::new("# Título").strong().color(theme::ACCENT));
+                ui.label("Abre uma seção. Ela aparece na estrutura, com o tempo de fala.");
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("[B-roll: mesa de trabalho]")
+                        .strong()
+                        .color(CUE_COLOR),
+                );
+                ui.label("Nota de edição. Não conta no tempo e não vai para o teleprompter.");
+                ui.add_space(6.0);
+                ui.label(RichText::new("// lembrete").strong().color(theme::TEXT_DIM));
+                ui.label("Comentário só seu: a linha inteira fica de fora.");
+                ui.add_space(6.0);
+                ui.label("O resto é a fala. Arquivo → Abrir no PawVoice manda só a fala para o teleprompter.");
+                paw_ui::theme::dialog_actions(ui, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Fechar").clicked() {
+                        keep = false;
+                    }
+                });
+            }
+        };
+        if blocking {
+            paw_ui::dialog::modal(ctx, "write", title, 380.0, body);
+        } else {
+            paw_ui::dialog::window(ctx, "write", title, 420.0, body);
+        }
         // Esc cancela. Na recuperação não: ali a saída é Recuperar ou Descartar (que apaga o texto).
         if !matches!(dialog, Dialog::Recover { .. })
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
