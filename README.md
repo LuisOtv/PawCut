@@ -64,6 +64,14 @@ Gravador e editor de voz com a interface e o jeito de usar do Audacity.
   - Arquivo → *Exportar para vídeo* já ajusta o loudness para o alvo (−14 LUFS no YouTube).
   - efeitos em trechos longos rodam em segundo plano (aparece "Aplicando…"), a janela não congela;
   - nos diálogos de efeito, Esc cancela e Enter aplica.
+- **Mais efeitos:** **equalizador** paramétrico com curva e presets (voz clara, rádio, telefone, zumbido 60 Hz),
+  notch, reverb, tremolo, phaser, wah-wah, **velocidade**, **tempo** (muda a duração sem mudar a voz) e **tom**
+  (sem mudar a duração), reparar áudio estourado, apagar uma faixa de frequências, fade ajustável, repetir, tirar a
+  voz do centro (karaokê) e **auto-duck** (a música abaixa quando a voz fala).
+- **Análise:** rotular as falas (um rótulo por trecho com som), marcar onde o áudio estourou e **transcrever em
+  rótulos** (precisa do `whisper` instalado: `pip install openai-whisper` ou o whisper.cpp com um modelo ggml).
+- **Gerar:** Faixas → Gerar tom, ruído (branco, rosa, marrom) ou metrônomo.
+- **Região de loop:** Shift + arrastar na régua (ou Transporte → Região de loop) e ligar o loop toca só ela.
 - **Roteiro e teleprompter** (Ver → Roteiro): a letra grande rola sozinha enquanto você grava.
 - **Arquivos:**
   - o projeto fica em `nome.pawvoice`, com os áudios em `nome.pawvoice-audio/` (WAV, mono ou estéreo);
@@ -129,7 +137,21 @@ Editor de imagens no estilo do Krita: pintura, camadas, seleções, filtros e do
 - **Janelas pequenas:** a barra do pincel recolhe o excesso num menu "⋯", os dockers rolam e os diálogos mantêm a
   largura. Nos diálogos, Esc cancela e Enter confirma.
 
-Ainda não tem: mesa digitalizadora com pressão, camadas vetoriais e histograma.
+- **Dinâmica do pincel:** o tamanho e o fluxo mudam com a **pressão** da caneta (quando o sistema entrega), a
+  **velocidade**, a distância (o traço some aos poucos) ou sorteio, e o ângulo pode seguir o traço. Vêm pincéis
+  prontos (Caneta tinteiro, Pincel de pressão, Traço que some, Caligrafia, Spray). Shift+clique traça uma reta
+  desde onde o último traço terminou.
+- **Camadas de ajuste:** brilho/contraste, matiz/saturação, níveis, curvas, limiar, posterizar, preto e branco e
+  inverter agem em tudo que está embaixo sem tocar nos pixels; a opacidade e a máscara da camada limitam onde.
+  Clique duas vezes para editar. Camada → Nova camada de ajuste.
+- **Carimbo de clone (H):** Alt+clique escolhe de onde copiar e a cruz mostra o que está sendo copiado.
+- **Visão:** girar (Ctrl+] e Ctrl+[, ou Shift+Espaço e arrastar), zerar (5) e espelhar (M) sem mexer na imagem;
+  modo de repetição/mosaico (Shift+W) para texturas que emendam; simetria radial (Opções da ferramenta).
+- **Painel Referência:** uma imagem ao lado da tela (fora do documento) em que dá para clicar e pegar cores.
+- **Dockers largos de propósito:** a coluna da direita e a caixa de ferramentas nascem com largura fixa em pixels,
+  e títulos de aba que não cabem viram `Ferram…` (sem barra de rolagem).
+
+Ainda não tem: camadas vetoriais, histograma e assistentes de desenho (régua, perspectiva).
 
 ---
 
@@ -215,6 +237,21 @@ e libclang. Se faltar o `libclang-dev`, o `.cargo/config.toml` aponta o bindgen 
   - exportar só o trecho In/Out;
   - salvar o frame atual em PNG.
 - **Mídia otimizada (proxy):** clique direito na mídia, para vídeos 4K de celular rodarem lisos no preview. A exportação usa sempre o original.
+- **Áudio por clipe:** na aba Áudio do Inspector, *Efeitos de áudio* liga filtro de graves, noise gate, notch,
+  de-esser, equalizador, compressor e reverb no clipe (o botão *Limpar voz* liga os quatro principais). Rodam no
+  áudio inteiro do clipe, tanto na prévia quanto na exportação.
+- **Música abaixa na voz** (Inspector → Música abaixa na voz): cria keyframes de volume na música quando os outros
+  clipes de áudio falam, e dá para ajustar à mão depois.
+- **Alinhar pelo áudio** (Ctrl+Shift+J): selecione a câmera primeiro e o áudio do microfone depois; ele acha o mesmo
+  som nos dois e move o segundo até casar (com o vídeo ligado junto).
+- **Legendas automáticas** (Ctrl+Shift+T, precisa do `whisper` instalado): transcreve o clipe selecionado e cria a
+  faixa de legendas na timeline.
+- **Rampa de velocidade** (Inspector → Rampa): acelera ou freia aos poucos; o clipe vira pedaços e o resto da faixa
+  acompanha. **Panorâmica** (Inspector → Panorâmica): preenche o quadro e desliza de um lado ao outro (vertical 9:16).
+- **Presets de aparência:** salve a cor, o volume, o chroma key e o fundo desfocado de um clipe com um nome e aplique
+  em outros (ficam em `presets.json`).
+- **Slideshow** (menu Timeline): põe as imagens do Media Pool em ordem com dissolve. Em Deliver, *Um arquivo por
+  marcador* exporta cada pedaço entre marcadores num arquivo numerado (capítulos, Shorts).
 - **Configurações do projeto:** mude para vertical 9:16, quadrado ou 4K. Os projetos recentes ficam no menu Arquivo e na tela vazia do Media Pool.
 
 ## Onde ficam os arquivos
