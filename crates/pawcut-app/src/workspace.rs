@@ -154,6 +154,8 @@ pub struct Workspace {
     pub silence_threshold: f32,
     pub silence_min: f64,
     pub duck_threshold: f32,
+    /// Foco inicial e final da panorâmica (−100 % borda esquerda … 100 % borda direita).
+    pub pan_focus: (f32, f32),
     pub duck_db: f32,
     /// Marcador aberto para edição (duplo clique na régua).
     pub editing_marker: Option<Frame>,
@@ -250,6 +252,7 @@ impl Workspace {
             silence_threshold: -40.0,
             silence_min: 0.5,
             duck_threshold: -35.0,
+            pan_focus: (-60.0, 60.0),
             duck_db: 12.0,
             hover_preview: None,
             hover_preview_next: None,

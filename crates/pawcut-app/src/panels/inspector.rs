@@ -145,6 +145,57 @@ fn fit_fill_scales(p: &Project, clip: &Clip) -> Option<(f32, f32)> {
     Some(((pw / bw).min(ph / bh), (pw / bw).max(ph / bh)))
 }
 
+/// Preenche o quadro com o clipe e desliza do foco `a` ao foco `b` (−1 borda esquerda da
+/// imagem, 1 borda direita) durante o clipe, com keyframes de posição X.
+pub(crate) fn pan_clip(st: &mut crate::state::AppState, p: &Project, clip: &Clip, a: f32, b: f32) {
+    let Some((_, cover)) = fit_fill_scales(p, clip) else {
+        return;
+    };
+    let ClipSource::Media(m) = &clip.source else {
+        return;
+    };
+    let Some(m) = p.media(*m) else { return };
+    let (pw, ph) = (p.settings.width as f32, p.settings.height as f32);
+    let (w, h) = (m.info.width.max(1) as f32, m.info.height.max(1) as f32);
+    let base = (pw / w).min(ph / h);
+    // largura do clipe já com o zoom de "preencher" e quanto ela passa do quadro
+    let overflow = ((w * base * cover - pw) / 2.0).max(0.0);
+    let id = clip.id;
+    st.apply_coalescing(
+        Edit::SetClip {
+            clip: id,
+            change: ClipChange::Transform(Transform {
+                x: -a.clamp(-1.0, 1.0) * overflow,
+                y: 0.0,
+                scale: cover,
+                ..clip.transform
+            }),
+        },
+        "pan",
+    );
+    st.apply_coalescing(
+        Edit::ClearKeyframes {
+            clip: id,
+            param: Param::X,
+        },
+        "pan",
+    );
+    if (a - b).abs() > 1e-3 && overflow > 0.0 {
+        let end = clip.source_start + clip.duration as f64 * clip.speed;
+        for (at, focus) in [(clip.source_start, a), (end - clip.speed, b)] {
+            st.apply_coalescing(
+                Edit::SetKeyframe {
+                    clip: id,
+                    param: Param::X,
+                    at,
+                    value: Some(-focus.clamp(-1.0, 1.0) * overflow),
+                },
+                "pan",
+            );
+        }
+    }
+}
+
 /// Quanto o valor muda por pixel arrastado, na unidade mostrada (% , px, °, dB). O valor
 /// antigo multiplicava pelo fator de escala, e Zoom/Opacidade (em %) saltavam 50 % por pixel.
 fn drag_speed(param: Param) -> f64 {
@@ -714,6 +765,50 @@ impl Workspace {
                                                 }),
                                             })
                                         });
+                                        self.st.editor.end_coalescing();
+                                    }
+                                },
+                                |_| {},
+                            );
+                        }
+                        if fit_fill_scales(&project, &first).is_some() {
+                            row(
+                                ui,
+                                "Panorâmica",
+                                |ui| {
+                                    ui.add(
+                                        DragValue::new(&mut self.pan_focus.0)
+                                            .range(-100.0..=100.0)
+                                            .speed(0.5)
+                                            .suffix(" %"),
+                                    )
+                                    .on_hover_text("Onde a imagem está no começo do clipe");
+                                    ui.label("→");
+                                    ui.add(
+                                        DragValue::new(&mut self.pan_focus.1)
+                                            .range(-100.0..=100.0)
+                                            .speed(0.5)
+                                            .suffix(" %"),
+                                    )
+                                    .on_hover_text("Onde a imagem está no fim do clipe");
+                                },
+                                |_| {},
+                            );
+                            row(
+                                ui,
+                                "",
+                                |ui| {
+                                    if ui
+                                        .button("Aplicar panorâmica")
+                                        .on_hover_text(
+                                            "Preenche o quadro e desliza de um lado ao outro durante o clipe (bom para vertical 9:16)",
+                                        )
+                                        .clicked()
+                                    {
+                                        let (a, b) = self.pan_focus;
+                                        for c in &clips {
+                                            pan_clip(&mut self.st, &project, c, a / 100.0, b / 100.0);
+                                        }
                                         self.st.editor.end_coalescing();
                                     }
                                 },
@@ -1385,5 +1480,50 @@ impl Workspace {
                 &format!("insp-{id:?}-text"),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pan_tests {
+    use super::*;
+    use pawcut_core::*;
+    use crate::state::AppState;
+
+    #[test]
+    fn pan_clip_fills_the_vertical_frame_and_slides_across_the_width() {
+        let mut st = AppState::new(Project::new(ProjectSettings::default()));
+        let media = st
+            .apply(Edit::AddMedia(MediaInfo {
+                path: "/videos/a.mp4".into(),
+                kind: MediaKind::Video { has_audio: false },
+                duration: Some(300),
+                width: 1920,
+                height: 1080,
+            }))
+            .unwrap()
+            .media
+            .unwrap();
+        st.apply(Edit::SetResolution {
+            width: 1080,
+            height: 1920,
+        })
+        .unwrap();
+        st.drop_media(media, TrackKind::Video, 0, 0);
+        let p = st.project().clone();
+        let clip = p.video_tracks[0].clips[0].clone();
+        pan_clip(&mut st, &p, &clip, -1.0, 1.0);
+        let c = st.project().clip(clip.id).unwrap().clone();
+        let (_, cover) = fit_fill_scales(&p, &clip).unwrap();
+        assert!((c.transform.scale - cover).abs() < 1e-4);
+        // 1920x1080 cobrindo 1080x1920: a imagem tem ~3413 px de largura, sobram ~1166 px de cada lado
+        let first = c.param(Param::X, 0);
+        let last = c.param(Param::X, c.duration - 1);
+        assert!(first > 1000.0 && last < -1000.0, "{first} → {last}");
+        assert!((first + last).abs() < 1.0, "simétrico");
+        // foco igual no começo e no fim: fica parado, sem keyframes
+        pan_clip(&mut st, &p, &clip, 0.5, 0.5);
+        let c = st.project().clip(clip.id).unwrap();
+        assert!(c.keyframes.get(&Param::X).is_none_or(|k| k.is_empty()));
+        assert!(c.transform.x < -500.0);
     }
 }
