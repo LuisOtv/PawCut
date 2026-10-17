@@ -305,6 +305,9 @@ pub struct DocView {
     pub histogram: Option<(u64, std::time::Instant, pawpaint_core::composite::Histogram)>,
     /// Onde o último traço de pincel terminou: Shift+clique traça uma reta a partir daqui.
     pub last_stroke_end: Option<(f32, f32)>,
+    /// Régua de desenho (duas pontas, em pixels da imagem): traços que começam perto dela
+    /// ficam presos à reta.
+    pub ruler: Option<[(f32, f32); 2]>,
     /// Tamanho da área do canvas na janela (último quadro): a Visão geral desenha com ele o
     /// retângulo do que está aparecendo.
     pub canvas_size: Vec2,
@@ -338,6 +341,7 @@ impl DocView {
             view_flip: false,
             histogram: None,
             last_stroke_end: None,
+            ruler: None,
             canvas_size: Vec2::ZERO,
             name: "Sem título".to_string(),
             edit_mask: false,
@@ -463,6 +467,11 @@ pub enum Interaction {
         origin: egui::Pos2,
         start: f32,
     },
+    /// Arrastando para definir a régua.
+    Ruler {
+        start: (f32, f32),
+        cur: (f32, f32),
+    },
     FloatMove {
         grab: (f32, f32),
         orig: (f32, f32),
@@ -502,6 +511,10 @@ pub struct State {
     pub wrap: bool,
     /// Simetria radial (repetições em volta do centro); 1 = desligada.
     pub symmetry: u32,
+    /// Próximo arrasto na imagem define a régua.
+    pub placing_ruler: bool,
+    /// O traço em andamento está preso à régua.
+    pub ruler_lock: bool,
     pub opts: ToolOpts,
     pub clipboard: Option<Clip>,
     pub toasts: Toasts,

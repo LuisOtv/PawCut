@@ -527,6 +527,8 @@ impl PaintApp {
                 mirror: (false, false),
                 wrap: false,
                 symmetry: 1,
+                placing_ruler: false,
+                ruler_lock: false,
                 opts: ToolOpts::default(),
                 clipboard: None,
                 toasts: Toasts::default(),
@@ -1479,6 +1481,20 @@ impl PaintApp {
                 if item(ui, "Espelhar a visão", "M", has_doc) {
                     ui.close();
                     flip_view(st);
+                }
+                ui.separator();
+                if item(ui, "Colocar régua (arraste na imagem)", "", has_doc) {
+                    ui.close();
+                    st.placing_ruler = true;
+                    st.say("Arraste na imagem para traçar a régua; traços que começam perto dela ficam retos");
+                }
+                let has_ruler = st.doc().is_some_and(|d| d.ruler.is_some());
+                if item(ui, "Tirar a régua", "", has_ruler) {
+                    ui.close();
+                    st.placing_ruler = false;
+                    if let Some(d) = st.doc_mut() {
+                        d.ruler = None;
+                    }
                 }
                 ui.separator();
                 let label = if st.wrap {
@@ -3011,6 +3027,35 @@ mod tests {
         // nada foi pintado na imagem
         assert_eq!(h.px(100, 100), [255, 255, 255, 255]);
         assert!(!h.app.st.doc().unwrap().ed.is_dirty());
+    }
+
+    #[test]
+    fn strokes_that_start_near_the_ruler_stay_on_its_line() {
+        let mut h = Harness::new();
+        h.app.st.brush = Brush {
+            size: 4.0,
+            hardness: 1.0,
+            ..Brush::basic()
+        };
+        h.app.st.fg = [0, 0, 0];
+        h.app.st.tool = Tool::Brush;
+        // régua horizontal em y = 100
+        h.app.st.placing_ruler = true;
+        let (a, b) = (h.screen(20.0, 100.0), h.screen(200.0, 100.0));
+        paint_screen(&mut h, a, b);
+        assert!(!h.app.st.placing_ruler);
+        assert!(!h.app.st.doc().unwrap().ed.is_dirty(), "régua não pinta");
+        assert!(h.app.st.doc().unwrap().ruler.is_some());
+        // traço torto que começa perto da régua: sai reto em y = 100
+        let (c, d) = (h.screen(40.0, 103.0), h.screen(160.0, 140.0));
+        paint_screen(&mut h, c, d);
+        assert!(h.px(100, 100)[0] < 60, "ficou na régua");
+        assert!(h.px(150, 130)[0] > 200, "não seguiu o mouse");
+        // começando longe da régua, o traço é livre
+        let (e, f) = (h.screen(40.0, 200.0), h.screen(160.0, 230.0));
+        paint_screen(&mut h, e, f);
+        assert!(h.px(100, 215)[0] < 100, "livre");
+        assert!(!h.app.st.ruler_lock);
     }
 
     #[test]

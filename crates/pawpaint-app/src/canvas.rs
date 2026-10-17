@@ -466,6 +466,25 @@ pub fn canvas_panel(st: &mut State, ui: &mut egui::Ui) {
             );
         }
     }
+    // Régua: a reta inteira (fina) e as duas pontas.
+    let ruler_ui = match st.interaction {
+        Some(Interaction::Ruler { start, cur }) => Some([start, cur]),
+        _ => d.ruler,
+    };
+    if let Some([a, b]) = ruler_ui {
+        let (sa, sb) = (to_screen(a.0, a.1), to_screen(b.0, b.1));
+        let dir = (sb - sa).normalized();
+        if dir.is_finite() {
+            let far = (cw + ch) * d.zoom.max(0.01) * 2.0;
+            let line = [sa - dir * far, sa + dir * far];
+            clip.line_segment(line, Stroke::new(3.0, Color32::from_black_alpha(120)));
+            clip.line_segment(line, Stroke::new(1.0, Color32::from_rgb(70, 200, 255)));
+        }
+        for p in [sa, sb] {
+            clip.circle_filled(p, 4.5, Color32::from_rgb(70, 200, 255));
+            clip.circle_stroke(p, 4.5, Stroke::new(1.0, Color32::BLACK));
+        }
+    }
     // Corte em andamento: escurece o que sai.
     if let Some((x0, y0, x1, y1)) = d.crop {
         let r = Rect::from_two_pos(to_screen(x0, y0), to_screen(x1, y1));
@@ -806,6 +825,28 @@ fn sel_op(st: &State, mods: egui::Modifiers) -> SelOp {
     }
 }
 
+/// Ponto mais próximo de `pt` na reta da régua.
+fn project_on_ruler(r: [(f32, f32); 2], pt: (f32, f32)) -> (f32, f32) {
+    let (dx, dy) = (r[1].0 - r[0].0, r[1].1 - r[0].1);
+    let len2 = dx * dx + dy * dy;
+    if len2 < 1e-6 {
+        return pt;
+    }
+    let t = ((pt.0 - r[0].0) * dx + (pt.1 - r[0].1) * dy) / len2;
+    (r[0].0 + dx * t, r[0].1 + dy * t)
+}
+
+/// O ponto do traço, preso à régua quando o traço começou perto dela.
+fn ruled(st: &State, pt: (f32, f32)) -> (f32, f32) {
+    match (st.ruler_lock, st.docs.get(st.cur).and_then(|d| d.ruler)) {
+        (true, Some(r)) => project_on_ruler(r, pt),
+        _ => pt,
+    }
+}
+
+/// Até que distância (em pixels de tela) da régua um traço fica preso a ela.
+const RULER_SNAP: f32 = 28.0;
+
 fn start_interaction(
     st: &mut State,
     ctx: &egui::Context,
@@ -826,6 +867,10 @@ fn start_interaction(
         } else {
             st.interaction = Some(Interaction::Pan);
         }
+        return;
+    }
+    if st.placing_ruler {
+        st.interaction = Some(Interaction::Ruler { start: pt, cur: pt });
         return;
     }
     // Ctrl+clique com ferramentas de pintura pega a cor (como no Krita).
@@ -904,6 +949,12 @@ fn start_interaction(
                 st.blend
             };
             let (brush, color) = (st.brush.clone(), st.fg);
+            let zoom = st.docs[cur].zoom.max(0.01);
+            st.ruler_lock = st.docs[cur].ruler.is_some_and(|r| {
+                let q = project_on_ruler(r, pt);
+                (q.0 - pt.0).hypot(q.1 - pt.1) * zoom <= RULER_SNAP
+            });
+            let pt = ruled(st, pt);
             st.docs[cur].ed.set_mirror(st.mirror.0, st.mirror.1);
             st.docs[cur].ed.set_wrap(st.wrap);
             st.docs[cur].ed.set_radial(st.symmetry);
@@ -1080,8 +1131,10 @@ fn update_interaction(
     match inter {
         Interaction::Stroke => {
             let pressure = st.pen.unwrap_or(1.0);
+            let pt = ruled(st, pt);
             st.docs[cur].ed.stroke_point_pressure(pt.0, pt.1, pressure)
         }
+        Interaction::Ruler { cur: c, .. } => *c = pt,
         Interaction::Smudge => st.docs[cur].ed.smudge_point(pt.0, pt.1),
         Interaction::RotateView { last } => {
             let d = &mut st.docs[cur];
@@ -1174,8 +1227,16 @@ fn finish_interaction(st: &mut State, pt: (f32, f32), _mods: egui::Modifiers) {
     let active = st.docs[cur].active;
     match inter {
         Interaction::Stroke => {
+            let pt = ruled(st, pt);
+            st.ruler_lock = false;
             st.docs[cur].ed.end_stroke(pt.0, pt.1);
             st.docs[cur].last_stroke_end = Some(pt);
+        }
+        Interaction::Ruler { start, cur: end } => {
+            st.placing_ruler = false;
+            if (start.0 - end.0).hypot(start.1 - end.1) * st.docs[cur].zoom >= 8.0 {
+                st.docs[cur].ruler = Some([start, end]);
+            }
         }
         Interaction::Smudge => st.docs[cur].ed.end_smudge(),
         Interaction::Gradient { start, cur: end } => {

@@ -145,6 +145,8 @@ Editor de imagens no estilo do Krita: pintura, camadas, seleções, filtros e do
   **velocidade**, a distância (o traço some aos poucos) ou sorteio, e o ângulo pode seguir o traço. Vêm pincéis
   prontos (Caneta tinteiro, Pincel de pressão, Traço que some, Caligrafia, Spray). Shift+clique traça uma reta
   desde onde o último traço terminou. Alt+arrastar na horizontal muda o tamanho do pincel, com o círculo e o valor na tela.
+- **Régua:** *Ver → Colocar régua* e arraste na imagem; os traços que começam perto da reta ficam presos a ela
+  (linhas retas e perspectiva sem tremer). *Tirar a régua* remove.
 - **Camadas de ajuste:** brilho/contraste, matiz/saturação, níveis, curvas, limiar, posterizar, preto e branco e
   inverter agem em tudo que está embaixo sem tocar nos pixels; a opacidade e a máscara da camada limitam onde.
   Clique duas vezes para editar. Camada → Nova camada de ajuste.
