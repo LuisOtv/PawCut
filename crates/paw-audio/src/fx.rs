@@ -4,6 +4,16 @@
 
 use std::f64::consts::{PI, TAU};
 
+/// Número do usuário seguro: NaN e infinito viram `default`; o resto é limitado a `[lo, hi]`
+/// (um NaN num efeito contamina o áudio inteiro).
+fn sane(v: f32, lo: f32, hi: f32, default: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(lo, hi)
+    } else {
+        default
+    }
+}
+
 // ------------------------------------------------------------------ filtros
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -89,9 +99,22 @@ impl EqBand {
 }
 
 fn design(kind: EqKind, sr: f64, hz: f64, gain_db: f64, q: f64) -> Biq {
-    // Perto de Nyquist o filtro fica instável: segura a frequência.
-    let hz = hz.clamp(10.0, sr * 0.45);
-    let q = q.clamp(0.1, 20.0);
+    // Perto de Nyquist o filtro fica instável: segura a frequência (e números ruins viram neutros).
+    let hz = if hz.is_finite() {
+        hz.clamp(10.0, sr * 0.45)
+    } else {
+        1000.0
+    };
+    let q = if q.is_finite() {
+        q.clamp(0.1, 20.0)
+    } else {
+        0.7
+    };
+    let gain_db = if gain_db.is_finite() {
+        gain_db.clamp(-36.0, 36.0)
+    } else {
+        0.0
+    };
     let w0 = TAU * hz / sr;
     let (sin, cos) = w0.sin_cos();
     let alpha = sin / (2.0 * q);
@@ -217,9 +240,9 @@ pub fn reverb(
     const COMBS: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
     const ALLPASS: [usize; 4] = [556, 441, 341, 225];
     let scale = sample_rate as f32 / 44_100.0;
-    let feedback = room.clamp(0.0, 1.0) * 0.28 + 0.7;
-    let damp = damping.clamp(0.0, 1.0) * 0.4;
-    let wet = 10f32.powf(wet_db / 20.0);
+    let feedback = sane(room, 0.0, 1.0, 0.5) * 0.28 + 0.7;
+    let damp = sane(damping, 0.0, 1.0, 0.5) * 0.4;
+    let wet = 10f32.powf(sane(wet_db, -60.0, 12.0, -12.0) / 20.0);
     struct Comb {
         buf: Vec<f32>,
         i: usize,
@@ -270,7 +293,8 @@ pub fn reverb(
 
 /// Tremolo: o volume oscila `hz` vezes por segundo. `depth` de 0 a 1.
 pub fn tremolo(s: &mut [f32], sample_rate: u32, hz: f32, depth: f32) {
-    let depth = depth.clamp(0.0, 1.0) as f64;
+    let depth = sane(depth, 0.0, 1.0, 0.5) as f64;
+    let hz = sane(hz, 0.0, 100.0, 5.0);
     for (i, v) in s.iter_mut().enumerate() {
         let lfo = 0.5 + 0.5 * (TAU * hz as f64 * i as f64 / sample_rate as f64).sin();
         *v *= (1.0 - depth + depth * lfo) as f32;
@@ -279,8 +303,9 @@ pub fn tremolo(s: &mut [f32], sample_rate: u32, hz: f32, depth: f32) {
 
 /// Phaser: quatro filtros allpass varridos por um LFO, misturados com o original.
 pub fn phaser(s: &mut [f32], sample_rate: u32, hz: f32, depth: f32, feedback: f32) {
-    let depth = depth.clamp(0.0, 1.0) as f64;
-    let feedback = feedback.clamp(0.0, 0.9) as f64;
+    let depth = sane(depth, 0.0, 1.0, 0.5) as f64;
+    let feedback = sane(feedback, 0.0, 0.9, 0.3) as f64;
+    let hz = sane(hz, 0.0, 100.0, 0.5);
     let mut z = [0.0f64; 4];
     let mut last = 0.0f64;
     for (i, v) in s.iter_mut().enumerate() {
@@ -302,8 +327,9 @@ pub fn phaser(s: &mut [f32], sample_rate: u32, hz: f32, depth: f32, feedback: f3
 
 /// Wah-wah: um passa-banda estreito que varre as frequências com o LFO.
 pub fn wahwah(s: &mut [f32], sample_rate: u32, hz: f32, depth: f32, resonance: f32) {
-    let depth = depth.clamp(0.0, 1.0) as f64;
-    let q = resonance.clamp(0.5, 8.0) as f64;
+    let depth = sane(depth, 0.0, 1.0, 0.5) as f64;
+    let q = sane(resonance, 0.5, 8.0, 2.0) as f64;
+    let hz = sane(hz, 0.0, 100.0, 1.0);
     let (mut low, mut band) = (0.0f64, 0.0f64);
     for (i, v) in s.iter_mut().enumerate() {
         let lfo = 0.5 + 0.5 * (TAU * hz as f64 * i as f64 / sample_rate as f64).sin();
@@ -322,7 +348,7 @@ pub fn wahwah(s: &mut [f32], sample_rate: u32, hz: f32, depth: f32, resonance: f
 /// Reamostra: `factor` 2 toca duas vezes mais rápido (e uma oitava acima); o resultado tem
 /// `len / factor` amostras. Interpolação cúbica (Catmull-Rom).
 pub fn resample(s: &[f32], factor: f32) -> Vec<f32> {
-    let factor = (factor as f64).clamp(0.05, 20.0);
+    let factor = sane(factor, 0.05, 20.0, 1.0) as f64;
     if s.is_empty() {
         return Vec::new();
     }
@@ -344,7 +370,7 @@ pub fn resample(s: &[f32], factor: f32) -> Vec<f32> {
 
 /// Muda o tempo sem mudar o tom (WSOLA): `speed` 2 = duas vezes mais rápido, metade do tamanho.
 pub fn time_stretch(s: &[f32], sample_rate: u32, speed: f32) -> Vec<f32> {
-    let speed = (speed as f64).clamp(0.25, 4.0);
+    let speed = sane(speed, 0.25, 4.0, 1.0) as f64;
     if s.len() < 64 || (speed - 1.0).abs() < 1e-4 {
         return s.to_vec();
     }
@@ -423,6 +449,7 @@ pub fn time_stretch(s: &[f32], sample_rate: u32, speed: f32) -> Vec<f32> {
 
 /// Muda o tom sem mudar o tamanho. `semitones` positivo sobe.
 pub fn pitch_shift(s: &mut [f32], sample_rate: u32, semitones: f32) {
+    let semitones = sane(semitones, -36.0, 36.0, 0.0);
     if s.len() < 64 || semitones.abs() < 1e-3 {
         return;
     }
@@ -574,9 +601,10 @@ pub fn duck(
     attack_ms: f32,
     release_ms: f32,
 ) {
-    let thr = 10f32.powf(threshold_db / 20.0);
-    let target = 10f32.powf(-duck_db.abs() / 20.0);
-    let coef = |ms: f32| (-1.0 / (ms.max(0.1) * 0.001 * sample_rate as f32)).exp();
+    let thr = 10f32.powf(sane(threshold_db, -120.0, 6.0, -35.0) / 20.0);
+    let target = 10f32.powf(-sane(duck_db, -80.0, 80.0, 12.0).abs() / 20.0);
+    let coef =
+        |ms: f32| (-1.0 / (sane(ms, 0.1, 60_000.0, 100.0) * 0.001 * sample_rate as f32)).exp();
     let (att, rel) = (coef(attack_ms), coef(release_ms));
     // seguidor de envelope da voz (pico com queda de 30 ms)
     let env_fall = coef(30.0);
@@ -602,7 +630,10 @@ pub fn duck(
 /// zumbido largo ou uma nota solta sem cortar o tempo.
 pub fn spectral_delete(s: &mut [f32], sample_rate: u32, lo: f32, hi: f32, amount_db: f32) {
     use rustfft::{FftPlanner, num_complex::Complex};
+    let nyq = sample_rate as f32 / 2.0;
+    let (lo, hi) = (sane(lo, 0.0, nyq, 0.0), sane(hi, 0.0, nyq, 0.0));
     let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+    let amount_db = sane(amount_db, -120.0, 120.0, 40.0);
     if s.len() < 64 || hi <= 0.0 {
         return;
     }
@@ -663,7 +694,11 @@ pub fn spectral_delete(s: &mut [f32], sample_rate: u32, lo: f32, hi: f32, amount
 /// rápido no começo) a 1 (devagar no começo); 0 é linear em dB.
 pub fn adjustable_fade(s: &mut [f32], start_db: f32, end_db: f32, curve: f32) {
     let n = s.len().max(2) as f32 - 1.0;
-    let curve = curve.clamp(-1.0, 1.0);
+    let curve = sane(curve, -1.0, 1.0, 0.0);
+    let (start_db, end_db) = (
+        sane(start_db, -120.0, 24.0, 0.0),
+        sane(end_db, -120.0, 24.0, -40.0),
+    );
     for (i, v) in s.iter_mut().enumerate() {
         let t = i as f32 / n;
         let t = if curve >= 0.0 {
@@ -684,7 +719,9 @@ pub fn adjustable_fade(s: &mut [f32], start_db: f32, end_db: f32, curve: f32) {
 
 /// Tom senoidal de `secs` segundos com fade curto nas pontas (sem estalo).
 pub fn gen_tone(sample_rate: u32, hz: f32, secs: f32, amp: f32) -> Vec<f32> {
-    let n = (secs.max(0.0) * sample_rate as f32) as usize;
+    let hz = sane(hz, 1.0, sample_rate as f32 / 2.0, 440.0);
+    let amp = sane(amp, 0.0, 4.0, 0.5);
+    let n = (sane(secs, 0.0, 3600.0, 0.0) * sample_rate as f32) as usize;
     let ramp = (sample_rate as f32 * 0.005) as usize;
     (0..n)
         .map(|i| {
@@ -701,7 +738,8 @@ pub fn gen_tone(sample_rate: u32, hz: f32, secs: f32, amp: f32) -> Vec<f32> {
 
 /// Ruído branco, rosa (mais grave) ou marrom (ainda mais grave). Determinístico.
 pub fn gen_noise(sample_rate: u32, kind: NoiseKind, secs: f32, amp: f32) -> Vec<f32> {
-    let n = (secs.max(0.0) * sample_rate as f32) as usize;
+    let amp = sane(amp, 0.0, 4.0, 0.3);
+    let n = (sane(secs, 0.0, 3600.0, 0.0) * sample_rate as f32) as usize;
     let mut x = 0x2545_F491u32;
     let mut white = || {
         x ^= x << 13;
@@ -749,7 +787,8 @@ pub enum NoiseKind {
 
 /// Faixa de metrônomo: um clique por tempo, o primeiro de cada compasso mais agudo.
 pub fn gen_clicks(sample_rate: u32, bpm: f32, beats_per_bar: u32, bars: u32, amp: f32) -> Vec<f32> {
-    let bpm = bpm.clamp(20.0, 400.0);
+    let bpm = sane(bpm, 20.0, 400.0, 120.0);
+    let amp = sane(amp, 0.0, 4.0, 0.8);
     let beat = (sample_rate as f32 * 60.0 / bpm) as usize;
     let beats = (beats_per_bar.max(1) * bars.max(1)) as usize;
     let mut out = vec![0.0f32; beat * beats];
@@ -1092,19 +1131,43 @@ mod tests {
         let weird = [0.0f32, -1.0, 1e9, f32::NAN, f32::INFINITY, 1.0];
         for &a in &weird {
             for &b in &weird {
+                let finite = |name: &str, v: &[f32]| {
+                    assert!(
+                        v.iter().all(|x| x.is_finite()),
+                        "{name}({a}, {b}) deixou NaN/infinito"
+                    );
+                };
                 let mut s = base.clone();
                 equalize(&mut s, SR, &[EqBand::new(EqKind::Peak, a, b, a)]);
-                notch(&mut s.clone(), SR, a, b);
-                reverb(&mut s.clone(), SR, a, b, a, 0);
-                tremolo(&mut s.clone(), SR, a, b);
-                phaser(&mut s.clone(), SR, a, b, a);
-                wahwah(&mut s.clone(), SR, a, b, a);
-                adjustable_fade(&mut s.clone(), a, b, a);
-                spectral_delete(&mut s.clone(), SR, a, b, a);
-                declip(&mut s.clone(), a, 3);
+                finite("equalize", &s);
+                let mut t = base.clone();
+                notch(&mut t, SR, a, b);
+                finite("notch", &t);
+                let mut t = base.clone();
+                reverb(&mut t, SR, a, b, a, 0);
+                finite("reverb", &t);
+                let mut t = base.clone();
+                tremolo(&mut t, SR, a, b);
+                finite("tremolo", &t);
+                let mut t = base.clone();
+                phaser(&mut t, SR, a, b, a);
+                finite("phaser", &t);
+                let mut t = base.clone();
+                wahwah(&mut t, SR, a, b, a);
+                finite("wahwah", &t);
+                let mut t = base.clone();
+                adjustable_fade(&mut t, a, b, a);
+                finite("fade", &t);
+                let mut t = base.clone();
+                spectral_delete(&mut t, SR, a, b, a);
+                finite("spectral", &t);
+                let mut t = base.clone();
+                declip(&mut t, a, 3);
+                finite("declip", &t);
                 find_clipping(&base, a, 0);
                 let mut m = base.clone();
                 duck(&mut m, &base, SR, a, b, a, b);
+                finite("duck", &m);
                 // velocidade/tempo/tom com fatores malucos (limitados por dentro)
                 let r = resample(&base, a);
                 assert!(

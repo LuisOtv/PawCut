@@ -1260,6 +1260,14 @@ fn paste(p: &mut Project, at: Frame, clips: Vec<(TrackId, Clip)>) -> Result<Outc
         if c.duration < 1 || at + c.start < 0 {
             return Err(EditError::InvalidValue("clipe colado inválido"));
         }
+        if !(c.speed.is_finite() && (0.1..=10.0).contains(&c.speed))
+            || !c.source_start.is_finite()
+            || c.source_start < 0.0
+        {
+            return Err(EditError::InvalidValue(
+                "velocidade ou ponto de início inválido",
+            ));
+        }
         let _ = track;
     }
     let mut links = HashMap::new();

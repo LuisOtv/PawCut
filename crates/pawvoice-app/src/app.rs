@@ -5260,7 +5260,10 @@ mod tests {
             (len as i64 - 24_000).abs() <= 2,
             "tempo 2× deixa metade: {len}"
         );
-        assert!(app.sel.is_none(), "a seleção antiga some quando a duração muda");
+        assert!(
+            app.sel.is_none(),
+            "a seleção antiga some quando a duração muda"
+        );
         assert!(app.ed.undo());
         assert_eq!(mono(&app, id).len(), 48_000);
         // equalizador mantém o tamanho
@@ -5315,6 +5318,49 @@ mod tests {
         let before = mono(&app, voice_id);
         app.auto_duck(voice_id, -35.0, 12.0, 20.0, 200.0);
         assert_eq!(mono(&app, voice_id), before);
+    }
+
+    /// Números absurdos nas ferramentas novas do PawVoice não derrubam nada.
+    #[test]
+    fn new_tools_survive_absurd_values() {
+        let weird = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -5.0, 0.0, 1e9];
+        let (mut app, voice) =
+            app_with((0..48_000).map(|i| (i as f32 * 0.05).sin() * 0.4).collect());
+        let music = app.ed.add_track(vec![vec![0.3; 48_000]], 0, None);
+        for &a in &weird {
+            for &b in &weird {
+                app.selected = vec![voice];
+                app.label_sounds(a, b, a, "x");
+                app.mark_clipping(a, 3);
+                app.selected = vec![music];
+                app.auto_duck(voice, a, b, a, b);
+                assert!(mono(&app, voice).iter().all(|v| v.is_finite()));
+                assert!(mono(&app, music).iter().all(|v| v.is_finite()));
+            }
+        }
+        // efeitos do diálogo com valores extremos (os sliders limitam, mas o motor não pode depender disso)
+        use crate::fx_dialogs::FxDialog;
+        for &a in &weird {
+            for d in [
+                FxDialog::Reverb {
+                    room: a,
+                    damping: a,
+                    wet: a,
+                },
+                FxDialog::Notch { hz: a, q: a },
+                FxDialog::Tremolo { hz: a, depth: a },
+                FxDialog::Speed(a),
+                FxDialog::Tempo(a),
+                FxDialog::Pitch(a),
+                FxDialog::Declip(a),
+                FxDialog::Repeat(u32::MAX.min(40)),
+            ] {
+                let (_, mut job) = d.job(RATE);
+                let mut p = vec![vec![0.2f32; 4800]];
+                job(&mut p);
+                assert!(p[0].len() <= 4800 * 40 * 2, "{d:?}");
+            }
+        }
     }
 
     #[test]

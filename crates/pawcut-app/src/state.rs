@@ -766,6 +766,10 @@ impl AppState {
     pub fn speed_ramp(&mut self, from: f64, to: f64, steps: usize) {
         let p = self.project().clone();
         let steps = steps.clamp(2, 24);
+        if !from.is_finite() || !to.is_finite() {
+            self.warn("Velocidade inválida na rampa");
+            return;
+        }
         let (from, to) = (from.clamp(0.1, 10.0), to.clamp(0.1, 10.0));
         let Some(first) = self.selection.iter().copied().find(|c| {
             p.clip(*c)
@@ -877,7 +881,13 @@ impl AppState {
             return;
         }
         let (pw, ph) = (p.settings.width as f32, p.settings.height as f32);
-        let m = result.max_move.clamp(0.0, pw.min(ph) / 3.0);
+        // `clamp` com limite NaN derruba o app: números ruins viram 0.
+        let m = if result.max_move.is_finite() {
+            result.max_move.clamp(0.0, pw.min(ph) / 3.0)
+        } else {
+            0.0
+        };
+        let fit = |v: f32| if v.is_finite() { v.clamp(-m, m) } else { 0.0 };
         let zoom = (((pw + 2.0 * m) / pw).max((ph + 2.0 * m) / ph)).clamp(1.0, 1.5);
         let mut t = c.transform;
         t.scale = (t.scale * zoom).clamp(0.05, 10.0);
@@ -1937,6 +1947,66 @@ mod tests {
         let v = &s.project().video_tracks[0].clips;
         assert_eq!(v.len(), 2);
         assert_eq!((v[0].start, v[0].duration, v[1].start), (0, 400, 400));
+    }
+
+    /// Valores absurdos nas ferramentas novas: nada derruba o app nem deixa a timeline quebrada.
+    #[test]
+    fn new_tools_survive_absurd_values() {
+        let weird = [f64::NAN, f64::INFINITY, -5.0, 0.0, 1e9];
+        let mut s = state();
+        let m = add_video(&mut s, 600, true);
+        s.drop_media(m, TrackKind::Video, 0, 0);
+        let c = s.project().video_tracks[0].clips[0].id;
+        s.selection = vec![c];
+        for &a in &weird {
+            for &b in &weird {
+                s.speed_ramp(a, b, 8);
+                s.selection = s.project().video_tracks[0]
+                    .clips
+                    .iter()
+                    .map(|c| c.id)
+                    .take(1)
+                    .collect();
+                s.slideshow(a, b);
+                s.auto_duck(a as f32, b as f32);
+            }
+        }
+        for steps in [0usize, 1, 2, 1000] {
+            s.speed_ramp(1.0, 2.0, steps);
+            s.selection = s.project().video_tracks[0]
+                .clips
+                .iter()
+                .map(|c| c.id)
+                .take(1)
+                .collect();
+        }
+        // a timeline continua consistente: clipes em ordem, sem sobrepor
+        for t in s.project().all_tracks() {
+            for w in t.clips.windows(2) {
+                assert!(w[0].end() <= w[1].start, "{:?} {:?}", w[0].id, w[1].id);
+            }
+            assert!(
+                t.clips
+                    .iter()
+                    .all(|c| c.duration >= 1 && c.speed.is_finite() && c.speed > 0.0)
+            );
+        }
+        // estabilizar com movimentos absurdos
+        let r = crate::stabilize::Stabilization {
+            moves: vec![(f32::NAN, 1e30), (f32::INFINITY, -1e30), (3.0, 4.0)],
+            max_move: f32::NAN,
+        };
+        let c = s.project().video_tracks[0].clips[0].id;
+        s.apply_stabilization(c, &r);
+        let z = s.project().clip(c).unwrap().transform.scale;
+        assert!(z.is_finite() && (0.05..=10.0).contains(&z), "{z}");
+        s.apply_stabilization(
+            c,
+            &crate::stabilize::Stabilization {
+                moves: vec![],
+                max_move: 0.0,
+            },
+        );
     }
 
     #[test]
