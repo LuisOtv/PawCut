@@ -3380,7 +3380,7 @@ impl VoiceApp {
                     );
                     ui.spacing_mut().slider_width = x1 - x0 - LABEL_W;
                     let r = ui
-                        .add(egui::Slider::new(value, range).show_value(false))
+                        .add(paw_ui::Slider::new(value, range).show_value(false))
                         .on_hover_text(tip);
                     reset = r.double_clicked();
                 },
@@ -4058,7 +4058,7 @@ impl VoiceApp {
                 match dialog {
                     Dialog::Gain(db) => {
                         ui.add(
-                            egui::Slider::new(db, -24.0..=24.0)
+                            paw_ui::Slider::new(db, -24.0..=24.0)
                                 .text("amplificação")
                                 .suffix(" dB"),
                         );
@@ -4074,12 +4074,12 @@ impl VoiceApp {
                             .weak(),
                         );
                         ui.add(
-                            egui::Slider::new(threshold, -80.0..=-10.0)
+                            paw_ui::Slider::new(threshold, -80.0..=-10.0)
                                 .text("limiar")
                                 .suffix(" dB"),
                         );
                         ui.add(
-                            egui::Slider::new(reduction, 3.0..=40.0)
+                            paw_ui::Slider::new(reduction, 3.0..=40.0)
                                 .text("redução")
                                 .suffix(" dB"),
                         );
@@ -4099,12 +4099,12 @@ impl VoiceApp {
                                 .weak(),
                         );
                         ui.add(
-                            egui::Slider::new(threshold, -70.0..=-20.0)
+                            paw_ui::Slider::new(threshold, -70.0..=-20.0)
                                 .text("abaixo de")
                                 .suffix(" dB"),
                         );
                         ui.add(
-                            egui::Slider::new(min, 0.2..=3.0)
+                            paw_ui::Slider::new(min, 0.2..=3.0)
                                 .text("por pelo menos")
                                 .suffix(" s"),
                         );
@@ -4137,36 +4137,36 @@ impl VoiceApp {
                             .weak(),
                         );
                         ui.add(
-                            egui::Slider::new(reduction, 3.0..=40.0)
+                            paw_ui::Slider::new(reduction, 3.0..=40.0)
                                 .text("redução")
                                 .suffix(" dB"),
                         );
                         ui.add(
-                            egui::Slider::new(sensitivity, 0.0..=24.0)
+                            paw_ui::Slider::new(sensitivity, 0.0..=24.0)
                                 .text("sensibilidade")
                                 .suffix(" dB"),
                         );
                     }
                     Dialog::BassTreble { bass, treble } => {
                         ui.add(
-                            egui::Slider::new(bass, -15.0..=15.0)
+                            paw_ui::Slider::new(bass, -15.0..=15.0)
                                 .text("graves (250 Hz)")
                                 .suffix(" dB"),
                         );
                         ui.add(
-                            egui::Slider::new(treble, -15.0..=15.0)
+                            paw_ui::Slider::new(treble, -15.0..=15.0)
                                 .text("agudos (4 kHz)")
                                 .suffix(" dB"),
                         );
                     }
                     Dialog::Limiter(db) => {
                         ui.label(RichText::new("Nada passa deste nível.").weak());
-                        ui.add(egui::Slider::new(db, -12.0..=0.0).text("teto").suffix(" dB"));
+                        ui.add(paw_ui::Slider::new(db, -12.0..=0.0).text("teto").suffix(" dB"));
                     }
                     Dialog::DeEss { threshold, reduction } => {
                         ui.label(RichText::new("Abaixa só os agudos quando o S estoura.").weak());
-                        ui.add(egui::Slider::new(threshold, -50.0..=-15.0).text("limiar").suffix(" dB"));
-                        ui.add(egui::Slider::new(reduction, 3.0..=24.0).text("redução máxima").suffix(" dB"));
+                        ui.add(paw_ui::Slider::new(threshold, -50.0..=-15.0).text("limiar").suffix(" dB"));
+                        ui.add(paw_ui::Slider::new(reduction, 3.0..=24.0).text("redução máxima").suffix(" dB"));
                     }
                     Dialog::ConfirmClose | Dialog::ConfirmDiscard(_) => {
                         ui.label("O projeto tem mudanças que não foram salvas.");

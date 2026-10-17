@@ -43,6 +43,8 @@ struct PrefsFile {
     brushes: Vec<Brush>,
     #[serde(default)]
     files: Vec<PathBuf>,
+    #[serde(default)]
+    toolbox_cols: u8,
 }
 
 pub fn save_prefs(st: &State) {
@@ -51,6 +53,7 @@ pub fn save_prefs(st: &State) {
         recent: st.prefs.recent.clone(),
         brushes: user,
         files: st.prefs.files.clone(),
+        toolbox_cols: st.prefs.toolbox_cols,
     };
     let _ = std::fs::create_dir_all(config_dir());
     if let Ok(t) = serde_json::to_string(&file) {
@@ -90,7 +93,7 @@ fn dialog_slider<N: egui::emath::Numeric>(
     suffix: &str,
 ) -> egui::Response {
     theme::fixed_width(ui, theme::NUM_W, |ui| {
-        ui.add(egui::Slider::new(v, range).max_decimals(2).suffix(suffix))
+        ui.add(paw_ui::Slider::new(v, range).max_decimals(2).suffix(suffix))
     })
 }
 
@@ -121,6 +124,129 @@ fn preview_action(
         PreviewAction::Wait
     } else {
         PreviewAction::Apply
+    }
+}
+
+// ---------------------------------------------------------------- roda de atalhos
+
+/// Roda padrão: pincel em cima, borracha embaixo, desfazer/refazer nos lados.
+const RADIAL_DEFAULTS: &[&str] = &[
+    "tool:brush",
+    "picker",
+    "redo",
+    "new_layer",
+    "tool:eraser",
+    "swap_colors",
+    "undo",
+    "fit",
+];
+
+fn tool_id(t: Tool) -> String {
+    format!("tool:{}", format!("{t:?}").to_lowercase())
+}
+
+/// Tudo que pode ir para a roda.
+pub fn radial_catalog() -> Vec<paw_ui::radial::RadialAction> {
+    use paw_ui::icons::Icon;
+    use paw_ui::radial::RadialAction as A;
+    let mut v: Vec<A> = vec![
+        A::new("undo", "Desfazer", Icon::Undo),
+        A::new("redo", "Refazer", Icon::Redo),
+        A::new("picker", "Conta-gotas", Icon::Eyedropper),
+        A::new("swap_colors", "Trocar frente e fundo", Icon::Swap),
+        A::new("new_layer", "Nova camada", Icon::Plus),
+        A::new("dup_layer", "Duplicar camada", Icon::Duplicate),
+        A::new("merge_down", "Unir com a de baixo", Icon::MergeDown),
+        A::new("clear", "Limpar", Icon::Trash),
+        A::new("select_all", "Selecionar tudo", Icon::SelRect),
+        A::new("deselect", "Tirar seleção", Icon::Close),
+        A::new("invert_selection", "Inverter seleção", Icon::Swap),
+        A::new("copy", "Copiar", Icon::Copy),
+        A::new("cut", "Recortar", Icon::Scissors),
+        A::new("paste", "Colar", Icon::Paste),
+        A::new("fit", "Caber na tela", Icon::Fit),
+        A::new("zoom_100", "Zoom 100%", Icon::Search),
+        A::new("zoom_in", "Ampliar", Icon::ZoomIn),
+        A::new("zoom_out", "Reduzir", Icon::ZoomOut),
+        A::new("mirror_h", "Espelho horizontal", Icon::FlipH),
+        A::new("mirror_v", "Espelho vertical", Icon::FlipV),
+        A::new("flip_canvas", "Espelhar imagem", Icon::FlipH),
+        A::new("save", "Salvar", Icon::Save),
+        A::new("export", "Exportar", Icon::DeliverPage),
+    ];
+    for t in Tool::ALL {
+        v.push(A::new(tool_id(t), t.label(), t.icon()));
+    }
+    v
+}
+
+/// Executa uma ação escolhida na roda.
+pub fn run_radial(st: &mut State, id: &str) {
+    if let Some(t) = Tool::ALL.into_iter().find(|t| tool_id(*t) == id) {
+        set_tool(st, t);
+        return;
+    }
+    match id {
+        "picker" => set_tool(st, Tool::Picker),
+        "swap_colors" => swap_colors(st),
+        "save" => save(st),
+        "export" => ask(st, Purpose::Export),
+        "mirror_h" => st.mirror.0 = !st.mirror.0,
+        "mirror_v" => st.mirror.1 = !st.mirror.1,
+        _ if st.docs.is_empty() => {}
+        "undo" => {
+            if let Some(d) = st.doc_mut() {
+                if d.float.is_some() {
+                    canvas::abort_float(d);
+                } else {
+                    d.ed.undo();
+                }
+            }
+        }
+        "redo" => {
+            if let Some(d) = st.doc_mut() {
+                commit_if_floating(d);
+                d.ed.redo();
+            }
+        }
+        "new_layer" => new_layer(st),
+        "dup_layer" => dup_layer(st),
+        "merge_down" => merge_down(st),
+        "clear" => edit_clear(st),
+        "copy" => edit_copy(st, false),
+        "cut" => edit_cut(st),
+        "paste" => edit_paste(st),
+        "fit" => {
+            if let Some(d) = st.doc_mut() {
+                d.fit = true;
+                d.pan = egui::Vec2::ZERO;
+            }
+        }
+        "zoom_100" => zoom_to(st, 1.0),
+        "zoom_in" => zoom_by(st, 1.25),
+        "zoom_out" => zoom_by(st, 0.8),
+        "select_all" => {
+            if let Some(d) = st.doc_mut() {
+                d.ed.select_all();
+            }
+        }
+        "deselect" => {
+            if let Some(d) = st.doc_mut() {
+                d.ed.deselect();
+            }
+        }
+        "invert_selection" => {
+            if let Some(d) = st.doc_mut() {
+                d.ed.invert_selection();
+            }
+        }
+        "flip_canvas" => {
+            if let Some(d) = st.doc_mut() {
+                commit_if_floating(d);
+                d.ed.flip_image(true);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -239,7 +365,7 @@ pub fn default_layout() -> DockState<Panel> {
             Panel::Overview,
         ],
     );
-    tree.split_left(canvas, 0.07, vec![Panel::Toolbox]);
+    tree.split_left(canvas, 0.085, vec![Panel::Toolbox]);
     dock
 }
 
@@ -296,7 +422,7 @@ impl TabViewer for Viewer<'_> {
                 };
                 match tab {
                     Panel::Canvas => {}
-                    Panel::Toolbox => docks::toolbox(st, ui),
+                    Panel::Toolbox => scroll(ui, &mut |ui| docks::toolbox(st, ui)),
                     Panel::Layers => docks::layers(st, ui),
                     Panel::BrushPresets => docks::brush_presets(st, ui),
                     Panel::BrushEditor => docks::brush_editor(st, ui),
@@ -337,6 +463,7 @@ impl PaintApp {
         {
             app.st.prefs.recent = p.recent;
             app.st.prefs.files = p.files;
+            app.st.prefs.toolbox_cols = p.toolbox_cols;
             app.st.user_presets = p.brushes.len();
             app.st.presets.extend(p.brushes);
         }
@@ -385,6 +512,7 @@ impl PaintApp {
                 prefs: Prefs {
                     recent: Vec::new(),
                     files: Vec::new(),
+                    toolbox_cols: 0,
                 },
                 interaction: None,
                 text_input: None,
@@ -397,6 +525,10 @@ impl PaintApp {
                 autosave_job: None,
                 autosave_closed: Default::default(),
                 popup_palette: None,
+                radial: paw_ui::radial::Radial::load(
+                    Some(config_dir().join("radial.json")),
+                    RADIAL_DEFAULTS,
+                ),
             },
             last_title: String::new(),
             last_layout: String::new(),
@@ -410,18 +542,35 @@ impl PaintApp {
 
 /// Espelho e Borracha da barra do pincel (dentro de um menu quando a janela é estreita).
 fn mirror_and_eraser(st: &mut State, ui: &mut egui::Ui) {
-    ui.toggle_value(&mut st.mirror.0, "Espelho ↔")
-        .on_hover_text("Pinta também refletido na vertical (eixo no meio)");
-    ui.toggle_value(&mut st.mirror.1, "Espelho ↕")
-        .on_hover_text("Pinta também refletido na horizontal (eixo no meio)");
-    let mut erasing = st.tool == Tool::Eraser;
-    if ui
-        .toggle_value(&mut erasing, "Borracha")
-        .on_hover_text("Alterna borracha (E)")
-        .changed()
-    {
-        set_tool(st, if erasing { Tool::Eraser } else { Tool::Brush });
-    }
+    use paw_ui::icons::{self, Icon};
+    ui.horizontal(|ui| {
+        if icons::button(
+            ui,
+            Icon::FlipH,
+            16.0,
+            st.mirror.0,
+            "Espelho horizontal: pinta também refletido (eixo vertical no meio)",
+        )
+        .clicked()
+        {
+            st.mirror.0 = !st.mirror.0;
+        }
+        if icons::button(
+            ui,
+            Icon::FlipV,
+            16.0,
+            st.mirror.1,
+            "Espelho vertical: pinta também refletido (eixo horizontal no meio)",
+        )
+        .clicked()
+        {
+            st.mirror.1 = !st.mirror.1;
+        }
+        let erasing = st.tool == Tool::Eraser;
+        if icons::button(ui, Icon::Eraser, 16.0, erasing, "Alterna borracha (E)").clicked() {
+            set_tool(st, if erasing { Tool::Brush } else { Tool::Eraser });
+        }
+    });
 }
 
 pub fn set_tool(st: &mut State, tool: Tool) {
@@ -1126,6 +1275,15 @@ impl PaintApp {
                     ui.close();
                     st.dock_commands.push(DockCommand::Reset);
                 }
+                ui.separator();
+                if ui
+                    .button("Roda de atalhos…")
+                    .on_hover_text("Botão do meio do mouse: segure, arraste até a ação e solte")
+                    .clicked()
+                {
+                    ui.close();
+                    st.radial.editing = true;
+                }
             });
         });
     }
@@ -1177,14 +1335,14 @@ impl PaintApp {
                 let mut o = st.brush.opacity * 100.0;
                 ui.label("Opacidade");
                 ui.add(
-                    egui::Slider::new(&mut o, 1.0..=100.0)
+                    paw_ui::Slider::new(&mut o, 1.0..=100.0)
                         .suffix("%")
                         .trailing_fill(true),
                 );
                 st.brush.opacity = o / 100.0;
                 ui.label("Tamanho");
                 ui.add(
-                    egui::Slider::new(&mut st.brush.size, 1.0..=500.0)
+                    paw_ui::Slider::new(&mut st.brush.size, 1.0..=500.0)
                         .suffix(" px")
                         .logarithmic(true)
                         .trailing_fill(true),
@@ -1192,7 +1350,7 @@ impl PaintApp {
                 let mut f = st.brush.flow * 100.0;
                 ui.label("Fluxo");
                 ui.add(
-                    egui::Slider::new(&mut f, 1.0..=100.0)
+                    paw_ui::Slider::new(&mut f, 1.0..=100.0)
                         .suffix("%")
                         .trailing_fill(true),
                 );
@@ -1398,7 +1556,11 @@ impl PaintApp {
         let ctrl = Modifiers::COMMAND;
         let cs = Modifiers::COMMAND | Modifiers::SHIFT;
         let hit = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
-        if ctx.egui_wants_keyboard_input() || st.dialog.is_some() || st.text_input.is_some() {
+        if ctx.egui_wants_keyboard_input()
+            || st.dialog.is_some()
+            || st.text_input.is_some()
+            || st.radial.is_open()
+        {
             return;
         }
         if hit(ctrl, Key::N) {
@@ -2002,7 +2164,7 @@ impl PaintApp {
                         let mut o = l.opacity * 100.0;
                         if ui
                             .add(
-                                egui::Slider::new(&mut o, 0.0..=100.0)
+                                paw_ui::Slider::new(&mut o, 0.0..=100.0)
                                     .suffix("%")
                                     .text("Opacidade"),
                             )
@@ -2189,6 +2351,9 @@ impl PaintApp {
             .show(ui, |ui| self.status_bar(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let style = theme::dock_style(ui.style().as_ref());
+            let mut style = style;
+            // Painéis podem ficar bem estreitos (a caixa de ferramentas vira uma coluna só).
+            style.separator.extra = 44.0;
             DockArea::new(&mut self.dock)
                 .style(style)
                 .show_leaf_collapse_buttons(false)
@@ -2200,6 +2365,10 @@ impl PaintApp {
             autosave(&mut self.st);
         }
         self.dialogs(&ctx);
+        let catalog = radial_catalog();
+        if let Some(id) = self.st.radial.show(&ctx, &catalog) {
+            run_radial(&mut self.st, &id);
+        }
         self.st.toasts.tick(&ctx);
         self.st.toasts.ui(&ctx);
         self.save_layout();
@@ -2807,6 +2976,67 @@ mod tests {
         press(&mut h, Key::Escape);
         assert!(h.app.st.dialog.is_none());
         assert_eq!(steps(&h), with_preview - 1, "a prévia foi desfeita");
+    }
+
+    #[test]
+    fn middle_button_wheel_picks_a_tool_without_painting() {
+        let mut h = Harness::new();
+        let before = h.app.st.doc().unwrap().ed.history().0.len();
+        let c = h.screen(150.0, 100.0);
+        let ev = |pos, button, pressed| Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        h.frame(vec![Event::PointerMoved(c)]);
+        h.frame(vec![ev(c, PointerButton::Middle, true)]);
+        assert!(h.app.st.radial.is_open());
+        // Embaixo fica a borracha (roda padrão).
+        let down = c + vec2(0.0, 80.0);
+        h.frame(vec![Event::PointerMoved(down)]);
+        h.frame(vec![ev(down, PointerButton::Middle, false)]);
+        assert!(!h.app.st.radial.is_open());
+        assert_eq!(h.app.st.tool, Tool::Eraser);
+        assert_eq!(
+            h.app.st.doc().unwrap().ed.history().0.len(),
+            before,
+            "não pintou nada"
+        );
+        // Toque rápido + clique: escolhe sem pintar por baixo.
+        h.frame(vec![ev(c, PointerButton::Middle, true)]);
+        h.frame(vec![ev(c, PointerButton::Middle, false)]);
+        let up = c + vec2(0.0, -80.0);
+        h.frame(vec![Event::PointerMoved(up)]);
+        h.frame(vec![ev(up, PointerButton::Primary, true)]);
+        h.frame(vec![ev(up, PointerButton::Primary, false)]);
+        assert_eq!(h.app.st.tool, Tool::Brush);
+        assert_eq!(
+            h.app.st.doc().unwrap().ed.history().0.len(),
+            before,
+            "o clique na roda não pinta"
+        );
+        // Toda ação do catálogo roda sem cair, com e sem documento.
+        for a in radial_catalog() {
+            run_radial(&mut h.app.st, &a.id);
+            h.frame(vec![]);
+        }
+        let mut empty = PaintApp::empty();
+        for a in radial_catalog() {
+            run_radial(&mut empty.st, &a.id);
+        }
+    }
+
+    #[test]
+    fn toolbox_reflows_down_to_one_column() {
+        assert_eq!(docks::toolbox_columns(40.0, 0), 1);
+        assert_eq!(docks::toolbox_columns(80.0, 0), 2);
+        assert_eq!(docks::toolbox_columns(200.0, 0), 5);
+        assert_eq!(
+            docks::toolbox_columns(200.0, 1),
+            1,
+            "uma coluna fixa, como no Photoshop"
+        );
     }
 
     #[test]

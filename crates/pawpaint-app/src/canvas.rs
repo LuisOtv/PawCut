@@ -559,13 +559,13 @@ pub fn canvas_panel(st: &mut State, ui: &mut egui::Ui) {
 
     // ---- entrada
     let pos = ui.input(|i| i.pointer.interact_pos()).or(resp.hover_pos());
-    let (pressed, down, released, mods, middle, space) = ui.input(|i| {
+    // O botão do meio é da roda de atalhos; arrastar a tela é Espaço + arrastar.
+    let (pressed, down, released, mods, space) = ui.input(|i| {
         (
             i.pointer.primary_pressed(),
             i.pointer.primary_down(),
             i.pointer.primary_released(),
             i.modifiers,
-            i.pointer.middle_down(),
             i.key_down(Key::Space),
         )
     });
@@ -573,15 +573,15 @@ pub fn canvas_panel(st: &mut State, ui: &mut egui::Ui) {
     st.docs[cur].cursor = doc_pos.map(|p| (p.x, p.y));
     let over = resp.hovered() && st.text_input.is_none();
 
-    if st.interaction.is_none() && ((pressed && over) || (middle && resp.hovered())) {
+    if st.interaction.is_none() && pressed && over && !st.radial.is_open() {
         if let Some(p) = pos {
-            start_interaction(st, &ctx, p, to_doc(p), mods, middle || space, handles);
+            start_interaction(st, &ctx, p, to_doc(p), mods, space, handles);
         }
     } else if st.interaction.is_some() {
         if let Some(p) = pos {
             update_interaction(st, to_doc(p), p, mods, handles, resp.drag_delta(), &ctx);
         }
-        if released || (!down && !middle) {
+        if released || !down {
             let p = pos.map_or((0.0, 0.0), |p| {
                 let q = to_doc(p);
                 (q.x, q.y)

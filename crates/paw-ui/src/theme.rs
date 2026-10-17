@@ -86,6 +86,7 @@ pub fn apply(ctx: &egui::Context) {
         style.spacing.item_spacing = egui::vec2(8.0, 4.0);
         style.spacing.button_padding = egui::vec2(8.0, 3.0);
         style.spacing.interact_size = egui::vec2(40.0, 22.0);
+        style.spacing.slider_width = crate::slider::RAIL_W;
         style.spacing.window_margin = Margin::same(12);
         style.spacing.menu_margin = Margin::same(6);
         let v = &mut style.visuals;

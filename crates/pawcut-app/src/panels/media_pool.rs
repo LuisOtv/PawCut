@@ -26,7 +26,7 @@ impl Workspace {
                     ui.spacing_mut().slider_width = 48.0;
                     ui.add_sized(
                         [48.0, 16.0],
-                        egui::Slider::new(&mut self.pool_tile, 90.0..=220.0).show_value(false),
+                        paw_ui::Slider::new(&mut self.pool_tile, 90.0..=220.0).show_value(false),
                     )
                     .on_hover_text("Tamanho das miniaturas");
                 }

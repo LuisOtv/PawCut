@@ -890,13 +890,13 @@ impl Workspace {
                                 ui.label("");
                                 if d.opts.use_bitrate {
                                     ui.add(
-                                        egui::Slider::new(&mut d.opts.bitrate_mbps, 1.0..=100.0)
+                                        paw_ui::Slider::new(&mut d.opts.bitrate_mbps, 1.0..=100.0)
                                             .logarithmic(true)
                                             .suffix(" Mb/s"),
                                     );
                                 } else {
                                     ui.add(
-                                        egui::Slider::new(&mut d.opts.crf, 14..=32)
+                                        paw_ui::Slider::new(&mut d.opts.crf, 14..=32)
                                             .text("CRF (menor = melhor)"),
                                     );
                                 }
