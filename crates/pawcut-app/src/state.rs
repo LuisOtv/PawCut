@@ -907,10 +907,7 @@ impl AppState {
                 continue;
             }
             let at = c.source_start + i as f64 * c.speed;
-            for (param, v) in [
-                (Param::X, t.x + mx.clamp(-m, m)),
-                (Param::Y, t.y + my.clamp(-m, m)),
-            ] {
+            for (param, v) in [(Param::X, t.x + fit(*mx)), (Param::Y, t.y + fit(*my))] {
                 self.apply_coalescing(
                     Edit::SetKeyframe {
                         clip,

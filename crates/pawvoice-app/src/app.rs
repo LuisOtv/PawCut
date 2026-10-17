@@ -5353,7 +5353,7 @@ mod tests {
                 FxDialog::Tempo(a),
                 FxDialog::Pitch(a),
                 FxDialog::Declip(a),
-                FxDialog::Repeat(u32::MAX.min(40)),
+                FxDialog::Repeat(40),
             ] {
                 let (_, mut job) = d.job(RATE);
                 let mut p = vec![vec![0.2f32; 4800]];
