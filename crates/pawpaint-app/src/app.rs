@@ -533,6 +533,7 @@ impl PaintApp {
                 allow_close: false,
                 tool_changed: false,
                 last_autosave: std::time::Instant::now(),
+                pen: None,
                 autosave_job: None,
                 autosave_closed: Default::default(),
                 popup_palette: None,
@@ -2566,6 +2567,51 @@ mod tests {
         assert_eq!(d.ed.undo_label(), Some("Pincel"));
         d.ed.undo();
         assert_eq!(h.px(140, 100), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn pen_pressure_from_touch_events_thins_the_stroke() {
+        use pawpaint_core::brush::Sensor;
+        let width_with = |force: f32| {
+            let mut h = Harness::new();
+            let mut b = Brush {
+                size: 24.0,
+                hardness: 1.0,
+                spacing: 0.05,
+                ..Brush::basic()
+            };
+            b.dynamics.size = Sensor::Pressure;
+            b.dynamics.size_min = 0.1;
+            h.app.st.brush = b;
+            h.app.st.fg = [0, 0, 0];
+            h.app.st.tool = Tool::Brush;
+            let touch = |h: &Harness, x: f32, y: f32, phase: egui::TouchPhase| Event::Touch {
+                device_id: egui::TouchDeviceId(0),
+                id: egui::TouchId(1),
+                phase,
+                pos: h.screen(x, y),
+                force: Some(force),
+            };
+            h.mv(40.0, 100.0);
+            let e = touch(&h, 40.0, 100.0, egui::TouchPhase::Start);
+            h.frame(vec![e]);
+            h.button(40.0, 100.0, true, Modifiers::NONE);
+            for i in 1..=8 {
+                let x = 40.0 + i as f32 * 25.0;
+                let e = touch(&h, x, 100.0, egui::TouchPhase::Move);
+                h.frame(vec![e]);
+                h.mv(x, 100.0);
+            }
+            h.button(240.0, 100.0, false, Modifiers::NONE);
+            let e = touch(&h, 240.0, 100.0, egui::TouchPhase::End);
+            h.frame(vec![e]);
+            h.frame(vec![]);
+            // espessura do traço na coluna 140
+            (0..200).filter(|y| h.px(140, *y)[3] > 128 && h.px(140, *y)[0] < 128).count()
+        };
+        let (soft, firm) = (width_with(0.1), width_with(1.0));
+        assert!(firm >= 20, "pressão total: {firm}");
+        assert!(soft * 2 < firm, "pressão leve fica bem mais fina: {soft} vs {firm}");
     }
 
     #[test]

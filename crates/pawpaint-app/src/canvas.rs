@@ -246,6 +246,7 @@ pub fn canvas_panel(st: &mut State, ui: &mut egui::Ui) {
         return;
     }
     let ctx = ui.ctx().clone();
+    update_pen(st, &ctx);
     let cur = st.cur;
     if std::mem::take(&mut st.tool_changed)
         && st.tool == Tool::Transform
@@ -787,7 +788,8 @@ fn start_interaction(
                 .begin_stroke(active, brush, color, erase, mode)
             {
                 Ok(()) => {
-                    st.docs[cur].ed.stroke_point(pt.0, pt.1);
+                    let pressure = st.pen.unwrap_or(1.0);
+                    st.docs[cur].ed.stroke_point_pressure(pt.0, pt.1, pressure);
                     st.interaction = Some(Interaction::Stroke);
                 }
                 Err(e) => st.warn(e.to_string()),
@@ -928,7 +930,10 @@ fn update_interaction(
         return;
     };
     match inter {
-        Interaction::Stroke => st.docs[cur].ed.stroke_point(pt.0, pt.1),
+        Interaction::Stroke => {
+            let pressure = st.pen.unwrap_or(1.0);
+            st.docs[cur].ed.stroke_point_pressure(pt.0, pt.1, pressure)
+        }
         Interaction::Smudge => st.docs[cur].ed.smudge_point(pt.0, pt.1),
         Interaction::Pan => {
             let d = &mut st.docs[cur];
@@ -1353,4 +1358,23 @@ mod tests {
             assert_eq!(img.pixels[y * 1100 + x], want, "pixel {x},{y}");
         }
     }
+}
+
+/// Guarda a pressão da caneta: vem dos eventos de toque com força (caneta ou tela sensível).
+/// Quando o toque termina (ou nunca houve toque, como no mouse) volta a `None`.
+fn update_pen(st: &mut State, ctx: &egui::Context) {
+    ctx.input(|i| {
+        for e in &i.events {
+            if let egui::Event::Touch { phase, force, .. } = e {
+                match phase {
+                    egui::TouchPhase::End | egui::TouchPhase::Cancel => st.pen = None,
+                    _ => {
+                        if let Some(f) = force {
+                            st.pen = Some(f.clamp(0.0, 1.0));
+                        }
+                    }
+                }
+            }
+        }
+    });
 }

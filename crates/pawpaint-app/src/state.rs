@@ -463,6 +463,8 @@ pub struct State {
     /// A ferramenta acabou de mudar (o Transformar já solta a camada).
     pub tool_changed: bool,
     pub last_autosave: std::time::Instant,
+    /// Pressão da caneta (0..1) enquanto ela toca a tela; `None` com mouse.
+    pub pen: Option<f32>,
     /// Autosave em andamento: roda fora da thread da interface, com uma cópia do documento.
     pub autosave_job: Option<std::thread::JoinHandle<()>>,
     /// Documentos já fechados: um autosave atrasado não pode recriar o arquivo deles.

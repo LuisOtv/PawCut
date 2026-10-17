@@ -787,6 +787,54 @@ pub fn brush_editor(st: &mut State, ui: &mut egui::Ui) {
                 });
                 ui.end_row();
             });
+            ui.add_space(6.0);
+            ui.label(RichText::new("Dinâmica").strong());
+            let d = &mut b.dynamics;
+            egui::Grid::new("brush-dynamics")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    use pawpaint_core::brush::Sensor;
+                    let combo = |ui: &mut egui::Ui, id: &str, name: &str, v: &mut Sensor| {
+                        ui.label(RichText::new(name).color(theme::TEXT_DIM));
+                        egui::ComboBox::from_id_salt(id)
+                            .width(ui.available_width().clamp(80.0, 200.0))
+                            .selected_text(v.label())
+                            .show_ui(ui, |ui| {
+                                for s in Sensor::ALL {
+                                    ui.selectable_value(v, s, s.label());
+                                }
+                            });
+                        ui.end_row();
+                    };
+                    combo(ui, "dyn-size", "Tamanho muda com", &mut d.size);
+                    if d.size != Sensor::None {
+                        ui.label(RichText::new("  no mínimo").color(theme::TEXT_DIM));
+                        let mut m = d.size_min * 100.0;
+                        ui.add(paw_ui::Slider::new(&mut m, 0.0..=100.0).suffix("%"));
+                        d.size_min = m / 100.0;
+                        ui.end_row();
+                    }
+                    combo(ui, "dyn-flow", "Fluxo muda com", &mut d.flow);
+                    if d.flow != Sensor::None {
+                        ui.label(RichText::new("  no mínimo").color(theme::TEXT_DIM));
+                        let mut m = d.flow_min * 100.0;
+                        ui.add(paw_ui::Slider::new(&mut m, 0.0..=100.0).suffix("%"));
+                        d.flow_min = m / 100.0;
+                        ui.end_row();
+                    }
+                    if d.size == Sensor::Fade || d.flow == Sensor::Fade {
+                        ui.label(RichText::new("Some em").color(theme::TEXT_DIM));
+                        ui.add(
+                            paw_ui::Slider::new(&mut d.fade_len, 20.0..=3000.0)
+                                .logarithmic(true)
+                                .suffix(" px"),
+                        );
+                        ui.end_row();
+                    }
+                    ui.label(RichText::new("Ângulo").color(theme::TEXT_DIM));
+                    ui.checkbox(&mut d.follow_stroke, "segue o traço");
+                    ui.end_row();
+                });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.add(

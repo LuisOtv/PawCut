@@ -728,6 +728,15 @@ impl Editor {
         }
     }
 
+    /// Como `stroke_point`, com a pressão da caneta (0..1) neste ponto.
+    pub fn stroke_point_pressure(&mut self, x: f32, y: f32, pressure: f32) {
+        if let Some(s) = &mut self.stroke {
+            s.stroker.add_point_pressure(x, y, pressure);
+            let tiles = s.stroker.buf.take_dirty();
+            self.dirty_tiles(tiles);
+        }
+    }
+
     /// Traço reto (linhas e contornos de formas) dentro de um traço já começado.
     pub fn stroke_line(&mut self, a: (f32, f32), b: (f32, f32)) {
         if let Some(s) = &mut self.stroke {

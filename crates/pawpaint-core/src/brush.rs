@@ -16,6 +16,75 @@ pub enum Tip {
     Square,
 }
 
+/// O que controla o tamanho ou o fluxo de cada carimbo durante o traço.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Sensor {
+    /// Nada: o valor do pincel vale sempre.
+    #[default]
+    None,
+    /// Pressão da caneta (com mouse vale sempre 100 %).
+    Pressure,
+    /// Velocidade do traço: devagar = cheio, rápido = fino.
+    Speed,
+    /// Distância andada: começa cheio e vai sumindo até `fade_len` pixels.
+    Fade,
+    /// Sorteio a cada carimbo.
+    Random,
+}
+
+impl Sensor {
+    pub const ALL: [Sensor; 5] = [
+        Sensor::None,
+        Sensor::Pressure,
+        Sensor::Speed,
+        Sensor::Fade,
+        Sensor::Random,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Sensor::None => "Nada",
+            Sensor::Pressure => "Pressão",
+            Sensor::Speed => "Velocidade",
+            Sensor::Fade => "Distância (some aos poucos)",
+            Sensor::Random => "Aleatório",
+        }
+    }
+}
+
+/// Como a caneta (ou o mouse) muda o pincel ao longo do traço.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Dynamics {
+    pub size: Sensor,
+    /// Fração do tamanho quando o sensor está no mínimo (0,1 = 10 %).
+    pub size_min: f32,
+    pub flow: Sensor,
+    pub flow_min: f32,
+    /// O ângulo do pincel acompanha a direção do traço (soma ao ângulo do pincel).
+    pub follow_stroke: bool,
+    /// Distância (px) em que o sensor "Distância" chega a zero.
+    pub fade_len: f32,
+}
+
+impl Default for Dynamics {
+    fn default() -> Self {
+        Self {
+            size: Sensor::None,
+            size_min: 0.2,
+            flow: Sensor::None,
+            flow_min: 0.2,
+            follow_stroke: false,
+            fade_len: 300.0,
+        }
+    }
+}
+
+impl Dynamics {
+    pub fn is_none(&self) -> bool {
+        self.size == Sensor::None && self.flow == Sensor::None && !self.follow_stroke
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Brush {
     pub name: String,
@@ -39,6 +108,9 @@ pub struct Brush {
     pub scatter: f32,
     /// Estabilizador: 0 = segue o mouse, perto de 1 = suaviza muito.
     pub smoothing: f32,
+    /// Pressão, velocidade e direção mudando o carimbo ao longo do traço.
+    #[serde(default)]
+    pub dynamics: Dynamics,
 }
 
 impl Brush {
@@ -56,6 +128,7 @@ impl Brush {
             grain: 0.0,
             scatter: 0.0,
             smoothing: 0.0,
+            dynamics: Dynamics::default(),
         }
     }
 
@@ -86,6 +159,57 @@ impl Brush {
                 hardness: 1.0,
                 spacing: 0.04,
                 smoothing: 0.5,
+                ..b.clone()
+            },
+            Brush {
+                name: "Caneta tinteiro".into(),
+                size: 14.0,
+                hardness: 1.0,
+                spacing: 0.04,
+                smoothing: 0.35,
+                dynamics: Dynamics {
+                    size: Sensor::Speed,
+                    size_min: 0.3,
+                    ..Dynamics::default()
+                },
+                ..b.clone()
+            },
+            Brush {
+                name: "Pincel de pressão".into(),
+                size: 28.0,
+                hardness: 0.9,
+                spacing: 0.05,
+                smoothing: 0.25,
+                dynamics: Dynamics {
+                    size: Sensor::Pressure,
+                    size_min: 0.1,
+                    flow: Sensor::Pressure,
+                    flow_min: 0.5,
+                    ..Dynamics::default()
+                },
+                ..b.clone()
+            },
+            Brush {
+                name: "Traço que some".into(),
+                size: 22.0,
+                hardness: 0.85,
+                spacing: 0.04,
+                dynamics: Dynamics {
+                    size: Sensor::Fade,
+                    size_min: 0.0,
+                    fade_len: 260.0,
+                    ..Dynamics::default()
+                },
+                ..b.clone()
+            },
+            Brush {
+                name: "Caligrafia".into(),
+                size: 26.0,
+                hardness: 1.0,
+                tip: Tip::Square,
+                roundness: 0.25,
+                angle: 40.0,
+                spacing: 0.03,
                 ..b.clone()
             },
             Brush {
@@ -188,6 +312,21 @@ pub struct Stroker {
     last: Option<(f32, f32)>,
     carry: f32,
     seed: u32,
+    /// Pressão do último ponto e a que vale para os carimbos do trecho atual (0..1).
+    pressure: f32,
+    seg: Segment,
+    /// Distância total andada no traço (para o sensor "Distância").
+    walked: f32,
+}
+
+/// O que o trecho do traço que está sendo carimbado diz aos sensores.
+#[derive(Debug, Clone, Copy)]
+struct Segment {
+    pressure: f32,
+    /// 1 = devagar, 0 = rápido.
+    slow: f32,
+    /// Direção do traço em graus.
+    angle: f32,
 }
 
 impl Stroker {
@@ -204,6 +343,13 @@ impl Stroker {
             last: None,
             carry: 0.0,
             seed: 1,
+            pressure: 1.0,
+            seg: Segment {
+                pressure: 1.0,
+                slow: 1.0,
+                angle: 0.0,
+            },
+            walked: 0.0,
         }
     }
 
@@ -215,6 +361,30 @@ impl Stroker {
         self.smoothed = None;
         self.last = None;
         self.carry = 0.0;
+        self.walked = 0.0;
+        self.pressure = 1.0;
+        self.seg = Segment {
+            pressure: 1.0,
+            slow: 1.0,
+            angle: 0.0,
+        };
+    }
+
+    /// Como `add_point`, com a pressão da caneta (0..1) neste ponto.
+    pub fn add_point_pressure(&mut self, x: f32, y: f32, pressure: f32) {
+        let p = if pressure.is_finite() {
+            pressure.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let from = if self.last.is_some() {
+            self.pressure
+        } else {
+            p
+        };
+        self.pressure = p;
+        self.seg.pressure = from;
+        self.add_point(x, y);
     }
 
     /// Próximo ponto do mouse. Põe os carimbos entre o ponto anterior e este.
@@ -267,6 +437,10 @@ impl Stroker {
             return;
         }
         let (ux, uy) = (dx / len, dy / len);
+        let reference = self.brush.size * 0.5 + 4.0;
+        self.seg.slow = (1.0 - len / reference).clamp(0.0, 1.0);
+        self.seg.angle = dy.atan2(dx).to_degrees();
+        let (p_from, p_to) = (self.seg.pressure, self.pressure);
         // `last` é o ponto anterior do caminho e `carry` a distância andada desde o último
         // carimbo até ele: continua de onde parou.
         let mut travelled = 0.0f32;
@@ -279,9 +453,13 @@ impl Stroker {
             }
             travelled += need;
             remaining -= need;
+            // a pressão anda do valor do ponto anterior até o deste
+            self.seg.pressure = p_from + (p_to - p_from) * (travelled / len).clamp(0.0, 1.0);
+            self.walked += need;
             self.stamp(last.0 + ux * travelled, last.1 + uy * travelled);
             self.carry = 0.0;
         }
+        self.seg.pressure = p_to;
         self.last = Some(pos);
     }
 
@@ -302,7 +480,7 @@ impl Stroker {
     fn stamp_one(&mut self, cx: f32, cy: f32) {
         // Só os números que o carimbo usa (clonar o pincel inteiro, com o nome, a cada carimbo
         // alocava memória milhares de vezes por segundo).
-        let (size, hardness, flow, roundness, angle, tip, grain, scatter) = {
+        let (mut size, hardness, mut flow, roundness, mut angle, tip, grain, scatter) = {
             let b = &self.brush;
             (
                 b.size,
@@ -315,6 +493,28 @@ impl Stroker {
                 b.scatter,
             )
         };
+        let dynamics = self.brush.dynamics;
+        if !dynamics.is_none() {
+            let sensor = |me: &mut Self, s: Sensor| -> f32 {
+                match s {
+                    Sensor::None => 1.0,
+                    Sensor::Pressure => me.seg.pressure,
+                    Sensor::Speed => me.seg.slow,
+                    Sensor::Fade => (1.0 - me.walked / dynamics.fade_len.max(1.0)).clamp(0.0, 1.0),
+                    Sensor::Random => {
+                        me.seed = me.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        (me.seed >> 8) as f32 / 16_777_216.0
+                    }
+                }
+            };
+            let t = sensor(self, dynamics.size);
+            size *= dynamics.size_min + (1.0 - dynamics.size_min) * t;
+            let t = sensor(self, dynamics.flow);
+            flow *= dynamics.flow_min + (1.0 - dynamics.flow_min) * t;
+            if dynamics.follow_stroke {
+                angle += self.seg.angle;
+            }
+        }
         let (mut cx, mut cy) = (cx, cy);
         if scatter > 0.0 {
             self.seed = self
@@ -526,6 +726,146 @@ pub fn commit_stroke(
             mask.as_deref(),
             alpha_lock,
         );
+    }
+}
+
+#[cfg(test)]
+mod dynamics_tests {
+    use super::*;
+
+    fn stroke(brush: Brush, pts: &[(f32, f32, f32)]) -> Stroker {
+        let mut s = Stroker::new(400, 200);
+        s.begin(brush, [0, 0, 0], false);
+        for (x, y, p) in pts {
+            s.add_point_pressure(*x, *y, *p);
+        }
+        s
+    }
+
+    /// Quantos pixels do traço têm alfa na coluna `x` (a "espessura" ali).
+    fn thickness(s: &Stroker, x: usize) -> usize {
+        let mut n = 0;
+        for y in 0..200 {
+            let t = s.buf.tile(x / TILE, y / TILE);
+            if let Some(t) = t {
+                let i = ((y % TILE) * TILE + x % TILE) * 4 + 3;
+                if t[i] > 128 {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    fn line() -> Vec<(f32, f32, f32)> {
+        (0..=36)
+            .map(|i| (20.0 + i as f32 * 10.0, 100.0, 1.0))
+            .collect()
+    }
+
+    fn base() -> Brush {
+        Brush {
+            size: 30.0,
+            hardness: 1.0,
+            spacing: 0.05,
+            ..Brush::basic()
+        }
+    }
+
+    #[test]
+    fn pressure_changes_the_width_along_the_stroke() {
+        let mut b = base();
+        b.dynamics.size = Sensor::Pressure;
+        b.dynamics.size_min = 0.1;
+        // pressão cai de 1 a 0 ao longo da linha
+        let pts: Vec<_> = (0..=36)
+            .map(|i| (20.0 + i as f32 * 10.0, 100.0, 1.0 - i as f32 / 36.0))
+            .collect();
+        let s = stroke(b, &pts);
+        let (start, mid, end) = (thickness(&s, 40), thickness(&s, 200), thickness(&s, 360));
+        assert!(start > mid && mid > end, "{start} > {mid} > {end}");
+        assert!(start >= 26, "começa perto do tamanho cheio: {start}");
+        assert!(end <= 8, "termina fino: {end}");
+        // sem sensor a espessura não muda
+        let s = stroke(base(), &pts);
+        assert_eq!(thickness(&s, 40), thickness(&s, 360));
+    }
+
+    #[test]
+    fn fade_makes_the_stroke_taper_and_speed_thins_fast_strokes() {
+        let mut b = base();
+        b.dynamics.size = Sensor::Fade;
+        b.dynamics.size_min = 0.0;
+        b.dynamics.fade_len = 300.0;
+        let s = stroke(b, &line());
+        assert!(thickness(&s, 40) > thickness(&s, 200) && thickness(&s, 200) > thickness(&s, 330));
+        // velocidade: pontos espaçados (rápido) ficam mais finos que juntos (devagar)
+        let mut b = base();
+        b.dynamics.size = Sensor::Speed;
+        b.dynamics.size_min = 0.2;
+        let slow: Vec<_> = (0..=100)
+            .map(|i| (20.0 + i as f32 * 2.0, 60.0, 1.0))
+            .collect();
+        let fast: Vec<_> = (0..=20)
+            .map(|i| (20.0 + i as f32 * 20.0, 60.0, 1.0))
+            .collect();
+        let (a, c) = (stroke(b.clone(), &slow), stroke(b, &fast));
+        assert!(
+            thickness(&a, 100) > thickness(&c, 200) + 5,
+            "{} vs {}",
+            thickness(&a, 100),
+            thickness(&c, 200)
+        );
+    }
+
+    #[test]
+    fn follow_stroke_turns_a_flat_tip_along_the_line() {
+        let mut flat = Brush {
+            roundness: 0.2,
+            ..base()
+        };
+        // linha vertical: a ponta achatada (maior na horizontal) fica larga sem seguir o traço
+        let vertical: Vec<_> = (0..=18)
+            .map(|i| (200.0, 20.0 + i as f32 * 8.0, 1.0))
+            .collect();
+        let width = |s: &Stroker| {
+            (0..400)
+                .filter(|x| {
+                    s.buf
+                        .tile(x / TILE, 100 / TILE)
+                        .is_some_and(|t| t[((100 % TILE) * TILE + x % TILE) * 4 + 3] > 128)
+                })
+                .count()
+        };
+        let plain = stroke(flat.clone(), &vertical);
+        flat.dynamics.follow_stroke = true;
+        let follow = stroke(flat, &vertical);
+        assert!(
+            width(&plain) > width(&follow) * 2,
+            "{} vs {}",
+            width(&plain),
+            width(&follow)
+        );
+    }
+
+    #[test]
+    fn bad_pressure_values_are_tolerated() {
+        let mut b = base();
+        b.dynamics.size = Sensor::Pressure;
+        let s = stroke(
+            b,
+            &[
+                (10.0, 10.0, f32::NAN),
+                (50.0, 10.0, -3.0),
+                (90.0, 10.0, 9.0),
+            ],
+        );
+        assert!(!s.buf.is_empty());
+        // pincéis antigos (sem o campo) abrem com a dinâmica desligada
+        let mut json = serde_json::to_value(Brush::basic()).unwrap();
+        json.as_object_mut().unwrap().remove("dynamics");
+        let old: Brush = serde_json::from_value(json).unwrap();
+        assert!(old.dynamics.is_none());
     }
 }
 
