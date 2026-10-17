@@ -2932,6 +2932,46 @@ mod tests {
     }
 
     #[test]
+    fn shift_click_draws_a_straight_line_from_the_last_stroke() {
+        let mut h = Harness::new();
+        h.app.st.brush = Brush {
+            size: 6.0,
+            hardness: 1.0,
+            ..Brush::basic()
+        };
+        h.app.st.fg = [0, 0, 255];
+        h.app.st.tool = Tool::Brush;
+        // primeiro traço curto termina em (40, 50)
+        let a = h.screen(30.0, 50.0);
+        paint_screen(&mut h, a, a + vec2(10.0, 0.0));
+        assert!(h.px(150, 50)[0] > 200, "ainda não pintou ali");
+        // Shift+clique em (200, 50): liga as duas pontas
+        h.frame(vec![Event::ModifiersChanged(Modifiers::SHIFT)]);
+        let b = h.screen(200.0, 50.0);
+        h.frame(vec![Event::PointerMoved(b)]);
+        h.frame(vec![Event::PointerButton {
+            pos: b,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::SHIFT,
+        }]);
+        h.frame(vec![Event::PointerButton {
+            pos: b,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::SHIFT,
+        }]);
+        h.frame(vec![Event::ModifiersChanged(Modifiers::NONE)]);
+        assert!(h.px(120, 50)[0] < 60, "a reta passa pelo meio");
+        assert!(h.px(200, 50)[0] < 60);
+        assert!(h.px(120, 80)[0] > 200, "e fica fina");
+        // sem Shift, o próximo clique não liga com nada
+        let c = h.screen(100.0, 150.0);
+        paint_screen(&mut h, c, c + vec2(0.5, 0.0));
+        assert!(h.px(150, 120)[0] > 200);
+    }
+
+    #[test]
     fn clone_stamp_copies_from_the_alt_click_source() {
         let mut h = Harness::new();
         {

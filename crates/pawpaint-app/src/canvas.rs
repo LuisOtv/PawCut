@@ -906,7 +906,17 @@ fn start_interaction(
                         st.docs[cur].ed.set_clone_source(off);
                     }
                     let pressure = st.pen.unwrap_or(1.0);
+                    // Shift+clique: reta desde onde o último traço terminou.
+                    if mods.shift
+                        && !cloning
+                        && let Some(prev) = st.docs[cur].last_stroke_end
+                    {
+                        st.docs[cur]
+                            .ed
+                            .stroke_point_pressure(prev.0, prev.1, pressure);
+                    }
                     st.docs[cur].ed.stroke_point_pressure(pt.0, pt.1, pressure);
+                    st.docs[cur].last_stroke_end = Some(pt);
                     st.interaction = Some(Interaction::Stroke);
                 }
                 Err(e) => st.warn(e.to_string()),
@@ -1137,7 +1147,10 @@ fn finish_interaction(st: &mut State, pt: (f32, f32), _mods: egui::Modifiers) {
     let (w, h) = (st.docs[cur].ed.doc().width, st.docs[cur].ed.doc().height);
     let active = st.docs[cur].active;
     match inter {
-        Interaction::Stroke => st.docs[cur].ed.end_stroke(pt.0, pt.1),
+        Interaction::Stroke => {
+            st.docs[cur].ed.end_stroke(pt.0, pt.1);
+            st.docs[cur].last_stroke_end = Some(pt);
+        }
         Interaction::Smudge => st.docs[cur].ed.end_smudge(),
         Interaction::Gradient { start, cur: end } => {
             if (start.0 - end.0).hypot(start.1 - end.1) < 2.0 {

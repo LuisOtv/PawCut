@@ -297,6 +297,8 @@ pub struct DocView {
     pub view_center: egui::Pos2,
     /// Visão espelhada na horizontal.
     pub view_flip: bool,
+    /// Onde o último traço de pincel terminou: Shift+clique traça uma reta a partir daqui.
+    pub last_stroke_end: Option<(f32, f32)>,
     /// Tamanho da área do canvas na janela (último quadro): a Visão geral desenha com ele o
     /// retângulo do que está aparecendo.
     pub canvas_size: Vec2,
@@ -328,6 +330,7 @@ impl DocView {
             view_rot: 0.0,
             view_center: egui::Pos2::ZERO,
             view_flip: false,
+            last_stroke_end: None,
             canvas_size: Vec2::ZERO,
             name: "Sem título".to_string(),
             edit_mask: false,
