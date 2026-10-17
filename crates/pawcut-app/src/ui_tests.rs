@@ -903,3 +903,49 @@ fn middle_button_wheel_runs_the_action_in_the_dragged_direction() {
         assert!(crate::keymap::radial_action(&a.id).is_some(), "{}", a.id);
     }
 }
+
+#[test]
+fn appearance_presets_save_apply_and_persist() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("presets.json");
+    let mut st = AppState::new(Project::new(ProjectSettings::default()));
+    st.drop_generator(Generator::SolidColor, 0, 0);
+    st.drop_generator(Generator::SolidColor, 0, 300);
+    let (a, b) = (
+        st.project().video_tracks[0].clips[0].id,
+        st.project().video_tracks[0].clips[1].id,
+    );
+    // o primeiro clipe ganha uma cor e um volume; o segundo fica neutro
+    st.apply(Edit::SetClip {
+        clip: a,
+        change: ClipChange::Color(ColorAdjust {
+            hue: 30.0,
+            saturation: 40.0,
+            lightness: 0.0,
+        }),
+    });
+    let ctx = egui::Context::default();
+    let mut ws = Workspace::new(&ctx, st);
+    ws.recovery.clear();
+    ws.presets_path = Some(path.clone());
+    let clip_a = ws.st.project().clip(a).unwrap().clone();
+    ws.save_preset("  ", &clip_a);
+    assert!(ws.presets.is_empty(), "nome vazio não salva");
+    ws.save_preset("Look quente", &clip_a);
+    assert_eq!(ws.presets.len(), 1);
+    // aplica nos dois selecionados (a já tem; b ganha)
+    ws.st.selection = vec![b];
+    ws.apply_preset(0);
+    assert_eq!(ws.st.project().clip(b).unwrap().color.saturation, 40.0);
+    ws.st.undo();
+    assert_eq!(ws.st.project().clip(b).unwrap().color.saturation, 0.0, "um desfazer");
+    // vai para o disco e volta
+    assert_eq!(crate::presets::load(&path).len(), 1);
+    ws.delete_preset(0);
+    assert!(crate::presets::load(&path).is_empty());
+    // preset que não existe e seleção vazia não quebram
+    ws.apply_preset(7);
+    ws.st.selection.clear();
+    ws.save_preset("x", &clip_a);
+    ws.apply_preset(0);
+}

@@ -1362,6 +1362,80 @@ impl Workspace {
                         );
                     });
                 }
+                section(ui, "Presets de aparência", |ui| {
+                    if self.presets.is_empty() {
+                        row(
+                            ui,
+                            "",
+                            |ui| {
+                                ui.label(
+                                    RichText::new("Nenhum preset. Salve a aparência deste clipe (cor, volume, chroma, fundo desfocado) para usar em outros.")
+                                        .weak()
+                                        .small(),
+                                );
+                            },
+                            |_| {},
+                        );
+                    } else {
+                        let names: Vec<String> =
+                            self.presets.iter().map(|p| p.name.clone()).collect();
+                        let sel = self.preset_pick.min(names.len() - 1);
+                        let mut pick = sel;
+                        row(
+                            ui,
+                            "Preset",
+                            |ui| {
+                                egui::ComboBox::from_id_salt("preset-pick")
+                                    .width(theme::fit_width(ui, 150.0))
+                                    .selected_text(&names[sel])
+                                    .show_ui(ui, |ui| {
+                                        for (i, n) in names.iter().enumerate() {
+                                            ui.selectable_value(&mut pick, i, n);
+                                        }
+                                    });
+                            },
+                            |_| {},
+                        );
+                        self.preset_pick = pick;
+                        row(
+                            ui,
+                            "",
+                            |ui| {
+                                if ui
+                                    .button("Aplicar")
+                                    .on_hover_text("Põe esta aparência nos clipes selecionados")
+                                    .clicked()
+                                {
+                                    self.apply_preset(pick);
+                                }
+                                if ui.button("Apagar").clicked() {
+                                    self.delete_preset(pick);
+                                }
+                            },
+                            |_| {},
+                        );
+                    }
+                    row(
+                        ui,
+                        "Salvar como",
+                        |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.preset_name)
+                                    .desired_width(theme::fit_width(ui, 110.0))
+                                    .hint_text("nome"),
+                            );
+                            if ui
+                                .button("Salvar")
+                                .on_hover_text("Guarda a aparência deste clipe")
+                                .clicked()
+                            {
+                                let name = self.preset_name.clone();
+                                self.save_preset(&name, &first);
+                            }
+                        },
+                        |_| {},
+                    );
+                });
                 if first.link.is_some() {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {

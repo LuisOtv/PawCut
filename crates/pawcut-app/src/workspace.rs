@@ -156,6 +156,12 @@ pub struct Workspace {
     pub silence_threshold: f32,
     pub silence_min: f64,
     pub duck_threshold: f32,
+    /// Presets de aparência salvos e o nome que está sendo digitado para um novo.
+    pub presets: Vec<crate::presets::ClipPreset>,
+    pub preset_pick: usize,
+    pub preset_name: String,
+    /// Onde guardar os presets (`None` nos testes).
+    pub presets_path: Option<std::path::PathBuf>,
     /// Rampa de velocidade: de ×A a ×B.
     pub ramp: (f64, f64),
     /// Foco inicial e final da panorâmica (−100 % borda esquerda … 100 % borda direita).
@@ -176,6 +182,65 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Guarda a aparência do clipe `clip` como preset `name` (troca o de mesmo nome).
+    pub fn save_preset(&mut self, name: &str, clip: &pawcut_core::Clip) {
+        if name.trim().is_empty() {
+            self.st.warn("Dê um nome ao preset");
+            return;
+        }
+        crate::presets::upsert(
+            &mut self.presets,
+            crate::presets::ClipPreset::from_clip(name, clip),
+        );
+        self.persist_presets();
+        self.st.say(format!("Preset “{}” salvo", name.trim()));
+    }
+
+    /// Aplica o preset `index` nos clipes selecionados.
+    pub fn apply_preset(&mut self, index: usize) {
+        let Some(p) = self.presets.get(index).cloned() else {
+            return;
+        };
+        let targets: Vec<_> = self.st.selection.clone();
+        if targets.is_empty() {
+            self.st.warn("Selecione clipes para aplicar o preset");
+            return;
+        }
+        for clip in &targets {
+            for change in p.changes() {
+                // Volume só vale em clipe de som e cor/chroma/fundo só em imagem: o editor
+                // recusa o que não serve, e isso não é erro aqui.
+                let _ = self.st.editor.apply_coalescing(
+                    pawcut_core::Edit::SetClip {
+                        clip: *clip,
+                        change,
+                    },
+                    "preset",
+                );
+            }
+        }
+        self.st.editor.end_coalescing();
+        self.st
+            .say(format!("Preset “{}” em {} clipe(s)", p.name, targets.len()));
+    }
+
+    pub fn delete_preset(&mut self, index: usize) {
+        if index < self.presets.len() {
+            self.presets.remove(index);
+            self.preset_pick = self.preset_pick.min(self.presets.len().saturating_sub(1));
+            self.persist_presets();
+        }
+    }
+
+    fn persist_presets(&mut self) {
+        if let Some(path) = &self.presets_path
+            && let Err(e) = crate::presets::save(path, &self.presets)
+        {
+            self.st
+                .warn(format!("Não foi possível salvar os presets: {e}"));
+        }
+    }
+
     pub fn new(ctx: &egui::Context, st: AppState) -> Self {
         let c = ctx.clone();
         let preview = PreviewWorker::spawn((1920, 1080), 48_000, move || c.request_repaint());
@@ -257,6 +322,10 @@ impl Workspace {
             silence_threshold: -40.0,
             silence_min: 0.5,
             duck_threshold: -35.0,
+            presets: Vec::new(),
+            preset_pick: 0,
+            preset_name: String::new(),
+            presets_path: None,
             ramp: (1.0, 3.0),
             pan_focus: (-60.0, 60.0),
             duck_db: 12.0,

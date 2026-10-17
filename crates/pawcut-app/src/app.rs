@@ -90,6 +90,8 @@ impl PawCutApp {
             ctx,
             AppState::new(pawcut_core::Project::new(Default::default())),
         );
+        ws.presets_path = Some(crate::config::presets_path());
+        ws.presets = crate::presets::load(&crate::config::presets_path());
         if !args.is_empty() {
             ws.open_paths(args);
         }
