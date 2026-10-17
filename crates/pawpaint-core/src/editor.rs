@@ -1372,6 +1372,10 @@ impl Editor {
         self.checkpoint(label);
         for l in &mut self.doc.layers {
             l.pixels = f(&l.pixels);
+            // A máscara acompanha a tela (antes ela ficava com o tamanho antigo).
+            if let Some(m) = &l.mask {
+                l.mask = Some(f(m));
+            }
         }
         self.doc.width = w;
         self.doc.height = h;
@@ -2019,6 +2023,218 @@ mod tests {
             e.set_wrap(false);
         }
         assert!(e.doc().layer(base).is_some());
+    }
+
+    /// Operações aleatórias em sequência (desfazer e refazer no meio): nenhuma derruba o editor e o
+    /// documento fica coerente (pastas existem, todas as camadas têm o tamanho da tela, a imagem
+    /// final se compõe).
+    #[test]
+    fn monkey_test_keeps_the_document_consistent() {
+        use crate::selection::{SelOp, Selection};
+        fn check(e: &Editor, step: usize, seed: u64) {
+            let d = e.doc();
+            for l in &d.layers {
+                if let Some(p) = l.parent {
+                    let g = d
+                        .layer(p)
+                        .unwrap_or_else(|| panic!("seed {seed} passo {step}: pasta {p} sumiu"));
+                    assert!(g.is_group, "seed {seed} passo {step}: pai não é pasta");
+                }
+                if !l.is_group {
+                    assert_eq!(
+                        (l.pixels.width(), l.pixels.height()),
+                        (d.width, d.height),
+                        "seed {seed} passo {step}: camada {} com outro tamanho",
+                        l.name
+                    );
+                }
+                if let Some(m) = &l.mask {
+                    assert_eq!((m.width(), m.height()), (d.width, d.height), "máscara");
+                }
+            }
+            let img = crate::composite::flatten(d);
+            assert_eq!(
+                (img.width() as usize, img.height() as usize),
+                (d.width, d.height)
+            );
+        }
+        for seed in 1..=4u64 {
+            let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut rnd = move |n: usize| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x % n.max(1) as u64) as usize
+            };
+            let mut e = Editor::new(80, 60, Background::White);
+            for step in 0..120 {
+                let layers: Vec<LayerId> = e.doc().layers.iter().map(|l| l.id).collect();
+                let pick = |r: usize| layers[r % layers.len().max(1)];
+                let id = pick(rnd(100));
+                let (px, py) = (rnd(90) as f32 - 5.0, rnd(70) as f32 - 5.0);
+                match rnd(26) {
+                    0 => {
+                        e.add_layer(None, Some(id));
+                    }
+                    1 => {
+                        e.add_group(Some(id));
+                    }
+                    2 => {
+                        let g = pick(rnd(100));
+                        let _ = e.set_parent(id, Some(g));
+                    }
+                    3 => {
+                        let _ = e.set_parent(id, None);
+                    }
+                    4 => e.move_layer(
+                        id,
+                        [MoveTo::Up, MoveTo::Down, MoveTo::Top, MoveTo::Bottom][rnd(4)],
+                    ),
+                    5 => {
+                        let _ = e.duplicate_layer(id);
+                    }
+                    6 => {
+                        if layers.len() > 1 {
+                            let _ = e.delete_layer(id);
+                        }
+                    }
+                    7 => {
+                        let _ = e.merge_down(id);
+                    }
+                    8 => {
+                        let _ = e.add_mask(id);
+                    }
+                    9 => {
+                        let _ = e.remove_mask(id, rnd(2) == 0);
+                    }
+                    10 => {
+                        let f = [
+                            Filter::Invert,
+                            Filter::Desaturate,
+                            Filter::Threshold(0.5),
+                            Filter::Posterize(4),
+                            Filter::Curves(vec![(0.0, 0.2), (1.0, 0.8)]),
+                        ][rnd(5)]
+                        .clone();
+                        let _ = e.add_adjustment_layer(f, None, Some(id));
+                    }
+                    11 | 12 => {
+                        let mut b = Brush {
+                            size: 2.0 + rnd(30) as f32,
+                            hardness: rnd(100) as f32 / 100.0,
+                            spacing: 0.05 + rnd(30) as f32 / 100.0,
+                            ..Brush::basic()
+                        };
+                        if rnd(3) == 0 {
+                            b.spray = rnd(30) as u32;
+                        }
+                        if rnd(3) == 0 {
+                            b.dynamics.size = crate::brush::Sensor::Pressure;
+                        }
+                        e.set_wrap(rnd(3) == 0);
+                        e.set_radial(1 + rnd(5) as u32);
+                        e.set_mirror(rnd(4) == 0, rnd(4) == 0);
+                        e.set_paint_mask(rnd(4) == 0);
+                        if e.begin_stroke(
+                            id,
+                            b,
+                            [rnd(256) as u8, 9, 9],
+                            rnd(5) == 0,
+                            BlendMode::Normal,
+                        )
+                        .is_ok()
+                        {
+                            if rnd(4) == 0 {
+                                e.set_clone_source((rnd(40) as f32 - 20.0, 5.0));
+                            }
+                            for k in 0..4 {
+                                e.stroke_point_pressure(
+                                    px + k as f32 * 6.0,
+                                    py + k as f32,
+                                    rnd(100) as f32 / 100.0,
+                                );
+                            }
+                            e.end_stroke(px + 24.0, py + 4.0);
+                        }
+                        e.set_wrap(false);
+                        e.set_radial(1);
+                        e.set_mirror(false, false);
+                        e.set_paint_mask(false);
+                    }
+                    13 => {
+                        let _ = e.bucket_fill(
+                            id,
+                            (px.max(0.0) as usize, py.max(0.0) as usize),
+                            [1, 200, 3],
+                            0.3,
+                            rnd(2) == 0,
+                            1.0,
+                            rnd(2) == 0,
+                        );
+                    }
+                    14 => {
+                        let (dw, dh) = (e.doc().width, e.doc().height);
+                        e.set_selection(
+                            Some(Selection::rect(
+                                dw,
+                                dh,
+                                px as i64,
+                                py as i64,
+                                px as i64 + 30,
+                                py as i64 + 20,
+                            )),
+                            "sel",
+                        );
+                        let _ = e.fill_selection(id, [200, 100, 0]);
+                    }
+                    15 => {
+                        let _ = e.apply_filter(
+                            id,
+                            &Filter::HueSaturation {
+                                hue: 40.0,
+                                saturation: 0.2,
+                                lightness: 0.0,
+                            },
+                            "f",
+                        );
+                    }
+                    16 => {
+                        let _ = e.apply_filter(id, &Filter::GaussianBlur(1.0 + rnd(5) as f32), "f");
+                    }
+                    17 => {
+                        e.undo();
+                    }
+                    18 => {
+                        e.redo();
+                    }
+                    19 => {
+                        e.jump_to(rnd(6));
+                    }
+                    20 => e.crop(rnd(10), rnd(10), 40 + rnd(40), 30 + rnd(30)),
+                    21 => e.resize_canvas(
+                        40 + rnd(80),
+                        30 + rnd(60),
+                        rnd(20) as i64 - 10,
+                        rnd(20) as i64 - 10,
+                    ),
+                    22 => e.rotate_image(rnd(2) == 0),
+                    23 => e.flip_image(rnd(2) == 0),
+                    24 => {
+                        if rnd(4) == 0 {
+                            e.flatten();
+                        }
+                    }
+                    _ => {
+                        e.combine_selection(
+                            Selection::rect(e.doc().width, e.doc().height, 5, 5, 40, 30),
+                            [SelOp::Replace, SelOp::Add, SelOp::Subtract][rnd(3)],
+                            "sel",
+                        );
+                    }
+                }
+                check(&e, step, seed);
+            }
+        }
     }
 
     // ---- camadas de ajuste
