@@ -49,6 +49,19 @@ fn main() {
         }
         ed.end_stroke(3700.0, 1500.0);
     });
+    let mut big = Brush::basic();
+    big.size = 400.0;
+    time("traço de 60 pontos (pincel 400 px)", || {
+        ed.begin_stroke(top, big.clone(), [20, 20, 200], false, BlendMode::Normal)
+            .unwrap();
+        for i in 0..60 {
+            let t = i as f32 / 60.0;
+            ed.stroke_point(300.0 + t * 3300.0, 800.0 + t * 1400.0);
+            let _ = ed.take_dirty();
+        }
+        ed.end_stroke(3600.0, 2200.0);
+    });
+    ed.undo();
     time("desfazer o traço", || ed.undo());
     time("refazer o traço", || ed.redo());
 

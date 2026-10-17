@@ -1778,4 +1778,241 @@ mod perf_probe {
         e.apply_filter(id, &Filter::GaussianBlur(8.0), "b").unwrap();
         println!("blur: {:?}", t.elapsed());
     }
+
+    /// Valores absurdos (NaN, infinito, enormes, negativos, vazios) em tudo que recebe números do
+    /// usuário: nenhum pode derrubar o app (o fuzz já achou um desses na seleção).
+    #[test]
+    fn extreme_inputs_never_panic() {
+        use crate::fill::GradientKind;
+        use crate::filters::Filter;
+        use crate::transform::Affine;
+        let weird_f = [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            1e30,
+            -1e30,
+            0.0,
+            -0.0,
+            -5.0,
+            1e-30,
+            12345.678,
+        ];
+        let weird_i = [
+            i64::MIN / 4,
+            -1_000_000_000,
+            -1,
+            0,
+            1,
+            99,
+            100_000,
+            1_000_000_000,
+            i64::MAX / 4,
+        ];
+        let weird_u = [0usize, 1, 2, 99, 100, 101, 100_000, 1 << 40];
+        let mut e = Editor::new(100, 80, Background::White);
+        let id = e.doc().layers[0].id;
+        let top = e.add_layer(None, None);
+
+        // Seleções.
+        for &a in &weird_i {
+            for &b in &weird_i {
+                let s = Selection::rect(100, 80, a, b, b, a);
+                assert_eq!((s.width(), s.height()), (100, 80));
+            }
+        }
+        for &a in &weird_f {
+            for &b in &weird_f {
+                let _ = Selection::ellipse(100, 80, a, b, b, a).bounds();
+                let _ =
+                    Selection::polygon(100, 80, &[(a, b), (b, a), (a, a), (50.0, 10.0)]).bounds();
+            }
+        }
+        let _ = Selection::polygon(100, 80, &[]).bounds();
+        let _ = Selection::polygon(100, 80, &[(1.0, 1.0)]).bounds();
+        e.select_all();
+        for &r in &weird_u[..6] {
+            e.feather_selection(r.min(500));
+        }
+        for g in [i32::MIN / 100, -100, -1, 0, 1, 100, i32::MAX / 100] {
+            e.select_all();
+            e.grow_selection(g.clamp(-300, 300));
+        }
+        e.deselect();
+
+        // Pincel com pontos absurdos.
+        for &x in &weird_f {
+            for &y in &weird_f[..5] {
+                e.begin_stroke(top, Brush::basic(), [1, 2, 3], false, BlendMode::Normal)
+                    .unwrap();
+                e.stroke_point(10.0, 10.0);
+                e.stroke_point(x, y);
+                e.stroke_line((x, y), (50.0, 50.0));
+                e.end_stroke(y, x);
+            }
+        }
+        for size in [0.0, 0.5, 1.0, 1000.0, f32::NAN] {
+            let mut b = Brush::basic();
+            b.size = size;
+            b.spacing = 0.0;
+            b.roundness = size;
+            e.begin_stroke(top, b, [1, 2, 3], true, BlendMode::Multiply)
+                .unwrap();
+            e.stroke_point(30.0, 30.0);
+            e.stroke_point(40.0, 35.0);
+            e.end_stroke(45.0, 35.0);
+        }
+
+        // Borrão com pontos e tamanhos absurdos.
+        for &x in &weird_f {
+            for size in [0.0, 30.0, 1e9, f32::NAN] {
+                let mut b = Brush::basic();
+                b.size = size;
+                e.begin_smudge(top, b, x, 5.0).unwrap();
+                e.smudge_point(20.0, 20.0);
+                e.smudge_point(x, x);
+                e.smudge_point(25.0, 25.0);
+                e.end_smudge();
+            }
+        }
+
+        // Balde, varinha, degradê, formas.
+        for &x in &weird_u {
+            for &y in &weird_u {
+                let _ = e.bucket_fill(top, (x, y), [9, 9, 9], 0.5, true, 1.0, false);
+                e.magic_wand(top, (x, y), 0.3, false, crate::selection::SelOp::Add, true);
+            }
+        }
+        for &t in &weird_f {
+            let _ = e.bucket_fill(top, (1, 1), [9, 9, 9], t, true, t, true);
+            e.magic_wand(
+                top,
+                (1, 1),
+                t,
+                true,
+                crate::selection::SelOp::Replace,
+                false,
+            );
+        }
+        e.deselect();
+        for &a in &weird_f {
+            for &b in &weird_f[..6] {
+                let _ = e.gradient(
+                    top,
+                    (a, b),
+                    (b, a),
+                    GradientKind::Linear,
+                    [1, 2, 3, 255],
+                    [4, 5, 6, 0],
+                    a,
+                );
+                let _ = e.gradient(
+                    top,
+                    (a, b),
+                    (a, b),
+                    GradientKind::Radial,
+                    [1, 2, 3, 255],
+                    [4, 5, 6, 0],
+                    0.5,
+                );
+            }
+        }
+
+        // Transformações e geometria da tela.
+        for &a in &weird_f {
+            for &t in &weird_f {
+                let m = Affine {
+                    a,
+                    b: t,
+                    c: 0.0,
+                    d: a,
+                    tx: t,
+                    ty: a,
+                };
+                let _ = e.transform(top, &m);
+                let m2 = Affine::around((t, a), a, t, a, t, a);
+                let _ = e.transform(top, &m2);
+                if let Ok(f) = e.begin_float(top) {
+                    e.finish_float(&f, &m2);
+                }
+            }
+        }
+        for &x0 in &weird_u {
+            for &y0 in &weird_u[..6] {
+                e.crop(x0, y0, y0, x0);
+                e.crop(x0, y0, 1 << 40, 1 << 40);
+            }
+        }
+        for &w in &weird_u {
+            e.resize_canvas(w.min(300), w.min(300), weird_i[w % 9], weird_i[(w + 3) % 9]);
+            e.resize_canvas(100, 80, 0, 0);
+            e.scale_image(w.min(300), (w + 1).min(300));
+            e.scale_image(100, 80);
+        }
+        for &dx in &weird_i {
+            e.resize_canvas(120, 90, dx, -dx);
+            e.resize_canvas(100, 80, 0, 0);
+        }
+
+        // Colar e carimbar longe da tela.
+        let clip = Clip {
+            image: image::RgbaImage::from_pixel(7, 5, image::Rgba([1, 2, 3, 255])),
+            x: 0,
+            y: 0,
+        };
+        for &x in &weird_i {
+            for &y in &weird_i {
+                e.paste(&clip, Some((x, y)));
+                let _ = e.stamp(top, &clip.image, x, y, "Texto");
+            }
+        }
+
+        // Filtros com parâmetros absurdos.
+        let mut filters = vec![
+            Filter::Invert,
+            Filter::Desaturate,
+            Filter::EdgeDetect,
+            Filter::Curves(vec![]),
+        ];
+        for &v in &weird_f {
+            filters.push(Filter::GaussianBlur(v.clamp(-1e3, 1e3)));
+            filters.push(Filter::BrightnessContrast {
+                brightness: v,
+                contrast: v,
+            });
+            filters.push(Filter::HueSaturation {
+                hue: v,
+                saturation: v,
+                lightness: v,
+            });
+            filters.push(Filter::Threshold(v));
+            filters.push(Filter::Noise(v));
+            filters.push(Filter::Levels {
+                black: v,
+                white: -v,
+                gamma: v,
+            });
+            filters.push(Filter::Sharpen {
+                amount: v,
+                radius: v.clamp(-1e3, 1e3),
+            });
+            filters.push(Filter::Curves(vec![(v, v), (v, 0.5), (0.2, v)]));
+        }
+        for &u in &[0u32, 1, 2, 3, 1000, u32::MAX] {
+            filters.push(Filter::Posterize(u));
+            filters.push(Filter::Pixelate(u.min(100_000)));
+        }
+        for f in &filters {
+            let _ = e.apply_filter(top, f, "Filtro");
+        }
+        // Histórico e arquivo continuam coerentes depois de tudo isso.
+        while e.undo() {}
+        while e.redo() {}
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.pawpaint");
+        crate::file::save_project(&e, &p).unwrap();
+        let back = crate::file::load_project(&p).unwrap();
+        assert_eq!(back.doc().layers.len(), e.doc().layers.len());
+        let _ = id;
+    }
 }

@@ -75,6 +75,25 @@ pub fn save_brush_preset(st: &mut State, ctx: &egui::Context) {
     st.say("Pincel salvo");
 }
 
+/// Campo de tamanho em px com largura fixa: o diálogo não muda de largura enquanto os dígitos mudam.
+fn size_field(ui: &mut egui::Ui, v: &mut usize) {
+    theme::fixed_width(ui, theme::NUM_W, |ui| {
+        ui.add(egui::DragValue::new(v).range(1..=8192).suffix(" px"))
+    });
+}
+
+/// Slider de diálogo: a caixa do valor tem largura fixa e no máximo duas casas decimais.
+fn dialog_slider<N: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    v: &mut N,
+    range: std::ops::RangeInclusive<N>,
+    suffix: &str,
+) -> egui::Response {
+    theme::fixed_width(ui, theme::NUM_W, |ui| {
+        ui.add(egui::Slider::new(v, range).max_decimals(2).suffix(suffix))
+    })
+}
+
 /// Prévia de filtro mais lenta que isso (ms) só é refeita quando o slider é solto.
 const SLOW_PREVIEW_MS: f32 = 60.0;
 
@@ -1560,6 +1579,12 @@ impl PaintApp {
         };
         let mut keep = true;
         let mut then: Option<StateAction> = None;
+        // Esc cancela e Enter confirma, como em qualquer diálogo (menos quando um campo de texto
+        // está sendo editado, que usa essas teclas). A recuperação e o "sair sem salvar" nunca
+        // são decididos por Enter, e a recuperação não é descartada por Esc.
+        let typing = ctx.text_edit_focused();
+        let esc = !typing && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+        let enter = !typing && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
         let title = match &dialog {
             Dialog::New { .. } => "Nova imagem",
             Dialog::Filter { .. } => "Filtro",
@@ -1593,9 +1618,9 @@ impl PaintApp {
                     });
                     ui.horizontal(|ui| {
                         ui.label("Tamanho");
-                        ui.add(egui::DragValue::new(w).range(1..=8192).suffix(" px"));
+                        size_field(ui, w);
                         ui.label("×");
-                        ui.add(egui::DragValue::new(h).range(1..=8192).suffix(" px"));
+                        size_field(ui, h);
                     });
                     ui.horizontal(|ui| {
                         ui.label("Fundo");
@@ -1608,7 +1633,7 @@ impl PaintApp {
                     });
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Criar").clicked() {
+                        if ui.button("Criar").clicked() || enter {
                             keep = false;
                             let (w, h, bg, color) = (*w, *h, *bg, *color);
                             then = Some(Box::new(move |st| {
@@ -1620,7 +1645,7 @@ impl PaintApp {
                                 add_doc(st, Editor::new(w, h, background), None);
                             }));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                         }
                     });
@@ -1643,7 +1668,7 @@ impl PaintApp {
                          r: std::ops::RangeInclusive<f32>| {
                             ui.horizontal(|ui| {
                                 ui.label(name);
-                                changed |= ui.add(egui::Slider::new(v, r)).changed();
+                                changed |= dialog_slider(ui, v, r, "").changed();
                             });
                         };
                     match kind {
@@ -1702,7 +1727,7 @@ impl PaintApp {
                     ui.add_space(8.0);
                     let applied_now = *applied;
                     ui.horizontal(|ui| {
-                        if ui.button("Aplicar").clicked() {
+                        if ui.button("Aplicar").clicked() || enter {
                             keep = false;
                             then = Some(Box::new(move |st| {
                                 if !applied_now && let Some(d) = st.doc_mut() {
@@ -1713,7 +1738,7 @@ impl PaintApp {
                                 }
                             }));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                             then = Some(Box::new(move |st| {
                                 if applied_now && let Some(d) = st.doc_mut() {
@@ -1824,7 +1849,7 @@ impl PaintApp {
                     let applied_now = *applied;
                     let pts = points.clone();
                     ui.horizontal(|ui| {
-                        if ui.button("Aplicar").clicked() {
+                        if ui.button("Aplicar").clicked() || enter {
                             keep = false;
                             then = Some(Box::new(move |st| {
                                 if !applied_now && let Some(d) = st.doc_mut() {
@@ -1833,7 +1858,7 @@ impl PaintApp {
                                 }
                             }));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                             then = Some(Box::new(move |st| {
                                 if applied_now && let Some(d) = st.doc_mut() {
@@ -1845,9 +1870,9 @@ impl PaintApp {
                 }
                 Dialog::CanvasSize { w, h, anchor } => {
                     ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(w).range(1..=8192).suffix(" px"));
+                        size_field(ui, w);
                         ui.label("×");
-                        ui.add(egui::DragValue::new(h).range(1..=8192).suffix(" px"));
+                        size_field(ui, h);
                     });
                     ui.label(
                         RichText::new("Onde a imagem fica na tela nova:")
@@ -1866,7 +1891,7 @@ impl PaintApp {
                     });
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Aplicar").clicked() {
+                        if ui.button("Aplicar").clicked() || enter {
                             keep = false;
                             let (nw, nh, anchor) = (*w, *h, *anchor);
                             then = Some(Box::new(move |st| {
@@ -1882,7 +1907,7 @@ impl PaintApp {
                                 }
                             }));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                         }
                     });
@@ -1895,9 +1920,9 @@ impl PaintApp {
                 } => {
                     let before = (*w, *h);
                     ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(w).range(1..=8192).suffix(" px"));
+                        size_field(ui, w);
                         ui.label("×");
-                        ui.add(egui::DragValue::new(h).range(1..=8192).suffix(" px"));
+                        size_field(ui, h);
                     });
                     ui.checkbox(lock, "Manter proporção");
                     if *lock {
@@ -1909,7 +1934,7 @@ impl PaintApp {
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Escalar").clicked() {
+                        if ui.button("Escalar").clicked() || enter {
                             keep = false;
                             let (nw, nh) = (*w, *h);
                             then = Some(Box::new(move |st| {
@@ -1920,15 +1945,15 @@ impl PaintApp {
                                 }
                             }));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                         }
                     });
                 }
                 Dialog::Feather(r) => {
-                    ui.add(egui::Slider::new(r, 1..=100).suffix(" px"));
+                    dialog_slider(ui, r, 1..=100, " px");
                     ui.horizontal(|ui| {
-                        if ui.button("Aplicar").clicked() {
+                        if ui.button("Aplicar").clicked() || enter {
                             keep = false;
                             let r = *r;
                             then = Some(Box::new(move |st| {
@@ -1937,20 +1962,20 @@ impl PaintApp {
                                 }
                             }));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                         }
                     });
                 }
                 Dialog::Grow(px) => {
-                    ui.add(egui::Slider::new(px, -100..=100).suffix(" px"));
+                    dialog_slider(ui, px, -100..=100, " px");
                     ui.label(
                         RichText::new("Positivo expande, negativo contrai.")
                             .small()
                             .weak(),
                     );
                     ui.horizontal(|ui| {
-                        if ui.button("Aplicar").clicked() {
+                        if ui.button("Aplicar").clicked() || enter {
                             keep = false;
                             let px = *px;
                             then = Some(Box::new(move |st| {
@@ -1959,7 +1984,7 @@ impl PaintApp {
                                 }
                             }));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                         }
                     });
@@ -2003,7 +2028,7 @@ impl PaintApp {
                                 .edit_layer(id, "mode", "Modo de mistura", |x| x.mode = mode);
                         }
                     }
-                    if ui.button("Fechar").clicked() {
+                    if ui.button("Fechar").clicked() || enter || esc {
                         keep = false;
                         st.docs[cur].ed.end_change();
                     }
@@ -2026,7 +2051,7 @@ impl PaintApp {
                             keep = false;
                             then = Some(Box::new(move |st| close_doc(st, i)));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                         }
                     });
@@ -2072,7 +2097,7 @@ impl PaintApp {
                             keep = false;
                             then = Some(Box::new(|st| st.allow_close = true));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                         }
                     });
@@ -2599,6 +2624,189 @@ mod tests {
         autosave(&mut h.app.st);
         finish_autosave(&mut h.app.st);
         assert!(!mine.exists());
+    }
+
+    #[test]
+    fn dialogs_keep_their_width_while_values_change() {
+        let mut h = Harness::new();
+        let width = |h: &mut Harness, title: &str, d: Dialog| -> f32 {
+            h.app.st.dialog = Some(d);
+            for _ in 0..3 {
+                h.frame(vec![]);
+            }
+            // O diálogo é a única janela (camada "Middle") visível.
+            let r = h
+                .ctx
+                .memory(|m| {
+                    m.areas()
+                        .visible_layer_ids()
+                        .into_iter()
+                        .filter(|l| l.order == egui::Order::Middle)
+                        .filter_map(|l| m.area_rect(l.id))
+                        .next()
+                })
+                .unwrap_or_else(|| panic!("{title}: janela não apareceu"));
+            h.app.st.dialog = None;
+            h.frame(vec![]);
+            r.width()
+        };
+        let new = |w, hh| Dialog::New {
+            w,
+            h: hh,
+            bg: 0,
+            color: [1, 2, 3],
+        };
+        let canvas = |w, hh| Dialog::CanvasSize {
+            w,
+            h: hh,
+            anchor: 4,
+        };
+        let scale = |w, hh| Dialog::ScaleImage {
+            w,
+            h: hh,
+            keep: false,
+            ratio: 1.0,
+        };
+        let filter = |kind, a, b, c| Dialog::Filter {
+            kind,
+            a,
+            b,
+            c,
+            preview: false,
+            applied: false,
+            last_ms: 0.0,
+            waiting: false,
+        };
+        let cases: Vec<(&str, Dialog, Dialog)> = vec![
+            ("Nova imagem", new(1, 1), new(8192, 8192)),
+            ("Tamanho da tela", canvas(1, 1), canvas(8192, 8192)),
+            ("Escalar imagem", scale(1, 1), scale(8192, 8192)),
+            (
+                "Suavizar borda da seleção",
+                Dialog::Feather(1),
+                Dialog::Feather(100),
+            ),
+            (
+                "Expandir ou contrair seleção",
+                Dialog::Grow(-100),
+                Dialog::Grow(5),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::BrightnessContrast, -1.0, 1.0, 0.0),
+                filter(FilterKind::BrightnessContrast, 0.123_456, -0.987_654, 0.0),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::HueSaturation, -180.0, -1.0, 1.0),
+                filter(FilterKind::HueSaturation, 0.0, 0.5, -0.333_333),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::Levels, 0.0, 1.0, 0.1),
+                filter(FilterKind::Levels, 0.456_789, 0.5, 4.0),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::Blur, 0.5, 0.0, 0.0),
+                filter(FilterKind::Blur, 60.0, 0.0, 0.0),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::Sharpen, 0.0, 0.3, 0.0),
+                filter(FilterKind::Sharpen, 2.999_9, 10.0, 0.0),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::Posterize, 2.0, 0.0, 0.0),
+                filter(FilterKind::Posterize, 32.0, 0.0, 0.0),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::Pixelate, 2.0, 0.0, 0.0),
+                filter(FilterKind::Pixelate, 80.0, 0.0, 0.0),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::Noise, 0.0, 0.0, 0.0),
+                filter(FilterKind::Noise, 0.777_77, 0.0, 0.0),
+            ),
+        ];
+        for (i, (title, lo, hi)) in cases.into_iter().enumerate() {
+            let (a, b) = (width(&mut h, title, lo), width(&mut h, title, hi));
+            assert!(
+                (a - b).abs() < 0.5,
+                "caso {i} ({title}): largura {a} -> {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn escape_cancels_and_enter_confirms_dialogs_but_never_decides_the_dangerous_ones() {
+        let key = |k, pressed| Event::Key {
+            key: k,
+            physical_key: Some(k),
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        let press = |h: &mut Harness, k| {
+            h.frame(vec![key(k, true)]);
+            h.frame(vec![key(k, false)]);
+        };
+        let mut h = Harness::new();
+        // Esc fecha o diálogo "Nova imagem" sem criar nada.
+        h.app.st.dialog = Some(Dialog::New {
+            w: 50,
+            h: 40,
+            bg: 0,
+            color: [1, 2, 3],
+        });
+        h.frame(vec![]);
+        press(&mut h, Key::Escape);
+        assert!(h.app.st.dialog.is_none() && h.app.st.docs.len() == 1);
+        // Enter cria a imagem.
+        h.app.st.dialog = Some(Dialog::New {
+            w: 50,
+            h: 40,
+            bg: 0,
+            color: [1, 2, 3],
+        });
+        h.frame(vec![]);
+        press(&mut h, Key::Enter);
+        assert!(h.app.st.dialog.is_none() && h.app.st.docs.len() == 2);
+        // Enter não confirma "sair sem salvar", e Esc só fecha (não sai).
+        h.app.st.dialog = Some(Dialog::ConfirmQuit);
+        h.frame(vec![]);
+        press(&mut h, Key::Enter);
+        assert!(matches!(h.app.st.dialog, Some(Dialog::ConfirmQuit)) && !h.app.st.allow_close);
+        press(&mut h, Key::Escape);
+        assert!(h.app.st.dialog.is_none() && !h.app.st.allow_close);
+        // A recuperação não é descartada nem por Esc nem por Enter.
+        h.app.st.dialog = Some(Dialog::Recover(vec![]));
+        h.frame(vec![]);
+        press(&mut h, Key::Escape);
+        press(&mut h, Key::Enter);
+        assert!(matches!(h.app.st.dialog, Some(Dialog::Recover(_))));
+        h.app.st.dialog = None;
+        // Esc num filtro com prévia desfaz a prévia.
+        h.app.st.dialog = Some(Dialog::Filter {
+            kind: FilterKind::Threshold,
+            a: 0.5,
+            b: 0.0,
+            c: 0.0,
+            preview: true,
+            applied: false,
+            last_ms: 0.0,
+            waiting: false,
+        });
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let steps = |h: &Harness| h.app.st.doc().unwrap().ed.history().0.len();
+        let with_preview = steps(&h);
+        press(&mut h, Key::Escape);
+        assert!(h.app.st.dialog.is_none());
+        assert_eq!(steps(&h), with_preview - 1, "a prévia foi desfeita");
     }
 
     #[test]
