@@ -255,7 +255,9 @@ pub fn run_radial(st: &mut State, id: &str) {
 
 fn autosave_dir() -> PathBuf {
     if cfg!(test) {
-        return std::env::temp_dir().join("pawpaint-test-autosave");
+        // Uma pasta por thread de teste: testes em paralelo usam o mesmo `uid` e se apagariam.
+        let thread = format!("{:?}", std::thread::current().id()).replace(['(', ')'], "");
+        return std::env::temp_dir().join(format!("pawpaint-test-autosave-{thread}"));
     }
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
