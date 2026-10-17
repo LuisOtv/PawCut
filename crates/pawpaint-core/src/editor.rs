@@ -29,6 +29,10 @@ pub enum EditError {
     Locked,
     #[error("isto é uma pasta: escolha uma camada de dentro")]
     IsGroup,
+    #[error("é uma camada de ajuste (não tem pixels): pinte na máscara dela")]
+    IsAdjustment,
+    #[error("esse filtro olha os vizinhos e não serve para camada de ajuste")]
+    NotAdjustable,
     #[error("não há nada selecionado")]
     NoSelection,
     #[error("não há camada para unir")]
@@ -172,6 +176,12 @@ impl Editor {
         l.pixels = TiledImage::from_rgba(img);
         doc.layers.push(l);
         Self::from_doc(doc)
+    }
+
+    /// Só para testes: acesso direto ao documento (sem passo de desfazer).
+    #[cfg(test)]
+    pub fn doc_mut_for_test(&mut self) -> &mut Doc {
+        &mut self.doc
     }
 
     pub fn doc(&self) -> &Doc {
@@ -363,6 +373,15 @@ impl Editor {
     }
 
     fn layer_checked(&self, id: LayerId) -> Result<&Layer, EditError> {
+        let l = self.layer_for_paint(id)?;
+        if l.adjust.is_some() {
+            return Err(EditError::IsAdjustment);
+        }
+        Ok(l)
+    }
+
+    /// Como `layer_checked`, mas deixa passar a camada de ajuste (que só aceita pintura na máscara).
+    fn layer_for_paint(&self, id: LayerId) -> Result<&Layer, EditError> {
         let l = self.doc.layer(id).ok_or(EditError::NoLayer)?;
         if l.is_group {
             return Err(EditError::IsGroup);
@@ -391,6 +410,26 @@ impl Editor {
         self.doc.layers.insert(at, layer);
         self.dirty_all();
         id
+    }
+
+    /// Camada de ajuste nova logo acima de `above`: aplica `filter` a tudo que está embaixo dela,
+    /// sem mexer nos pixels (dá para mudar ou apagar depois). Só filtros pontuais.
+    pub fn add_adjustment_layer(
+        &mut self,
+        filter: Filter,
+        name: Option<String>,
+        above: Option<LayerId>,
+    ) -> Result<LayerId, EditError> {
+        if !filter.is_pointwise() {
+            return Err(EditError::NotAdjustable);
+        }
+        let id = self.add_layer(Some(name.unwrap_or_else(|| "Ajuste".into())), above);
+        // `add_layer` já guardou o passo de desfazer ("Nova camada"); o nome certo vale mais.
+        if let Some((_, label)) = self.undo.last_mut() {
+            *label = "Camada de ajuste";
+        }
+        self.doc.layer_mut(id).expect("acabou de entrar").adjust = Some(filter);
+        Ok(id)
     }
 
     pub fn duplicate_layer(&mut self, id: LayerId) -> Result<LayerId, EditError> {
@@ -509,6 +548,9 @@ impl Editor {
         let this = &self.doc.layers[i];
         if this.is_group || below.is_group || this.parent != below.parent {
             return Err(EditError::NothingBelow);
+        }
+        if this.adjust.is_some() || below.adjust.is_some() {
+            return Err(EditError::IsAdjustment);
         }
         self.checkpoint("Unir com a de baixo");
         let top = self.doc.layers.remove(i);
@@ -679,7 +721,10 @@ impl Editor {
         erase: bool,
         mode: BlendMode,
     ) -> Result<(), EditError> {
-        self.layer_checked(layer)?;
+        let l = self.layer_for_paint(layer)?;
+        if l.adjust.is_some() && !(self.paint_mask && l.mask.is_some()) {
+            return Err(EditError::IsAdjustment);
+        }
         self.checkpoint(if erase { "Borracha" } else { "Pincel" });
         let mut stroker = Stroker::new(self.doc.width, self.doc.height);
         let opacity = brush.opacity;
@@ -934,6 +979,17 @@ impl Editor {
         filter: &Filter,
         label: &'static str,
     ) -> Result<(), EditError> {
+        // Numa camada de ajuste o "filtro" troca o ajuste dela (é o que o diálogo de filtro faz
+        // ao editar uma).
+        if self.layer_for_paint(id)?.adjust.is_some() {
+            if !filter.is_pointwise() {
+                return Err(EditError::NotAdjustable);
+            }
+            self.checkpoint(label);
+            self.doc.layer_mut(id).expect("existe").adjust = Some(filter.clone());
+            self.dirty_all();
+            return Ok(());
+        }
         let layer = self.layer_checked(id)?;
         let (sel, lock) = (self.doc.selection.clone(), layer.alpha_lock);
         self.checkpoint(label);
@@ -1843,6 +1899,156 @@ mod tests {
         assert_eq!(e.doc().layers[1].id, dup);
         e.jump_to(0);
         assert_eq!(e.doc().layers.len(), 1);
+    }
+    // ---- camadas de ajuste
+
+    fn pix(e: &Editor, x: u32, y: u32) -> [u8; 4] {
+        crate::composite::flatten(e.doc()).get_pixel(x, y).0
+    }
+
+    #[test]
+    fn adjustment_layer_changes_what_is_below_without_touching_pixels() {
+        let mut e = Editor::new(100, 80, Background::Color([200, 100, 50]));
+        let base = top(&e);
+        let adj = e
+            .add_adjustment_layer(Filter::Invert, None, Some(base))
+            .unwrap();
+        assert_eq!(pix(&e, 10, 10), [55, 155, 205, 255]);
+        // os pixels de verdade seguem intactos
+        assert_eq!(
+            e.doc().layer(base).unwrap().pixels.pixel(10, 10),
+            [200, 100, 50, 255]
+        );
+        // opacidade 50 % mistura o original com o ajustado
+        e.doc_mut_for_test().layer_mut(adj).unwrap().opacity = 0.5;
+        let p = pix(&e, 10, 10);
+        assert!(
+            (p[0] as i32 - 128).abs() <= 1 && (p[1] as i32 - 128).abs() <= 1,
+            "{p:?}"
+        );
+        // escondida: tudo como era
+        e.doc_mut_for_test().layer_mut(adj).unwrap().visible = false;
+        assert_eq!(pix(&e, 10, 10), [200, 100, 50, 255]);
+        // um passo de desfazer cria, outro tira
+        assert_eq!(e.undo_label(), Some("Camada de ajuste"));
+        e.undo();
+        assert!(e.doc().layers.iter().all(|l| l.adjust.is_none()));
+    }
+
+    #[test]
+    fn adjustment_only_affects_layers_below_and_respects_its_mask() {
+        let mut e = Editor::new(100, 80, Background::White);
+        let base = top(&e);
+        let adj = e
+            .add_adjustment_layer(Filter::Invert, None, Some(base))
+            .unwrap();
+        // uma camada vermelha POR CIMA do ajuste não é afetada
+        let above = e.add_layer(None, Some(adj));
+        e.fill_selection(above, [255, 0, 0]).ok();
+        e.select_all();
+        e.fill_selection(above, [255, 0, 0]).unwrap();
+        e.deselect();
+        assert_eq!(pix(&e, 5, 5), [255, 0, 0, 255]);
+        e.doc_mut_for_test().layer_mut(above).unwrap().visible = false;
+        assert_eq!(pix(&e, 5, 5), [0, 0, 0, 255], "branco invertido");
+        // máscara: pintar de preto esconde o ajuste (preto = esconde) na região
+        e.add_mask(adj).unwrap();
+        e.set_paint_mask(true);
+        e.begin_stroke(
+            adj,
+            Brush {
+                size: 30.0,
+                hardness: 1.0,
+                ..Brush::basic()
+            },
+            [0, 0, 0],
+            false,
+            BlendMode::Normal,
+        )
+        .unwrap();
+        e.stroke_point(20.0, 20.0);
+        e.end_stroke(20.0, 20.0);
+        assert_eq!(
+            pix(&e, 20, 20),
+            [255, 255, 255, 255],
+            "ajuste escondido onde a máscara pintou"
+        );
+        assert_eq!(
+            pix(&e, 80, 60),
+            [0, 0, 0, 255],
+            "longe da máscara o ajuste vale"
+        );
+    }
+
+    #[test]
+    fn adjustment_layers_refuse_pixel_edits_and_neighbor_filters() {
+        let mut e = ed();
+        let base = top(&e);
+        assert_eq!(
+            e.add_adjustment_layer(Filter::GaussianBlur(4.0), None, Some(base)),
+            Err(EditError::NotAdjustable)
+        );
+        let adj = e
+            .add_adjustment_layer(Filter::Desaturate, None, Some(base))
+            .unwrap();
+        // pintar nos pixels: recusa; filtro vizinho: recusa; juntar: recusa
+        assert_eq!(
+            e.begin_stroke(adj, Brush::basic(), [0; 3], false, BlendMode::Normal),
+            Err(EditError::IsAdjustment)
+        );
+        assert_eq!(
+            e.apply_filter(adj, &Filter::GaussianBlur(3.0), "x"),
+            Err(EditError::NotAdjustable)
+        );
+        assert_eq!(e.merge_down(adj), Err(EditError::IsAdjustment));
+        assert_eq!(
+            e.fill_selection(adj, [1, 2, 3]),
+            Err(EditError::IsAdjustment)
+        );
+        // um filtro pontual troca o ajuste
+        e.apply_filter(adj, &Filter::Invert, "Filtro").unwrap();
+        assert_eq!(e.doc().layer(adj).unwrap().adjust, Some(Filter::Invert));
+        // duplicar leva o ajuste junto
+        let copy = e.duplicate_layer(adj).unwrap();
+        assert_eq!(e.doc().layer(copy).unwrap().adjust, Some(Filter::Invert));
+    }
+
+    #[test]
+    fn adjustment_inside_a_folder_only_affects_the_folder() {
+        let mut e = Editor::new(100, 80, Background::White);
+        let base = top(&e); // fundo branco fora da pasta
+        let folder = e.add_group(Some(base));
+        let inner = e.add_layer(None, Some(folder));
+        e.select_all();
+        e.fill_selection(inner, [200, 200, 200]).unwrap();
+        e.deselect();
+        e.add_adjustment_layer(Filter::Invert, None, Some(inner))
+            .unwrap();
+        // a pasta mostra o cinza invertido por cima do fundo branco, que não mudou
+        assert_eq!(pix(&e, 5, 5), [55, 55, 55, 255]);
+        let bg = e.doc().layer(base).unwrap().pixels.pixel(5, 5);
+        assert_eq!(bg, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn adjustment_survives_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = ed();
+        let base = top(&e);
+        let adj = e
+            .add_adjustment_layer(
+                Filter::Curves(vec![(0.0, 0.0), (0.5, 0.7), (1.0, 1.0)]),
+                Some("Luz".into()),
+                Some(base),
+            )
+            .unwrap();
+        let path = dir.path().join("a.pawpaint");
+        crate::file::save_project(&e, &path).unwrap();
+        let back = crate::file::load_project(&path).unwrap();
+        let l = back.doc().layer(adj).unwrap();
+        assert_eq!(l.name, "Luz");
+        assert!(matches!(&l.adjust, Some(Filter::Curves(p)) if p.len() == 3));
+        assert_eq!(pix(&back, 3, 3), pix(&e, 3, 3));
     }
 }
 

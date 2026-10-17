@@ -428,8 +428,24 @@ fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64, depth: usize) {
         );
         toggle_group = ar.clicked();
     }
+    // Camada de ajuste: um círculo meio cheio no lugar da miniatura.
+    if l.adjust.is_some() {
+        let c = rect.min + vec2(42.0, 14.0);
+        let p = ui.painter();
+        p.circle_stroke(c, 8.0, Stroke::new(1.5, theme::TEXT));
+        p.add(egui::Shape::convex_polygon(
+            (0..=16)
+                .map(|i| {
+                    let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / 16.0;
+                    c + vec2(a.cos(), a.sin()) * 8.0
+                })
+                .collect(),
+            theme::TEXT,
+            Stroke::NONE,
+        ));
+    }
     // Miniatura: amostra a camada com passo fixo (rápido, mesmo em telas grandes).
-    if !l.is_group {
+    if !l.is_group && l.adjust.is_none() {
         let rev = st.docs[cur].ed.pixel_rev();
         if st.docs[cur].thumbs.get(&id).is_none_or(|(r, _)| *r != rev) {
             let (w, h) = (l.pixels.width().max(1), l.pixels.height().max(1));
@@ -575,10 +591,18 @@ fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64, depth: usize) {
         st.docs[cur].active = id;
     }
     if resp.double_clicked() {
-        st.renaming = Some((id, l.name.clone()));
+        if l.adjust.is_some() {
+            crate::app::edit_adjustment(st, id);
+        } else {
+            st.renaming = Some((id, l.name.clone()));
+        }
     }
     resp.context_menu(|ui| {
         st.docs[cur].active = id;
+        if l.adjust.is_some() && ui.button("Editar ajuste…").clicked() {
+            ui.close();
+            crate::app::edit_adjustment(st, id);
+        }
         if ui.button("Renomear").clicked() {
             ui.close();
             st.renaming = Some((id, l.name.clone()));

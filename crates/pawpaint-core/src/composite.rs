@@ -52,6 +52,10 @@ fn composite_level(
             }
             continue;
         }
+        if let Some(f) = &layer.adjust {
+            adjust_below(doc, layer, f, &mut out, tx, ty, live);
+            continue;
+        }
         let base = layer.pixels.tile(tx, ty);
         let stroke = live
             .filter(|l| l.layer == layer.id)
@@ -121,6 +125,49 @@ fn composite_level(
         }
     }
     out
+}
+
+/// Camada de ajuste: o que já foi composto embaixo ganha o filtro, na força da opacidade e
+/// só onde a máscara não esconde (a máscara em pintura aparece na hora).
+fn adjust_below(
+    doc: &Doc,
+    layer: &crate::doc::Layer,
+    filter: &crate::filters::Filter,
+    out: &mut [u8],
+    tx: usize,
+    ty: usize,
+    live: Option<&Live>,
+) {
+    let stroke = live
+        .filter(|l| l.layer == layer.id && l.on_mask)
+        .and_then(|l| l.buf.tile(tx, ty).map(|s| (l, s)));
+    let mask: Option<Vec<u8>> = match (layer.mask.as_ref().and_then(|m| m.tile(tx, ty)), stroke) {
+        (m, Some((l, s))) => {
+            let mut t = m.map_or_else(|| vec![0u8; TILE_BYTES], <[u8]>::to_vec);
+            let sel = doc.selection.as_ref().map(|s| s.tile_mask(tx, ty));
+            apply_mask_stroke(&mut t, s, l.opacity, l.erase, sel.as_deref());
+            Some(t)
+        }
+        (Some(m), None) => Some(m.to_vec()),
+        (None, None) => None,
+    };
+    let mut adjusted = out.to_vec();
+    crate::filters::apply_to_tile(filter, &mut adjusted);
+    for p in 0..TILE * TILE {
+        let i = p * 4;
+        if out[i + 3] == 0 {
+            continue;
+        }
+        let hide = mask.as_ref().map_or(0, |m| m[i + 3]);
+        let t = layer.opacity.clamp(0.0, 1.0) * (255 - hide) as f32 / 255.0;
+        if t <= 0.0 {
+            continue;
+        }
+        for c in 0..4 {
+            let (a, b) = (out[i + c] as f32, adjusted[i + c] as f32);
+            out[i + c] = (a + (b - a) * t).round().clamp(0.0, 255.0) as u8;
+        }
+    }
 }
 
 /// A imagem final (alfa direto) com todas as camadas visíveis. As faixas de blocos são

@@ -480,6 +480,9 @@ pub struct State {
     pub last_autosave: std::time::Instant,
     /// Pressão da caneta (0..1) enquanto ela toca a tela; `None` com mouse.
     pub pen: Option<f32>,
+    /// Camada de ajuste recém-criada cujo diálogo está aberto: guarda a camada que estava ativa
+    /// antes, para o Cancelar desfazer a criação por completo.
+    pub new_adjust: Option<LayerId>,
     /// Autosave em andamento: roda fora da thread da interface, com uma cópia do documento.
     pub autosave_job: Option<std::thread::JoinHandle<()>>,
     /// Documentos já fechados: um autosave atrasado não pode recriar o arquivo deles.

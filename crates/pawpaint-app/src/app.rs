@@ -536,6 +536,7 @@ impl PaintApp {
                 tool_changed: false,
                 last_autosave: std::time::Instant::now(),
                 pen: None,
+                new_adjust: None,
                 autosave_job: None,
                 autosave_closed: Default::default(),
                 popup_palette: None,
@@ -835,17 +836,7 @@ fn save(st: &mut State) {
 }
 
 fn open_filter(st: &mut State, kind: FilterKind) {
-    let (a, b, c) = match kind {
-        FilterKind::BrightnessContrast => (0.0, 0.0, 0.0),
-        FilterKind::HueSaturation => (0.0, 0.0, 0.0),
-        FilterKind::Levels => (0.0, 1.0, 1.0),
-        FilterKind::Threshold => (0.5, 0.0, 0.0),
-        FilterKind::Posterize => (4.0, 0.0, 0.0),
-        FilterKind::Blur => (4.0, 0.0, 0.0),
-        FilterKind::Sharpen => (1.0, 1.5, 0.0),
-        FilterKind::Pixelate => (8.0, 0.0, 0.0),
-        FilterKind::Noise => (0.2, 0.0, 0.0),
-    };
+    let (a, b, c) = filter_defaults(&kind);
     st.dialog = Some(Dialog::Filter {
         kind,
         a,
@@ -856,6 +847,121 @@ fn open_filter(st: &mut State, kind: FilterKind) {
         last_ms: 0.0,
         waiting: false,
     });
+}
+
+/// Valores de partida de cada filtro (os do diálogo).
+fn filter_defaults(kind: &FilterKind) -> (f32, f32, f32) {
+    match kind {
+        FilterKind::BrightnessContrast => (0.0, 0.0, 0.0),
+        FilterKind::HueSaturation => (0.0, 0.0, 0.0),
+        FilterKind::Levels => (0.0, 1.0, 1.0),
+        FilterKind::Threshold => (0.5, 0.0, 0.0),
+        FilterKind::Posterize => (4.0, 0.0, 0.0),
+        FilterKind::Blur => (4.0, 0.0, 0.0),
+        FilterKind::Sharpen => (1.0, 1.5, 0.0),
+        FilterKind::Pixelate => (8.0, 0.0, 0.0),
+        FilterKind::Noise => (0.2, 0.0, 0.0),
+    }
+}
+
+/// O diálogo certo para editar um filtro que já existe (da camada de ajuste).
+fn dialog_for_filter(f: &Filter) -> Option<Dialog> {
+    let (kind, a, b, c) = match f {
+        Filter::BrightnessContrast {
+            brightness,
+            contrast,
+        } => (FilterKind::BrightnessContrast, *brightness, *contrast, 0.0),
+        Filter::HueSaturation {
+            hue,
+            saturation,
+            lightness,
+        } => (FilterKind::HueSaturation, *hue, *saturation, *lightness),
+        Filter::Levels {
+            black,
+            white,
+            gamma,
+        } => (FilterKind::Levels, *black, *white, *gamma),
+        Filter::Threshold(t) => (FilterKind::Threshold, *t, 0.0, 0.0),
+        Filter::Posterize(n) => (FilterKind::Posterize, *n as f32, 0.0, 0.0),
+        Filter::Curves(points) => {
+            return Some(Dialog::Curves {
+                points: points.clone(),
+                drag: None,
+                applied: false,
+            });
+        }
+        _ => return None,
+    };
+    Some(Dialog::Filter {
+        kind,
+        a,
+        b,
+        c,
+        preview: true,
+        applied: false,
+        last_ms: 0.0,
+        waiting: false,
+    })
+}
+
+/// Cria uma camada de ajuste acima da ativa. Filtros com parâmetros abrem o diálogo (e Cancelar
+/// desfaz a criação); inverter e dessaturar valem na hora.
+pub fn new_adjustment(st: &mut State, filter: Filter) {
+    let Some(d) = st.doc_mut() else { return };
+    let prev = d.active;
+    let name = match &filter {
+        Filter::BrightnessContrast { .. } => "Brilho e contraste",
+        Filter::HueSaturation { .. } => "Matiz e saturação",
+        Filter::Levels { .. } => "Níveis",
+        Filter::Curves(_) => "Curvas",
+        Filter::Invert => "Inverter",
+        Filter::Desaturate => "Preto e branco",
+        Filter::Threshold(_) => "Limiar",
+        Filter::Posterize(_) => "Posterizar",
+        _ => "Ajuste",
+    };
+    match d
+        .ed
+        .add_adjustment_layer(filter.clone(), Some(name.into()), Some(prev))
+    {
+        Ok(id) => {
+            d.active = id;
+            let dialog = if matches!(filter, Filter::Invert | Filter::Desaturate) {
+                None
+            } else {
+                dialog_for_filter(&filter)
+            };
+            if let Some(dlg) = dialog {
+                st.new_adjust = Some(prev);
+                st.dialog = Some(dlg);
+            }
+        }
+        Err(e) => st.warn(e.to_string()),
+    }
+}
+
+/// Abre o diálogo do filtro da camada de ajuste `id` para mudar os valores.
+pub fn edit_adjustment(st: &mut State, id: pawpaint_core::doc::LayerId) {
+    let Some(d) = st.doc_mut() else { return };
+    d.active = id;
+    let Some(f) = d.ed.doc().layer(id).and_then(|l| l.adjust.clone()) else {
+        return;
+    };
+    st.new_adjust = None;
+    match dialog_for_filter(&f) {
+        Some(dlg) => st.dialog = Some(dlg),
+        None => st.say("Esse ajuste não tem parâmetros para editar"),
+    }
+}
+
+/// Fim do diálogo de uma camada de ajuste nova que foi cancelada: tira a camada de vez.
+fn drop_new_adjustment(st: &mut State) {
+    if let Some(prev) = st.new_adjust.take()
+        && let Some(d) = st.doc_mut()
+    {
+        d.ed.undo();
+        d.active = prev;
+    }
 }
 
 fn filter_of(kind: &FilterKind, a: f32, b: f32, c: f32) -> (Filter, &'static str) {
@@ -1166,6 +1272,43 @@ impl PaintApp {
                     ui.close();
                     new_layer(st);
                 }
+                ui.menu_button("Nova camada de ajuste", |ui| {
+                    for (label, f) in [
+                        (
+                            "Brilho e contraste…",
+                            Filter::BrightnessContrast {
+                                brightness: 0.0,
+                                contrast: 0.0,
+                            },
+                        ),
+                        (
+                            "Matiz e saturação…",
+                            Filter::HueSaturation {
+                                hue: 0.0,
+                                saturation: 0.0,
+                                lightness: 0.0,
+                            },
+                        ),
+                        (
+                            "Níveis…",
+                            Filter::Levels {
+                                black: 0.0,
+                                white: 1.0,
+                                gamma: 1.0,
+                            },
+                        ),
+                        ("Curvas…", Filter::Curves(vec![(0.0, 0.0), (1.0, 1.0)])),
+                        ("Limiar…", Filter::Threshold(0.5)),
+                        ("Posterizar…", Filter::Posterize(4)),
+                        ("Preto e branco", Filter::Desaturate),
+                        ("Inverter cores", Filter::Invert),
+                    ] {
+                        if item(ui, label, "", has_doc) {
+                            ui.close();
+                            new_adjustment(st, f);
+                        }
+                    }
+                });
                 if item(ui, "Duplicar", "Ctrl+J", has_doc) {
                     ui.close();
                     dup_layer(st);
@@ -1981,6 +2124,7 @@ impl PaintApp {
                     if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
                         keep = false;
                         then = Some(Box::new(move |st| {
+                            st.new_adjust = None;
                             if !applied_now && let Some(d) = st.doc_mut() {
                                 let id = d.active;
                                 if let Err(e) = d.ed.apply_filter(id, &f, label) {
@@ -1995,6 +2139,7 @@ impl PaintApp {
                             if applied_now && let Some(d) = st.doc_mut() {
                                 d.ed.undo();
                             }
+                            drop_new_adjustment(st);
                         }));
                     }
                 });
@@ -2103,6 +2248,7 @@ impl PaintApp {
                     if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
                         keep = false;
                         then = Some(Box::new(move |st| {
+                            st.new_adjust = None;
                             if !applied_now && let Some(d) = st.doc_mut() {
                                 let id = d.active;
                                 let _ = d.ed.apply_filter(id, &Filter::Curves(pts), "Curvas");
@@ -2115,6 +2261,7 @@ impl PaintApp {
                             if applied_now && let Some(d) = st.doc_mut() {
                                 d.ed.undo();
                             }
+                            drop_new_adjustment(st);
                         }));
                     }
                 });
@@ -2765,6 +2912,76 @@ mod tests {
         assert!(h.px(295, 100)[0] < 60, "pintou onde clicou");
         assert!(h.px(3, 100)[0] < 60, "e do outro lado");
         assert!(h.px(150, 100)[0] > 200, "meio intacto");
+    }
+
+    #[test]
+    fn adjustment_layers_are_created_cancelled_and_edited_from_the_dialog() {
+        let mut h = Harness::new();
+        let base = h.app.st.doc().unwrap().active;
+        let layers = |h: &Harness| h.app.st.doc().unwrap().ed.doc().layers.len();
+        // inverter vale na hora, sem diálogo
+        new_adjustment(&mut h.app.st, Filter::Invert);
+        assert_eq!(layers(&h), 2);
+        assert!(h.app.st.dialog.is_none());
+        assert_eq!(
+            h.app
+                .st
+                .doc()
+                .unwrap()
+                .ed
+                .doc()
+                .layer(base)
+                .unwrap()
+                .pixels
+                .pixel(10, 10)[0],
+            255,
+            "a camada de baixo não muda"
+        );
+        let flat = |h: &Harness| {
+            pawpaint_core::composite::flatten(h.app.st.doc().unwrap().ed.doc())
+                .get_pixel(10, 10)
+                .0
+        };
+        assert_eq!(flat(&h), [0, 0, 0, 255], "mas o resultado fica invertido");
+        // níveis abre o diálogo; Esc desfaz a criação inteira
+        h.app.st.doc_mut().unwrap().active = base;
+        new_adjustment(
+            &mut h.app.st,
+            Filter::Levels {
+                black: 0.0,
+                white: 1.0,
+                gamma: 1.0,
+            },
+        );
+        assert_eq!(layers(&h), 3);
+        assert!(h.app.st.dialog.is_some() && h.app.st.new_adjust == Some(base));
+        h.frame(vec![]);
+        h.frame(vec![Event::Key {
+            key: Key::Escape,
+            physical_key: Some(Key::Escape),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        h.frame(vec![]);
+        assert!(h.app.st.dialog.is_none());
+        assert_eq!(layers(&h), 2, "cancelar tira a camada nova");
+        assert_eq!(h.app.st.doc().unwrap().active, base);
+        // editar um ajuste existente abre o diálogo com os valores dele (sem criar camada)
+        h.app.st.doc_mut().unwrap().active = base;
+        new_adjustment(&mut h.app.st, Filter::Threshold(0.3));
+        let id = h.app.st.doc().unwrap().active;
+        h.app.st.dialog = None;
+        h.app.st.new_adjust = None;
+        edit_adjustment(&mut h.app.st, id);
+        match &h.app.st.dialog {
+            Some(Dialog::Filter { kind, a, .. }) => {
+                assert!(matches!(kind, FilterKind::Threshold));
+                assert!((*a - 0.3).abs() < 1e-6);
+            }
+            _ => panic!("esperava o diálogo de limiar"),
+        }
+        assert!(h.app.st.new_adjust.is_none());
     }
 
     #[test]

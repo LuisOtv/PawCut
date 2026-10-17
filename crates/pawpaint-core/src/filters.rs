@@ -4,7 +4,7 @@ use crate::par;
 use crate::selection::Selection;
 use crate::tile::{TILE, TiledImage, premultiply, unpremultiply};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Filter {
     /// Ambos de −1 a 1.
     BrightnessContrast {
@@ -100,6 +100,21 @@ pub fn curve_lut(points: &[(f32, f32)]) -> [f32; 256] {
 
 impl Filter {
     /// Quanto o filtro espalha pixels para fora do conteúdo (para ampliar a área processada).
+    /// O resultado de cada pixel só depende dele mesmo (serve para camada de ajuste).
+    pub fn is_pointwise(&self) -> bool {
+        matches!(
+            self,
+            Filter::BrightnessContrast { .. }
+                | Filter::HueSaturation { .. }
+                | Filter::Invert
+                | Filter::Desaturate
+                | Filter::Threshold(_)
+                | Filter::Posterize(_)
+                | Filter::Levels { .. }
+                | Filter::Curves(_)
+        )
+    }
+
     fn reach(&self) -> usize {
         match self {
             Filter::GaussianBlur(r) => (r * 3.0).ceil() as usize + 1,
@@ -445,6 +460,29 @@ fn to_f32(p: [u8; 4]) -> [f32; 4] {
         p[2] as f32 / 255.0,
         p[3] as f32 / 255.0,
     ]
+}
+
+/// Aplica um filtro pontual num bloco inteiro (RGBA pré-multiplicado, `TILE`×`TILE`): é o que a
+/// camada de ajuste faz com o que está embaixo dela. Filtros que olham os vizinhos não mudam nada.
+pub fn apply_to_tile(filter: &Filter, tile: &mut [u8]) {
+    if !filter.is_pointwise() || tile.len() != crate::tile::TILE_BYTES {
+        return;
+    }
+    let mut buf: Buf = tile
+        .chunks_exact(4)
+        .map(|p| to_f32(unpremultiply([p[0], p[1], p[2], p[3]])))
+        .collect();
+    let side = crate::tile::TILE;
+    run(filter, &mut buf, side, side);
+    for (p, n) in tile.chunks_exact_mut(4).zip(&buf) {
+        if p[3] == 0 {
+            continue;
+        }
+        let q = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        // o alfa não muda: ajuste de cor só tinge o que já existe
+        let px = premultiply([q(n[0]), q(n[1]), q(n[2]), q(n[3])]);
+        p.copy_from_slice(&px);
+    }
 }
 
 /// Aplica `filter` em `pixels`. Só muda o que a seleção deixa; com `alpha_lock` o alfa não muda.

@@ -46,6 +46,8 @@ struct LayerMeta {
     parent: Option<u64>,
     #[serde(default = "yes")]
     expanded: bool,
+    #[serde(default)]
+    adjust: Option<crate::filters::Filter>,
 }
 
 fn yes() -> bool {
@@ -130,6 +132,7 @@ pub fn save_doc(doc: &Doc, path: &Path, speed: SaveSpeed) -> Result<(), FileErro
             is_group: l.is_group,
             parent: l.parent,
             expanded: l.expanded,
+            adjust: l.adjust.clone(),
         });
     }
     // Imagem final, para miniaturas em gerenciadores de arquivos.
@@ -224,6 +227,7 @@ pub fn load_project(path: &Path) -> Result<Editor, FileError> {
         l.is_group = m.is_group;
         l.parent = m.parent;
         l.expanded = m.expanded;
+        l.adjust = m.adjust.clone();
         l.pixels = TiledImage::from_rgba(&img);
         if let Some(mn) = &m.mask {
             let mut mb = Vec::new();
