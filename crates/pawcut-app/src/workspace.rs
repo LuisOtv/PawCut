@@ -156,6 +156,8 @@ pub struct Workspace {
     pub silence_threshold: f32,
     pub silence_min: f64,
     pub duck_threshold: f32,
+    /// Transcrição rodando em outra thread: resposta, onde as legendas entram e o idioma.
+    pub transcription: Option<Transcription>,
     /// Presets de aparência salvos e o nome que está sendo digitado para um novo.
     pub presets: Vec<crate::presets::ClipPreset>,
     pub preset_pick: usize,
@@ -182,6 +184,85 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Transcreve o áudio do clipe selecionado com o whisper instalado e põe as falas como
+    /// legendas numa faixa nova. Roda em outra thread.
+    pub fn start_transcription(&mut self, lang: &str) {
+        if self.transcription.is_some() {
+            self.st.warn("Já está transcrevendo");
+            return;
+        }
+        let engine = match paw_audio::whisper::detect() {
+            Ok(e) => e,
+            Err(msg) => {
+                self.st.warn(msg);
+                return;
+            }
+        };
+        let p = self.project_arc.clone();
+        let Some((clip, samples, rate)) = self.st.selection.iter().find_map(|id| {
+            let c = p.clip(*id)?;
+            let (s, r) = crate::analysis::clip_mono(&p, c)?;
+            Some((c.clone(), s, r))
+        }) else {
+            self.st.warn("Selecione um clipe com áudio");
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let lang = lang.to_string();
+        let label = engine.label();
+        std::thread::spawn(move || {
+            let dir = std::env::temp_dir().join(format!("pawcut-whisper-{}", std::process::id()));
+            let wav = dir.join("fala.wav");
+            let result = std::fs::create_dir_all(&dir)
+                .and_then(|_| paw_audio::whisper::write_wav16k(&wav, &samples, rate))
+                .map_err(|e| e.to_string())
+                .and_then(|_| paw_audio::whisper::transcribe(&engine, &wav, &lang, &dir));
+            let _ = std::fs::remove_dir_all(&dir);
+            let _ = tx.send(result);
+        });
+        self.transcription = Some(Transcription {
+            rx,
+            start: clip.start,
+        });
+        self.st
+            .say(format!("Transcrevendo com {label}… pode levar um tempo"));
+    }
+
+    fn poll_transcription(&mut self, ctx: &egui::Context) {
+        let Some(t) = &self.transcription else { return };
+        match t.rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(300)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.transcription = None;
+                self.st.warn("A transcrição foi interrompida");
+            }
+            Ok(result) => {
+                let start = t.start;
+                self.transcription = None;
+                match result {
+                    Err(e) => self.st.warn(e),
+                    Ok(text) => self.finish_transcription(&text, start),
+                }
+            }
+        }
+    }
+
+    /// As falas do SRT (tempos desde o começo do clipe) viram legendas na timeline.
+    pub fn finish_transcription(&mut self, srt: &str, clip_start: pawcut_core::Frame) {
+        let fps = self.st.project().settings.fps;
+        match pawcut_core::parse_subtitles(srt, fps) {
+            Ok(mut cues) => {
+                for c in &mut cues {
+                    c.start += clip_start;
+                    c.end += clip_start;
+                }
+                let n = self.st.import_subtitles(&cues);
+                self.st.say(format!("{n} legenda(s) criada(s) pela transcrição"));
+            }
+            Err(e) => self.st.warn(format!("Não entendi a legenda gerada: {e}")),
+        }
+    }
+
     /// Guarda a aparência do clipe `clip` como preset `name` (troca o de mesmo nome).
     pub fn save_preset(&mut self, name: &str, clip: &pawcut_core::Clip) {
         if name.trim().is_empty() {
@@ -322,6 +403,7 @@ impl Workspace {
             silence_threshold: -40.0,
             silence_min: 0.5,
             duck_threshold: -35.0,
+            transcription: None,
             presets: Vec::new(),
             preset_pick: 0,
             preset_name: String::new(),
@@ -381,6 +463,7 @@ impl Workspace {
             }
         }
         self.tick();
+        self.poll_transcription(ctx);
         self.poll_file_dialog();
         self.poll_proxy_jobs();
         self.handle_keys(ctx);
@@ -859,6 +942,7 @@ impl Workspace {
             Action::AddDissolve => st.add_dissolve(),
             Action::ExtractInOut => st.extract_in_out(true),
             Action::AlignAudio => st.align_selection_by_audio(),
+            Action::Transcribe => self.start_transcription("pt"),
             Action::LiftInOut => st.extract_in_out(false),
             Action::NudgeLeft => st.nudge(-1),
             Action::NudgeRight => st.nudge(1),
@@ -1334,4 +1418,11 @@ impl Workspace {
         self.requested_timeline = None;
         self.requested_source = None;
     }
+}
+
+/// Uma transcrição em andamento.
+pub struct Transcription {
+    pub rx: std::sync::mpsc::Receiver<Result<String, String>>,
+    /// Onde o clipe começa na timeline (as legendas entram a partir daí).
+    pub start: pawcut_core::Frame,
 }

@@ -949,3 +949,28 @@ fn appearance_presets_save_apply_and_persist() {
     ws.save_preset("x", &clip_a);
     ws.apply_preset(0);
 }
+
+#[test]
+fn transcription_result_becomes_subtitles_after_the_clip_start() {
+    let mut st = AppState::new(Project::new(ProjectSettings::default()));
+    st.drop_generator(Generator::SolidColor, 0, 0);
+    let ctx = egui::Context::default();
+    let mut ws = Workspace::new(&ctx, st);
+    ws.recovery.clear();
+    // o clipe começa no frame 60 (2 s a 30 fps): a fala de 0 a 1,5 s do SRT cai em 60..105
+    let srt = "1\n00:00:00,000 --> 00:00:01,500\nOlá, mundo\n\n2\n00:00:02,000 --> 00:00:03,000\nSegunda fala\n\n";
+    ws.finish_transcription(srt, 60);
+    let subs = ws.st.project().video_tracks.last().unwrap();
+    assert_eq!(subs.clips.len(), 2);
+    let fps = ws.st.project().settings.fps;
+    assert_eq!(subs.clips[0].start, 60);
+    assert_eq!(subs.clips[0].end(), 60 + fps.seconds_to_frames(1.5));
+    assert!(matches!(&subs.clips[0].source, ClipSource::Text(t) if t.text.contains("Olá")));
+    // lixo no lugar do SRT avisa e não cria faixa
+    let before = ws.st.project().video_tracks.len();
+    ws.finish_transcription("isto não é legenda", 0);
+    assert_eq!(ws.st.project().video_tracks.len(), before);
+    // sem whisper instalado a ação avisa (e não trava): selecionando um clipe sem áudio também
+    ws.start_transcription("pt");
+    assert!(ws.transcription.is_none());
+}

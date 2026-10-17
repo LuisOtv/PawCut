@@ -126,6 +126,18 @@ pub fn active_ranges(
     merged
 }
 
+/// O som que o clipe mostra na timeline, em mono, e a taxa (a do projeto).
+pub fn clip_mono(project: &Project, clip: &Clip) -> Option<(Vec<f32>, u32)> {
+    let (pcm, a, b) = clip_pcm(project, clip)?;
+    let mono = (a..b)
+        .map(|i| {
+            let [l, r] = pcm.frame(i);
+            (l + r) * 0.5
+        })
+        .collect();
+    Some((mono, project.settings.sample_rate))
+}
+
 /// Pico absoluto do trecho do clipe (0..1).
 pub fn clip_peak(project: &Project, clip: &Clip) -> Option<f32> {
     let (pcm, a, b) = clip_pcm(project, clip)?;
