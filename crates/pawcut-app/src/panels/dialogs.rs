@@ -276,16 +276,6 @@ impl Default for NewProjectDialog {
     }
 }
 
-/// Onde a janela abre: centralizada na horizontal e perto do topo. Fixar o topo (em vez do
-/// centro) evita que ela pule quando a altura muda, por exemplo ao aparecer a barra de progresso.
-fn dialog_pos(ctx: &egui::Context) -> egui::Pos2 {
-    let screen = ctx.content_rect();
-    egui::pos2(
-        screen.center().x,
-        screen.top() + (screen.height() * 0.1).clamp(16.0, 80.0),
-    )
-}
-
 impl Workspace {
     pub fn open_deliver(&mut self) {
         if self.deliver.is_none() {
@@ -339,15 +329,15 @@ impl Workspace {
             return;
         };
         let fps = self.project_arc.settings.fps;
-        let mut open = true;
+        let mut cancel = false;
         let mut apply = false;
-        Window::new("Configurações do projeto")
-            .pivot(egui::Align2::CENTER_TOP)
-            .default_pos(dialog_pos(ctx))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
+        let keys = paw_ui::dialog::keys(ctx);
+        paw_ui::dialog::window(
+            ctx,
+            "project-settings",
+            "Configurações do projeto",
+            340.0,
+            |ui| {
                 ui.label("Resolução da timeline");
                 ui.horizontal_wrapped(|ui| {
                     for (name, pw, ph) in [
@@ -375,11 +365,11 @@ impl Workspace {
                         .weak()
                         .small(),
                 );
-                ui.add_space(6.0);
-                if ui.button("Aplicar").clicked() {
-                    apply = true;
-                }
-            });
+                (apply, cancel) = paw_ui::dialog::cancel_apply(ui, "Aplicar");
+            },
+        );
+        apply |= keys.enter;
+        cancel |= keys.esc;
         self.project_settings = Some((w, h));
         if apply {
             self.st.apply(pawcut_core::Edit::SetResolution {
@@ -388,8 +378,7 @@ impl Workspace {
             });
             self.project_settings = None;
             self.requested_timeline = None;
-        }
-        if !open {
+        } else if cancel {
             self.project_settings = None;
         }
     }
@@ -409,59 +398,57 @@ impl Workspace {
             return;
         };
         let fps = self.project_arc.settings.fps;
-        let mut open = true;
+        let mut close = false;
         let mut changed = false;
         let mut delete = false;
-        Window::new(format!("Marcador {}", format_timecode(frame, fps)))
-            .pivot(egui::Align2::CENTER_TOP)
-            .default_pos(dialog_pos(ctx))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.label("Nota");
-                changed |= ui
-                    .add(
-                        egui::TextEdit::multiline(&mut marker.note)
-                            .desired_rows(3)
-                            .desired_width(260.0),
-                    )
-                    .changed();
-                ui.horizontal(|ui| {
-                    for (r, g, b) in [
-                        (70, 140, 230),
-                        (90, 200, 120),
-                        (240, 200, 70),
-                        (240, 120, 50),
-                        (220, 70, 70),
-                        (180, 110, 220),
-                    ] {
-                        let c = pawcut_core::Rgba::new(r, g, b, 255);
-                        let (rect, resp) =
-                            ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
-                        ui.painter()
-                            .rect_filled(rect, 3.0, egui::Color32::from_rgb(r, g, b));
-                        if marker.color == c {
-                            ui.painter().rect_stroke(
-                                rect,
-                                3.0,
-                                egui::Stroke::new(2.0, egui::Color32::WHITE),
-                                egui::StrokeKind::Outside,
-                            );
-                        }
-                        if resp.clicked() {
-                            marker.color = c;
-                            changed = true;
-                        }
+        let title = format!("Marcador {}", format_timecode(frame, fps));
+        paw_ui::dialog::window(ctx, "marker", &title, 320.0, |ui| {
+            ui.label("Nota");
+            changed |= ui
+                .add(
+                    egui::TextEdit::multiline(&mut marker.note)
+                        .desired_rows(3)
+                        .desired_width(ui.available_width()),
+                )
+                .changed();
+            ui.horizontal(|ui| {
+                for (r, g, b) in [
+                    (70, 140, 230),
+                    (90, 200, 120),
+                    (240, 200, 70),
+                    (240, 120, 50),
+                    (220, 70, 70),
+                    (180, 110, 220),
+                ] {
+                    let c = pawcut_core::Rgba::new(r, g, b, 255);
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
+                    ui.painter()
+                        .rect_filled(rect, 3.0, egui::Color32::from_rgb(r, g, b));
+                    if marker.color == c {
+                        ui.painter().rect_stroke(
+                            rect,
+                            3.0,
+                            egui::Stroke::new(2.0, egui::Color32::WHITE),
+                            egui::StrokeKind::Outside,
+                        );
                     }
-                });
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Apagar marcador").clicked() {
-                        delete = true;
+                    if resp.clicked() {
+                        marker.color = c;
+                        changed = true;
                     }
-                });
+                }
             });
+            paw_ui::theme::dialog_actions(ui, |ui| {
+                if paw_ui::theme::primary_button(ui, "Fechar").clicked() {
+                    close = true;
+                }
+                if ui.button("Apagar marcador").clicked() {
+                    delete = true;
+                }
+            });
+        });
+        close |= paw_ui::dialog::keys(ctx).esc;
         if delete {
             self.st.apply(pawcut_core::Edit::SetMarker {
                 frame,
@@ -477,7 +464,7 @@ impl Workspace {
                 &format!("marker-{frame}"),
             );
         }
-        if !open {
+        if close {
             self.editing_marker = None;
         }
     }
@@ -666,40 +653,48 @@ impl Workspace {
         };
         let dir = config::backups_dir_in(&self.backups_root, &project);
         let list = config::list_backups(&dir);
-        let mut open = true;
+        let mut close = paw_ui::dialog::keys(ctx).esc;
         let mut restore = None;
-        Window::new("Versões anteriores")
-            .pivot(egui::Align2::CENTER_TOP)
-            .default_pos(dialog_pos(ctx))
-            .open(&mut open)
-            .collapsible(false)
-            .default_width(380.0)
-            .show(ctx, |ui| {
+        paw_ui::dialog::window(ctx, "backups", "Versões anteriores", 420.0, |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "A cada vez que salva, a versão anterior de “{}” fica guardada (as {} últimas).",
+                    project.file_name().map_or("".into(), |n| n.to_string_lossy()),
+                    config::BACKUPS_KEPT
+                ))
+                .weak(),
+            );
+            ui.separator();
+            if list.is_empty() {
                 ui.label(
-                    RichText::new(format!(
-                        "A cada vez que salva, a versão anterior de “{}” fica guardada (as {} últimas).",
-                        project.file_name().map_or("".into(), |n| n.to_string_lossy()),
-                        config::BACKUPS_KEPT
-                    ))
-                    .weak(),
+                    "Ainda não há versões anteriores. Elas aparecem depois de salvar de novo.",
                 );
-                ui.separator();
-                if list.is_empty() {
-                    ui.label("Ainda não há versões anteriores. Elas aparecem depois de salvar de novo.");
-                }
-                egui::Grid::new("backups").striped(true).num_columns(3).show(ui, |ui| {
-                    for b in &list {
-                        let when = config::backup_time(b).map(config::ago).unwrap_or_default();
-                        let size = std::fs::metadata(b).map_or(0, |m| m.len());
-                        ui.label(when);
-                        ui.label(RichText::new(format!("{:.0} KB", size as f64 / 1024.0)).weak());
-                        if ui.button("Abrir esta versão").clicked() {
-                            restore = Some(b.clone());
+            }
+            paw_ui::dialog::scroll(ui, |ui| {
+                egui::Grid::new("backups")
+                    .striped(true)
+                    .num_columns(3)
+                    .show(ui, |ui| {
+                        for b in &list {
+                            let when = config::backup_time(b).map(config::ago).unwrap_or_default();
+                            let size = std::fs::metadata(b).map_or(0, |m| m.len());
+                            ui.label(when);
+                            ui.label(
+                                RichText::new(format!("{:.0} KB", size as f64 / 1024.0)).weak(),
+                            );
+                            if ui.button("Abrir esta versão").clicked() {
+                                restore = Some(b.clone());
+                            }
+                            ui.end_row();
                         }
-                        ui.end_row();
-                    }
-                });
+                    });
             });
+            paw_ui::theme::dialog_actions(ui, |ui| {
+                if paw_ui::theme::primary_button(ui, "Fechar").clicked() {
+                    close = true;
+                }
+            });
+        });
         if let Some(b) = restore {
             match crate::state::AppState::open(&b) {
                 Ok(mut st) => {
@@ -714,14 +709,13 @@ impl Workspace {
                 Err(e) => self.st.warn(e.to_string()),
             }
         }
-        if !open {
+        if close {
             self.backups_open = false;
         }
     }
 
     fn deliver_ui(&mut self, ctx: &egui::Context) {
         let Some(d) = &mut self.deliver else { return };
-        let mut open = true;
         let project = self.project_arc.clone();
         let s = &project.settings;
         let marks = match (self.st.mark_in, self.st.mark_out) {
@@ -733,29 +727,18 @@ impl Workspace {
         let mut pick_output = false;
         let mut still = false;
         let before = d.opts.clone();
-        Window::new("Deliver — Exportar")
-            .pivot(egui::Align2::CENTER_TOP)
-            .default_pos(egui::pos2(
-                ctx.content_rect().center().x,
-                ctx.content_rect().top() + 8.0,
-            ))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(560.0)
-            .show(ctx, |ui| {
-                // Largura estável: trocar formato/resolução não faz a janela encolher e crescer.
-                ui.set_min_width(560.0);
-                let label = |ui: &mut egui::Ui, text: &str| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(text).color(crate::theme::TEXT_DIM));
-                    });
-                };
-                // Só as opções rolam; o resumo e os botões de baixo ficam sempre à vista, mesmo
-                // numa janela baixa.
-                let audio_only = d.opts.format.audio_only().is_some();
-                let options_h = (ctx.content_rect().height() - 190.0).max(120.0);
-                egui::ScrollArea::vertical()
+        let mut close = paw_ui::dialog::keys(ctx).esc;
+        paw_ui::dialog::window(ctx, "deliver", "Deliver — Exportar", 560.0, |ui| {
+            let label = |ui: &mut egui::Ui, text: &str| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(text).color(crate::theme::TEXT_DIM));
+                });
+            };
+            // Só as opções rolam; o resumo e os botões de baixo ficam sempre à vista, mesmo
+            // numa janela baixa.
+            let audio_only = d.opts.format.audio_only().is_some();
+            let options_h = (ctx.content_rect().height() - 190.0).max(120.0);
+            egui::ScrollArea::vertical()
                     .max_height(options_h)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
@@ -964,122 +947,125 @@ impl Workspace {
 
                     });
 
-                // Resumo do que vai sair.
-                let (from, to) = if d.only_in_out {
-                    marks.unwrap_or((0, project.duration()))
-                } else {
-                    (0, project.duration())
-                };
-                let summary = if audio_only {
-                    format!(
-                        "{} · duração {}",
-                        d.opts.format.label(),
-                        format_timecode(to - from, s.fps)
-                    )
-                } else {
-                    let (w, h) = d.opts.size(s.width, s.height);
-                    let fps = FRAME_RATES[d.opts.fps].1.unwrap_or(s.fps);
-                    let mut t = format!(
-                        "{w}×{h} · {} fps · duração {}",
-                        fps_text(fps),
-                        format_timecode(to - from, s.fps)
-                    );
-                    let range = if d.only_in_out { marks } else { None };
-                    let est = estimated_bytes(
-                        &project,
-                        &d.opts.export_settings(&project, PathBuf::new(), range),
-                    );
-                    let approx = if d.opts.use_bitrate { "" } else { "estimado " };
-                    t.push_str(&format!(" · {approx}~{:.0} MB", est as f64 / 1e6));
-                    t
-                };
-                ui.add_space(6.0);
-                ui.separator();
-                ui.label(RichText::new(summary).weak());
-                // Conferências antes de exportar: o que impede (vermelho) e o que só avisa.
-                let dir = PathBuf::from(d.output.trim())
-                    .parent()
-                    .map(PathBuf::from)
-                    .unwrap_or_default();
-                if d.free.as_ref().is_none_or(|(p, _)| *p != dir) {
-                    d.free = Some((dir.clone(), free_space(&dir)));
-                }
-                let free = d.free.as_ref().and_then(|(_, f)| *f);
+            // Resumo do que vai sair.
+            let (from, to) = if d.only_in_out {
+                marks.unwrap_or((0, project.duration()))
+            } else {
+                (0, project.duration())
+            };
+            let summary = if audio_only {
+                format!(
+                    "{} · duração {}",
+                    d.opts.format.label(),
+                    format_timecode(to - from, s.fps)
+                )
+            } else {
+                let (w, h) = d.opts.size(s.width, s.height);
+                let fps = FRAME_RATES[d.opts.fps].1.unwrap_or(s.fps);
+                let mut t = format!(
+                    "{w}×{h} · {} fps · duração {}",
+                    fps_text(fps),
+                    format_timecode(to - from, s.fps)
+                );
                 let range = if d.only_in_out { marks } else { None };
-                let settings = d.opts.export_settings(&project, PathBuf::new(), range);
-                let checks = deliver_checks(&project, &settings, &self.st.offline, free);
-                blocked = checks.iter().any(|(fatal, _)| *fatal);
-                for (fatal, text) in &checks {
-                    let color = if *fatal {
-                        egui::Color32::from_rgb(240, 110, 110)
-                    } else {
-                        egui::Color32::from_rgb(240, 190, 90)
-                    };
-                    ui.colored_label(color, format!("{} {text}", if *fatal { "✖" } else { "⚠" }));
+                let est = estimated_bytes(
+                    &project,
+                    &d.opts.export_settings(&project, PathBuf::new(), range),
+                );
+                let approx = if d.opts.use_bitrate { "" } else { "estimado " };
+                t.push_str(&format!(" · {approx}~{:.0} MB", est as f64 / 1e6));
+                t
+            };
+            ui.add_space(6.0);
+            ui.separator();
+            ui.label(RichText::new(summary).weak());
+            // Conferências antes de exportar: o que impede (vermelho) e o que só avisa.
+            let dir = PathBuf::from(d.output.trim())
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            if d.free.as_ref().is_none_or(|(p, _)| *p != dir) {
+                d.free = Some((dir.clone(), free_space(&dir)));
+            }
+            let free = d.free.as_ref().and_then(|(_, f)| *f);
+            let range = if d.only_in_out { marks } else { None };
+            let settings = d.opts.export_settings(&project, PathBuf::new(), range);
+            let checks = deliver_checks(&project, &settings, &self.st.offline, free);
+            blocked = checks.iter().any(|(fatal, _)| *fatal);
+            for (fatal, text) in &checks {
+                let color = if *fatal {
+                    egui::Color32::from_rgb(240, 110, 110)
+                } else {
+                    egui::Color32::from_rgb(240, 190, 90)
+                };
+                ui.colored_label(
+                    color,
+                    format!("{} {text}", if *fatal { "Impede:" } else { "Atenção:" }),
+                );
+            }
+            match &d.message {
+                Some(Ok(m)) => {
+                    ui.colored_label(egui::Color32::from_rgb(120, 220, 120), m);
+                    if ui.button("Abrir pasta").clicked()
+                        && let Some(dir) = PathBuf::from(&d.output).parent()
+                    {
+                        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+                    }
                 }
-                ui.add_space(4.0);
-                match &d.job {
-                    Some(job) => {
-                        let done = job.done.load(Ordering::Relaxed) as f32;
-                        let frac = if job.total > 0 {
-                            done / job.total as f32
+                Some(Err(m)) => {
+                    ui.colored_label(egui::Color32::from_rgb(240, 110, 110), m);
+                }
+                None => {}
+            }
+            ui.add_space(4.0);
+            match &d.job {
+                Some(job) => {
+                    let done = job.done.load(Ordering::Relaxed) as f32;
+                    let frac = if job.total > 0 {
+                        done / job.total as f32
+                    } else {
+                        0.0
+                    };
+                    ui.add(egui::ProgressBar::new(frac).show_percentage().text(
+                        if job.mixing_audio.load(Ordering::Relaxed) {
+                            "Preparando o áudio…".to_string()
                         } else {
-                            0.0
-                        };
-                        ui.add(
-                            egui::ProgressBar::new(frac)
-                                .show_percentage()
-                                .text(if job.mixing_audio.load(Ordering::Relaxed) {
-                                    "Preparando o áudio…".to_string()
-                                } else {
-                                    format!("{} / {} frames", done as i64, job.total)
-                                }),
-                        );
-                        if ui.button("Cancelar").clicked() {
+                            format!("{} / {} frames", done as i64, job.total)
+                        },
+                    ));
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Cancelar").clicked() {
                             job.cancel.store(true, Ordering::Relaxed);
                         }
-                        if let Some(result) = job.finished() {
-                            d.message = Some(result.map(|_| format!("Pronto: {}", d.output)));
-                            d.job = None;
-                        }
-                    }
-                    None => {
-                        ui.horizontal(|ui| {
-                            let ok = to > from && !d.output.trim().is_empty() && !blocked;
-                            if ui
-                                .add_enabled(
-                                    ok,
-                                    egui::Button::new(RichText::new("Exportar").strong())
-                                        .min_size(egui::vec2(110.0, 26.0)),
-                                )
-                                .clicked()
-                            {
-                                start = true;
-                            }
-                            if ui.button("Salvar frame atual como PNG").clicked() {
-                                still = true;
-                            }
-                        });
-                        if project.duration() == 0 {
-                            ui.label(RichText::new("A timeline está vazia.").weak());
-                        }
+                    });
+                    if let Some(result) = job.finished() {
+                        d.message = Some(result.map(|_| format!("Pronto: {}", d.output)));
+                        d.job = None;
                     }
                 }
-                match &d.message {
-                    Some(Ok(m)) => {
-                        ui.colored_label(egui::Color32::from_rgb(120, 220, 120), m);
-                        if ui.button("Abrir pasta").clicked()
-                            && let Some(dir) = PathBuf::from(&d.output).parent()
+                None => {
+                    if project.duration() == 0 {
+                        ui.label(RichText::new("A timeline está vazia.").weak());
+                    }
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        let ok = to > from && !d.output.trim().is_empty() && !blocked;
+                        if ui
+                            .add_enabled_ui(ok, |ui| paw_ui::theme::primary_button(ui, "Exportar"))
+                            .inner
+                            .clicked()
                         {
-                            let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+                            start = true;
                         }
-                    }
-                    Some(Err(m)) => {
-                        ui.colored_label(egui::Color32::from_rgb(240, 110, 110), m);
-                    }
-                    None => {}
+                        if ui.button("Fechar").clicked() {
+                            close = true;
+                        }
+                        if ui.button("Salvar frame atual como PNG").clicked() {
+                            still = true;
+                        }
+                    });
                 }
-            });
+            }
+        });
         // Codec que não cabe no formato escolhido volta para o primeiro que cabe.
         if let Some(first) = d.opts.format.codecs().first()
             && !d.opts.format.codecs().contains(&d.opts.codec)
@@ -1135,7 +1121,7 @@ impl Workspace {
                 c.request_repaint()
             }));
         }
-        if !open {
+        if close {
             if let Some(job) = d.job.as_ref() {
                 job.cancel.store(true, Ordering::Relaxed);
             }
@@ -1147,72 +1133,67 @@ impl Workspace {
         if !self.prefs_open {
             return;
         }
-        let mut open = true;
-        Window::new("Preferences — Teclado")
-            .pivot(egui::Align2::CENTER_TOP)
-            .default_pos(dialog_pos(ctx))
-            .vscroll(true)
-            .max_height((ctx.content_rect().height() - 40.0).max(200.0))
-            .open(&mut open)
-            .collapsible(false)
-            .default_size([520.0, 520.0])
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("Clique em “Mudar” e aperte a nova combinação. Esc cancela.")
-                            .weak(),
-                    );
-                    if ui.button("Restaurar padrões (Resolve)").clicked() {
-                        self.keymap = Keymap::defaults();
-                        self.save_keymap();
-                        self.prefs_note = Some("Atalhos restaurados".into());
-                    }
-                });
-                if let Some(note) = &self.prefs_note {
-                    ui.colored_label(egui::Color32::from_rgb(240, 190, 90), note);
+        let mut close = self.capturing.is_none() && paw_ui::dialog::keys(ctx).esc;
+        paw_ui::dialog::window(ctx, "keys", "Preferences — Teclado", 560.0, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Clique em “Mudar” e aperte a nova combinação. Esc cancela.")
+                        .weak(),
+                );
+                if ui.button("Restaurar padrões (Resolve)").clicked() {
+                    self.keymap = Keymap::defaults();
+                    self.save_keymap();
+                    self.prefs_note = Some("Atalhos restaurados".into());
                 }
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .auto_shrink(false)
+            });
+            if let Some(note) = &self.prefs_note {
+                ui.colored_label(egui::Color32::from_rgb(240, 190, 90), note);
+            }
+            ui.separator();
+            paw_ui::dialog::scroll(ui, |ui| {
+                egui::Grid::new("keys")
+                    .striped(true)
+                    .num_columns(3)
                     .show(ui, |ui| {
-                        egui::Grid::new("keys")
-                            .striped(true)
-                            .num_columns(3)
-                            .show(ui, |ui| {
-                                for action in Action::ALL {
-                                    ui.label(action.label());
-                                    let text = if self.capturing == Some(action) {
-                                        "aperte as teclas…".to_string()
-                                    } else {
-                                        let chords: Vec<String> = self
-                                            .keymap
-                                            .chords(action)
-                                            .iter()
-                                            .map(|c| c.display())
-                                            .collect();
-                                        if chords.is_empty() {
-                                            "—".into()
-                                        } else {
-                                            chords.join("  ·  ")
-                                        }
-                                    };
-                                    ui.label(RichText::new(text).monospace());
-                                    ui.horizontal(|ui| {
-                                        if ui.small_button("Mudar").clicked() {
-                                            self.capturing = Some(action);
-                                            self.prefs_note = None;
-                                        }
-                                        if ui.small_button("Limpar").clicked() {
-                                            self.keymap.clear(action);
-                                            self.save_keymap();
-                                        }
-                                    });
-                                    ui.end_row();
+                        for action in Action::ALL {
+                            ui.label(action.label());
+                            let text = if self.capturing == Some(action) {
+                                "aperte as teclas…".to_string()
+                            } else {
+                                let chords: Vec<String> = self
+                                    .keymap
+                                    .chords(action)
+                                    .iter()
+                                    .map(|c| c.display())
+                                    .collect();
+                                if chords.is_empty() {
+                                    "—".into()
+                                } else {
+                                    chords.join("  ·  ")
+                                }
+                            };
+                            ui.label(RichText::new(text).monospace());
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Mudar").clicked() {
+                                    self.capturing = Some(action);
+                                    self.prefs_note = None;
+                                }
+                                if ui.small_button("Limpar").clicked() {
+                                    self.keymap.clear(action);
+                                    self.save_keymap();
                                 }
                             });
+                            ui.end_row();
+                        }
                     });
             });
-        if !open {
+            paw_ui::theme::dialog_actions(ui, |ui| {
+                if paw_ui::theme::primary_button(ui, "Fechar").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if close {
             self.prefs_open = false;
             self.capturing = None;
         }
@@ -1229,40 +1210,36 @@ impl Workspace {
         let Some(d) = &mut self.new_project else {
             return;
         };
-        let mut open = true;
+        let mut cancel = false;
         let mut create = None;
-        Window::new("Novo projeto")
-            .pivot(egui::Align2::CENTER_TOP)
-            .default_pos(dialog_pos(ctx))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                egui::ComboBox::from_label("Formato")
-                    .selected_text(PRESETS[d.preset].0)
-                    .show_ui(ui, |ui| {
-                        for (i, (name, w, h, fps)) in PRESETS.iter().enumerate() {
-                            if ui.selectable_value(&mut d.preset, i, *name).clicked() {
-                                (d.width, d.height, d.fps) = (*w, *h, *fps);
-                            }
+        let keys = paw_ui::dialog::keys(ctx);
+        paw_ui::dialog::window(ctx, "new-project", "Novo projeto", 360.0, |ui| {
+            egui::ComboBox::from_label("Formato")
+                .selected_text(PRESETS[d.preset].0)
+                .show_ui(ui, |ui| {
+                    for (i, (name, w, h, fps)) in PRESETS.iter().enumerate() {
+                        if ui.selectable_value(&mut d.preset, i, *name).clicked() {
+                            (d.width, d.height, d.fps) = (*w, *h, *fps);
                         }
-                    });
-                ui.horizontal(|ui| {
-                    ui.label("Resolução");
-                    crate::theme::fixed_width(ui, crate::theme::NUM_W, |ui| {
-                        ui.add(egui::DragValue::new(&mut d.width).range(16..=8192));
-                        ui.label("×");
-                        ui.add(egui::DragValue::new(&mut d.height).range(16..=8192));
-                        ui.label("FPS");
-                        ui.add(egui::DragValue::new(&mut d.fps).range(1..=120));
-                    });
+                    }
                 });
-                ui.label(
-                    RichText::new("Resolução e FPS não mudam depois de criado.")
-                        .weak()
-                        .small(),
-                );
-                if ui.button("Criar").clicked() {
+            ui.horizontal(|ui| {
+                ui.label("Resolução");
+                crate::theme::fixed_width(ui, crate::theme::NUM_W, |ui| {
+                    ui.add(egui::DragValue::new(&mut d.width).range(16..=8192));
+                    ui.label("×");
+                    ui.add(egui::DragValue::new(&mut d.height).range(16..=8192));
+                    ui.label("FPS");
+                    ui.add(egui::DragValue::new(&mut d.fps).range(1..=120));
+                });
+            });
+            ui.label(
+                RichText::new("Resolução e FPS não mudam depois de criado.")
+                    .weak()
+                    .small(),
+            );
+            paw_ui::theme::dialog_actions(ui, |ui| {
+                if paw_ui::theme::primary_button(ui, "Criar").clicked() || keys.enter {
                     create = Some(ProjectSettings {
                         width: d.width,
                         height: d.height,
@@ -1270,11 +1247,15 @@ impl Workspace {
                         ..ProjectSettings::default()
                     });
                 }
+                if ui.button("Cancelar").clicked() || keys.esc {
+                    cancel = true;
+                }
             });
+        });
         if let Some(settings) = create {
             self.new_project = None;
             self.request(Pending::New(settings));
-        } else if !open {
+        } else if cancel {
             self.new_project = None;
         }
     }
@@ -1284,9 +1265,7 @@ impl Workspace {
             return;
         };
         let mut choice = None;
-        egui::Modal::new(egui::Id::new("confirm-unsaved")).show(ctx, |ui| {
-            ui.set_width(360.0);
-            ui.heading("Alterações não salvas");
+        paw_ui::dialog::modal(ctx, "unsaved", "Alterações não salvas", 380.0, |ui| {
             ui.label("O projeto tem alterações que ainda não foram salvas.");
             paw_ui::theme::dialog_actions(ui, |ui| {
                 if paw_ui::theme::primary_button(ui, "Salvar").clicked() {
@@ -1326,9 +1305,7 @@ impl Workspace {
             Later,
         }
         let mut choice = None;
-        egui::Modal::new(egui::Id::new("recovery")).show(ctx, |ui| {
-            ui.set_width(460.0);
-            ui.heading("Recuperar projeto?");
+        paw_ui::dialog::modal(ctx, "recovery", "Recuperar projeto?", 460.0, |ui| {
             ui.label("O PawCut não fechou direito da última vez. Achei estes autosaves:");
             ui.add_space(4.0);
             for (i, p) in self.recovery.iter().enumerate() {
@@ -1350,10 +1327,11 @@ impl Workspace {
                     }
                 });
             }
-            ui.add_space(6.0);
-            if ui.button("Agora não (perguntar de novo depois)").clicked() {
-                choice = Some(Choice::Later);
-            }
+            paw_ui::theme::dialog_actions(ui, |ui| {
+                if paw_ui::theme::primary_button(ui, "Agora não").clicked() {
+                    choice = Some(Choice::Later);
+                }
+            });
         });
         match choice {
             Some(Choice::Recover(i)) => {
@@ -1385,24 +1363,27 @@ impl Workspace {
         if !self.export_quit_prompt {
             return;
         }
-        egui::Modal::new(egui::Id::new("export-quit")).show(ctx, |ui| {
-            ui.set_width(380.0);
-            ui.heading("Exportação em andamento");
-            ui.label("Fechar agora cancela a exportação (o arquivo incompleto é apagado).");
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Cancelar exportação e sair").clicked() {
-                    if let Some(job) = self.deliver.as_ref().and_then(|d| d.job.as_ref()) {
-                        job.cancel.store(true, Ordering::Relaxed);
+        paw_ui::dialog::modal(
+            ctx,
+            "export-quit",
+            "Exportação em andamento",
+            380.0,
+            |ui| {
+                ui.label("Fechar agora cancela a exportação (o arquivo incompleto é apagado).");
+                paw_ui::theme::dialog_actions(ui, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Continuar exportando").clicked() {
+                        self.export_quit_prompt = false;
                     }
-                    self.quit_after_export = true;
-                    self.export_quit_prompt = false;
-                }
-                if ui.button("Continuar exportando").clicked() {
-                    self.export_quit_prompt = false;
-                }
-            });
-        });
+                    if ui.button("Cancelar exportação e sair").clicked() {
+                        if let Some(job) = self.deliver.as_ref().and_then(|d| d.job.as_ref()) {
+                            job.cancel.store(true, Ordering::Relaxed);
+                        }
+                        self.quit_after_export = true;
+                        self.export_quit_prompt = false;
+                    }
+                });
+            },
+        );
     }
 }
 

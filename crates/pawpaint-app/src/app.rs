@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 
-use egui::{Align2, Key, Modifiers, RichText, vec2};
+use egui::{Key, Modifiers, RichText, vec2};
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 use paw_ui::theme;
 use paw_ui::toasts::Toasts;
@@ -348,12 +348,17 @@ fn leftovers() -> Vec<PathBuf> {
 
 // ---------------------------------------------------------------- layout dos dockers
 
-pub fn default_layout() -> DockState<Panel> {
+/// Layout padrão para uma janela com `width` px: a coluna da direita e a caixa de ferramentas
+/// têm largura fixa em pixels (frações deixariam a coluna estreita demais em janela pequena).
+pub fn default_layout(width: f32) -> DockState<Panel> {
+    let side = 310.0;
+    let right = (1.0 - side / width.max(side * 2.0)).clamp(0.55, 0.85);
+    let tools = (100.0 / (width - side).max(300.0)).clamp(0.05, 0.2);
     let mut dock = DockState::new(vec![Panel::Canvas]);
     let tree = dock.main_surface_mut();
     let [canvas, right] = tree.split_right(
         NodeIndex::root(),
-        0.79,
+        right,
         vec![Panel::Color, Panel::Palette, Panel::Overview],
     );
     let [_, layers] = tree.split_below(right, 0.33, vec![Panel::Layers, Panel::History]);
@@ -362,7 +367,7 @@ pub fn default_layout() -> DockState<Panel> {
         0.68,
         vec![Panel::BrushPresets, Panel::BrushEditor, Panel::ToolOptions],
     );
-    tree.split_left(canvas, 0.085, vec![Panel::Toolbox]);
+    tree.split_left(canvas, tools, vec![Panel::Toolbox]);
     dock
 }
 
@@ -492,7 +497,7 @@ impl PaintApp {
         let presets = Brush::presets();
         let brush = presets[0].clone();
         Self {
-            dock: default_layout(),
+            dock: default_layout(paw_ui::initial_window_size([1480.0, 880.0])[0]),
             tab_fit: Default::default(),
             st: State {
                 docs: Vec::new(),
@@ -1365,7 +1370,7 @@ impl PaintApp {
                 st.brush.flow = f / 100.0;
                 ui.separator();
                 if compact {
-                    ui.menu_button("⋯", |ui| mirror_and_eraser(st, ui))
+                    ui.menu_button("…", |ui| mirror_and_eraser(st, ui))
                         .response
                         .on_hover_text("Espelho e Borracha");
                 } else {
@@ -1767,512 +1772,520 @@ impl PaintApp {
             Dialog::ConfirmClose(_) | Dialog::ConfirmQuit => "Mudanças não salvas",
             Dialog::Recover(_) => "Recuperação automática",
         };
-        egui::Window::new(title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
-            .show(ctx, |ui| match &mut dialog {
-                Dialog::New { w, h, bg, color } => {
-                    ui.horizontal_wrapped(|ui| {
-                        for (label, (pw, ph)) in [
-                            ("1920×1080", (1920, 1080)),
-                            ("1280×720 (thumbnail)", (1280, 720)),
-                            ("1080×1080", (1080, 1080)),
-                            ("1080×1920", (1080, 1920)),
-                            ("A4 300 dpi", (2480, 3508)),
-                        ] {
-                            if ui.button(label).clicked() {
-                                (*w, *h) = (pw, ph);
-                            }
+        let blocking = matches!(
+            dialog,
+            Dialog::ConfirmClose(_) | Dialog::ConfirmQuit | Dialog::Recover(_)
+        );
+        let width = match dialog {
+            Dialog::New { .. } | Dialog::Curves { .. } => 400.0,
+            _ => 360.0,
+        };
+        let body = |ui: &mut egui::Ui| match &mut dialog {
+            Dialog::New { w, h, bg, color } => {
+                ui.horizontal_wrapped(|ui| {
+                    for (label, (pw, ph)) in [
+                        ("1920×1080", (1920, 1080)),
+                        ("1280×720 (thumbnail)", (1280, 720)),
+                        ("1080×1080", (1080, 1080)),
+                        ("1080×1920", (1080, 1920)),
+                        ("A4 300 dpi", (2480, 3508)),
+                    ] {
+                        if ui.button(label).clicked() {
+                            (*w, *h) = (pw, ph);
                         }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Tamanho");
-                        size_field(ui, w);
-                        ui.label("×");
-                        size_field(ui, h);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Fundo");
-                        ui.selectable_value(bg, 0, "Branco");
-                        ui.selectable_value(bg, 1, "Transparente");
-                        ui.selectable_value(bg, 2, "Cor");
-                        if *bg == 2 {
-                            ui.color_edit_button_srgb(color);
-                        }
-                    });
-                    ui.add_space(8.0);
-                    paw_ui::theme::dialog_actions(ui, |ui| {
-                        if paw_ui::theme::primary_button(ui, "Criar").clicked() || enter {
-                            keep = false;
-                            let (w, h, bg, color) = (*w, *h, *bg, *color);
-                            then = Some(Box::new(move |st| {
-                                let background = match bg {
-                                    0 => Background::White,
-                                    1 => Background::Transparent,
-                                    _ => Background::Color(color),
-                                };
-                                add_doc(st, Editor::new(w, h, background), None);
-                            }));
-                        }
-                        if ui.button("Cancelar").clicked() || esc {
-                            keep = false;
-                        }
-                    });
-                }
-                Dialog::Filter {
-                    kind,
-                    a,
-                    b,
-                    c,
-                    preview,
-                    applied,
-                    last_ms,
-                    waiting,
-                } => {
-                    let mut changed = false;
-                    let mut slider =
-                        |ui: &mut egui::Ui,
-                         name: &str,
-                         v: &mut f32,
-                         r: std::ops::RangeInclusive<f32>| {
-                            ui.horizontal(|ui| {
-                                ui.label(name);
-                                changed |= dialog_slider(ui, v, r, "").changed();
-                            });
-                        };
-                    match kind {
-                        FilterKind::BrightnessContrast => {
-                            slider(ui, "Brilho", a, -1.0..=1.0);
-                            slider(ui, "Contraste", b, -1.0..=1.0);
-                        }
-                        FilterKind::HueSaturation => {
-                            slider(ui, "Matiz", a, -180.0..=180.0);
-                            slider(ui, "Saturação", b, -1.0..=1.0);
-                            slider(ui, "Luminosidade", c, -1.0..=1.0);
-                        }
-                        FilterKind::Levels => {
-                            slider(ui, "Pretos", a, 0.0..=1.0);
-                            slider(ui, "Brancos", b, 0.0..=1.0);
-                            slider(ui, "Gama", c, 0.1..=4.0);
-                        }
-                        FilterKind::Threshold => slider(ui, "Limiar", a, 0.0..=1.0),
-                        FilterKind::Posterize => slider(ui, "Níveis", a, 2.0..=32.0),
-                        FilterKind::Blur => slider(ui, "Raio", a, 0.5..=60.0),
-                        FilterKind::Sharpen => {
-                            slider(ui, "Quantidade", a, 0.0..=3.0);
-                            slider(ui, "Raio", b, 0.3..=10.0);
-                        }
-                        FilterKind::Pixelate => slider(ui, "Tamanho do bloco", a, 2.0..=80.0),
-                        FilterKind::Noise => slider(ui, "Quantidade", a, 0.0..=1.0),
                     }
-                    ui.checkbox(preview, "Prévia na tela");
-                    let (f, label) = filter_of(kind, *a, *b, *c);
-                    let cur = st.cur;
-                    let dragging = ui.input(|i| i.pointer.any_down());
-                    let action =
-                        preview_action(*preview, changed, *waiting, *applied, *last_ms, dragging);
-                    if action == PreviewAction::Wait {
-                        *waiting = true;
-                    } else if action == PreviewAction::Apply
-                        && let Some(d) = st.docs.get_mut(cur)
-                    {
-                        let started = std::time::Instant::now();
-                        if *applied {
-                            d.ed.undo();
-                        }
-                        let id = d.active;
-                        *applied = d.ed.apply_filter(id, &f, label).is_ok();
-                        *last_ms = started.elapsed().as_secs_f32() * 1000.0;
-                        *waiting = false;
-                    } else if changed
-                        && !*preview
-                        && *applied
-                        && let Some(d) = st.docs.get_mut(cur)
-                    {
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Tamanho");
+                    size_field(ui, w);
+                    ui.label("×");
+                    size_field(ui, h);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Fundo");
+                    ui.selectable_value(bg, 0, "Branco");
+                    ui.selectable_value(bg, 1, "Transparente");
+                    ui.selectable_value(bg, 2, "Cor");
+                    if *bg == 2 {
+                        ui.color_edit_button_srgb(color);
+                    }
+                });
+                ui.add_space(8.0);
+                paw_ui::theme::dialog_actions(ui, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Criar").clicked() || enter {
+                        keep = false;
+                        let (w, h, bg, color) = (*w, *h, *bg, *color);
+                        then = Some(Box::new(move |st| {
+                            let background = match bg {
+                                0 => Background::White,
+                                1 => Background::Transparent,
+                                _ => Background::Color(color),
+                            };
+                            add_doc(st, Editor::new(w, h, background), None);
+                        }));
+                    }
+                    if ui.button("Cancelar").clicked() || esc {
+                        keep = false;
+                    }
+                });
+            }
+            Dialog::Filter {
+                kind,
+                a,
+                b,
+                c,
+                preview,
+                applied,
+                last_ms,
+                waiting,
+            } => {
+                let mut changed = false;
+                let mut slider =
+                    |ui: &mut egui::Ui,
+                     name: &str,
+                     v: &mut f32,
+                     r: std::ops::RangeInclusive<f32>| {
+                        ui.horizontal(|ui| {
+                            ui.label(name);
+                            changed |= dialog_slider(ui, v, r, "").changed();
+                        });
+                    };
+                match kind {
+                    FilterKind::BrightnessContrast => {
+                        slider(ui, "Brilho", a, -1.0..=1.0);
+                        slider(ui, "Contraste", b, -1.0..=1.0);
+                    }
+                    FilterKind::HueSaturation => {
+                        slider(ui, "Matiz", a, -180.0..=180.0);
+                        slider(ui, "Saturação", b, -1.0..=1.0);
+                        slider(ui, "Luminosidade", c, -1.0..=1.0);
+                    }
+                    FilterKind::Levels => {
+                        slider(ui, "Pretos", a, 0.0..=1.0);
+                        slider(ui, "Brancos", b, 0.0..=1.0);
+                        slider(ui, "Gama", c, 0.1..=4.0);
+                    }
+                    FilterKind::Threshold => slider(ui, "Limiar", a, 0.0..=1.0),
+                    FilterKind::Posterize => slider(ui, "Níveis", a, 2.0..=32.0),
+                    FilterKind::Blur => slider(ui, "Raio", a, 0.5..=60.0),
+                    FilterKind::Sharpen => {
+                        slider(ui, "Quantidade", a, 0.0..=3.0);
+                        slider(ui, "Raio", b, 0.3..=10.0);
+                    }
+                    FilterKind::Pixelate => slider(ui, "Tamanho do bloco", a, 2.0..=80.0),
+                    FilterKind::Noise => slider(ui, "Quantidade", a, 0.0..=1.0),
+                }
+                ui.checkbox(preview, "Prévia na tela");
+                let (f, label) = filter_of(kind, *a, *b, *c);
+                let cur = st.cur;
+                let dragging = ui.input(|i| i.pointer.any_down());
+                let action =
+                    preview_action(*preview, changed, *waiting, *applied, *last_ms, dragging);
+                if action == PreviewAction::Wait {
+                    *waiting = true;
+                } else if action == PreviewAction::Apply
+                    && let Some(d) = st.docs.get_mut(cur)
+                {
+                    let started = std::time::Instant::now();
+                    if *applied {
                         d.ed.undo();
-                        *applied = false;
-                        *waiting = false;
                     }
-                    ui.add_space(8.0);
-                    let applied_now = *applied;
-                    paw_ui::theme::dialog_actions(ui, |ui| {
-                        if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
-                            keep = false;
-                            then = Some(Box::new(move |st| {
-                                if !applied_now && let Some(d) = st.doc_mut() {
-                                    let id = d.active;
-                                    if let Err(e) = d.ed.apply_filter(id, &f, label) {
-                                        st.warn(e.to_string());
-                                    }
-                                }
-                            }));
-                        }
-                        if ui.button("Cancelar").clicked() || esc {
-                            keep = false;
-                            then = Some(Box::new(move |st| {
-                                if applied_now && let Some(d) = st.doc_mut() {
-                                    d.ed.undo();
-                                }
-                            }));
-                        }
-                    });
+                    let id = d.active;
+                    *applied = d.ed.apply_filter(id, &f, label).is_ok();
+                    *last_ms = started.elapsed().as_secs_f32() * 1000.0;
+                    *waiting = false;
+                } else if changed
+                    && !*preview
+                    && *applied
+                    && let Some(d) = st.docs.get_mut(cur)
+                {
+                    d.ed.undo();
+                    *applied = false;
+                    *waiting = false;
                 }
-                Dialog::Curves {
-                    points,
-                    drag,
-                    applied,
-                } => {
-                    let side = 240.0;
-                    let (rect, resp) =
-                        ui.allocate_exact_size(vec2(side, side), egui::Sense::click_and_drag());
-                    let p = ui.painter();
-                    p.rect_filled(rect, 2.0, egui::Color32::from_gray(30));
-                    for i in 1..4 {
-                        let t = i as f32 / 4.0;
-                        let g = egui::Stroke::new(1.0, egui::Color32::from_gray(60));
-                        p.line_segment(
-                            [
-                                rect.lerp_inside(vec2(t, 0.0)),
-                                rect.lerp_inside(vec2(t, 1.0)),
-                            ],
-                            g,
-                        );
-                        p.line_segment(
-                            [
-                                rect.lerp_inside(vec2(0.0, t)),
-                                rect.lerp_inside(vec2(1.0, t)),
-                            ],
-                            g,
-                        );
+                ui.add_space(8.0);
+                let applied_now = *applied;
+                paw_ui::theme::dialog_actions(ui, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
+                        keep = false;
+                        then = Some(Box::new(move |st| {
+                            if !applied_now && let Some(d) = st.doc_mut() {
+                                let id = d.active;
+                                if let Err(e) = d.ed.apply_filter(id, &f, label) {
+                                    st.warn(e.to_string());
+                                }
+                            }
+                        }));
                     }
-                    let to_screen = |x: f32, y: f32| {
-                        egui::pos2(
-                            rect.left() + x * rect.width(),
-                            rect.bottom() - y * rect.height(),
-                        )
-                    };
-                    let lut = pawpaint_core::filters::curve_lut(points);
-                    let line: Vec<egui::Pos2> = (0..256)
-                        .map(|k| to_screen(k as f32 / 255.0, lut[k]))
-                        .collect();
-                    p.add(egui::Shape::line(
-                        line,
-                        egui::Stroke::new(2.0, theme::ACCENT),
-                    ));
-                    for (x, y) in points.iter() {
-                        p.circle_filled(to_screen(*x, *y), 4.5, egui::Color32::WHITE);
+                    if ui.button("Cancelar").clicked() || esc {
+                        keep = false;
+                        then = Some(Box::new(move |st| {
+                            if applied_now && let Some(d) = st.doc_mut() {
+                                d.ed.undo();
+                            }
+                        }));
                     }
-                    let norm = |pos: egui::Pos2| {
-                        (
-                            ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
-                            ((rect.bottom() - pos.y) / rect.height()).clamp(0.0, 1.0),
-                        )
-                    };
-                    let mut changed = false;
-                    if let Some(pos) = resp.interact_pointer_pos() {
-                        if resp.drag_started_by(egui::PointerButton::Primary) || resp.clicked() {
-                            let near = points
-                                .iter()
-                                .position(|(x, y)| to_screen(*x, *y).distance(pos) < 10.0);
-                            *drag = Some(near.unwrap_or_else(|| {
-                                points.push(norm(pos));
-                                points.len() - 1
-                            }));
-                            changed = true;
-                        }
-                        if resp.dragged_by(egui::PointerButton::Primary)
-                            && let Some(i) = *drag
-                            && i < points.len()
-                        {
-                            points[i] = norm(pos);
-                            changed = true;
-                        }
-                    }
-                    if resp.secondary_clicked()
-                        && let Some(pos) = resp.interact_pointer_pos()
-                        && let Some(i) = points
+                });
+            }
+            Dialog::Curves {
+                points,
+                drag,
+                applied,
+            } => {
+                let side = 240.0;
+                let (rect, resp) =
+                    ui.allocate_exact_size(vec2(side, side), egui::Sense::click_and_drag());
+                let p = ui.painter();
+                p.rect_filled(rect, 2.0, egui::Color32::from_gray(30));
+                for i in 1..4 {
+                    let t = i as f32 / 4.0;
+                    let g = egui::Stroke::new(1.0, egui::Color32::from_gray(60));
+                    p.line_segment(
+                        [
+                            rect.lerp_inside(vec2(t, 0.0)),
+                            rect.lerp_inside(vec2(t, 1.0)),
+                        ],
+                        g,
+                    );
+                    p.line_segment(
+                        [
+                            rect.lerp_inside(vec2(0.0, t)),
+                            rect.lerp_inside(vec2(1.0, t)),
+                        ],
+                        g,
+                    );
+                }
+                let to_screen = |x: f32, y: f32| {
+                    egui::pos2(
+                        rect.left() + x * rect.width(),
+                        rect.bottom() - y * rect.height(),
+                    )
+                };
+                let lut = pawpaint_core::filters::curve_lut(points);
+                let line: Vec<egui::Pos2> = (0..256)
+                    .map(|k| to_screen(k as f32 / 255.0, lut[k]))
+                    .collect();
+                p.add(egui::Shape::line(
+                    line,
+                    egui::Stroke::new(2.0, theme::ACCENT),
+                ));
+                for (x, y) in points.iter() {
+                    p.circle_filled(to_screen(*x, *y), 4.5, egui::Color32::WHITE);
+                }
+                let norm = |pos: egui::Pos2| {
+                    (
+                        ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
+                        ((rect.bottom() - pos.y) / rect.height()).clamp(0.0, 1.0),
+                    )
+                };
+                let mut changed = false;
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    if resp.drag_started_by(egui::PointerButton::Primary) || resp.clicked() {
+                        let near = points
                             .iter()
-                            .position(|(x, y)| to_screen(*x, *y).distance(pos) < 10.0)
-                    {
-                        points.remove(i);
+                            .position(|(x, y)| to_screen(*x, *y).distance(pos) < 10.0);
+                        *drag = Some(near.unwrap_or_else(|| {
+                            points.push(norm(pos));
+                            points.len() - 1
+                        }));
                         changed = true;
                     }
-                    if resp.drag_stopped_by(egui::PointerButton::Primary) {
-                        *drag = None;
+                    if resp.dragged_by(egui::PointerButton::Primary)
+                        && let Some(i) = *drag
+                        && i < points.len()
+                    {
+                        points[i] = norm(pos);
+                        changed = true;
                     }
-                    ui.label(
-                        RichText::new("Clique cria um ponto, arraste move, botão direito apaga.")
-                            .small()
-                            .weak(),
-                    );
-                    let cur = st.cur;
-                    if changed && let Some(d) = st.docs.get_mut(cur) {
-                        if *applied {
-                            d.ed.undo();
-                        }
-                        let id = d.active;
-                        *applied =
-                            d.ed.apply_filter(id, &Filter::Curves(points.clone()), "Curvas")
-                                .is_ok();
+                }
+                if resp.secondary_clicked()
+                    && let Some(pos) = resp.interact_pointer_pos()
+                    && let Some(i) = points
+                        .iter()
+                        .position(|(x, y)| to_screen(*x, *y).distance(pos) < 10.0)
+                {
+                    points.remove(i);
+                    changed = true;
+                }
+                if resp.drag_stopped_by(egui::PointerButton::Primary) {
+                    *drag = None;
+                }
+                ui.label(
+                    RichText::new("Clique cria um ponto, arraste move, botão direito apaga.")
+                        .small()
+                        .weak(),
+                );
+                let cur = st.cur;
+                if changed && let Some(d) = st.docs.get_mut(cur) {
+                    if *applied {
+                        d.ed.undo();
                     }
-                    let applied_now = *applied;
-                    let pts = points.clone();
-                    paw_ui::theme::dialog_actions(ui, |ui| {
-                        if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
-                            keep = false;
-                            then = Some(Box::new(move |st| {
-                                if !applied_now && let Some(d) = st.doc_mut() {
-                                    let id = d.active;
-                                    let _ = d.ed.apply_filter(id, &Filter::Curves(pts), "Curvas");
-                                }
-                            }));
-                        }
-                        if ui.button("Cancelar").clicked() || esc {
-                            keep = false;
-                            then = Some(Box::new(move |st| {
-                                if applied_now && let Some(d) = st.doc_mut() {
-                                    d.ed.undo();
-                                }
-                            }));
-                        }
-                    });
+                    let id = d.active;
+                    *applied =
+                        d.ed.apply_filter(id, &Filter::Curves(points.clone()), "Curvas")
+                            .is_ok();
                 }
-                Dialog::CanvasSize { w, h, anchor } => {
-                    ui.horizontal(|ui| {
-                        size_field(ui, w);
-                        ui.label("×");
-                        size_field(ui, h);
-                    });
-                    ui.label(
-                        RichText::new("Onde a imagem fica na tela nova:")
-                            .small()
-                            .weak(),
-                    );
-                    egui::Grid::new("anchor").show(ui, |ui| {
-                        for i in 0..9u8 {
-                            if ui.selectable_label(*anchor == i, "●").clicked() {
-                                *anchor = i;
-                            }
-                            if i % 3 == 2 {
-                                ui.end_row();
-                            }
-                        }
-                    });
-                    ui.add_space(8.0);
-                    paw_ui::theme::dialog_actions(ui, |ui| {
-                        if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
-                            keep = false;
-                            let (nw, nh, anchor) = (*w, *h, *anchor);
-                            then = Some(Box::new(move |st| {
-                                if let Some(d) = st.doc_mut() {
-                                    commit_if_floating(d);
-                                    let (ow, oh) =
-                                        (d.ed.doc().width as i64, d.ed.doc().height as i64);
-                                    let (ax, ay) = ((anchor % 3) as i64, (anchor / 3) as i64);
-                                    let dx = (nw as i64 - ow) * ax / 2;
-                                    let dy = (nh as i64 - oh) * ay / 2;
-                                    d.ed.resize_canvas(nw, nh, dx, dy);
-                                    d.fit = true;
-                                }
-                            }));
-                        }
-                        if ui.button("Cancelar").clicked() || esc {
-                            keep = false;
-                        }
-                    });
-                }
-                Dialog::ScaleImage {
-                    w,
-                    h,
-                    keep: lock,
-                    ratio,
-                } => {
-                    let before = (*w, *h);
-                    ui.horizontal(|ui| {
-                        size_field(ui, w);
-                        ui.label("×");
-                        size_field(ui, h);
-                    });
-                    ui.checkbox(lock, "Manter proporção");
-                    if *lock {
-                        if *w != before.0 {
-                            *h = ((*w as f32 / *ratio).round() as usize).clamp(1, 8192);
-                        } else if *h != before.1 {
-                            *w = ((*h as f32 * *ratio).round() as usize).clamp(1, 8192);
-                        }
-                    }
-                    ui.add_space(8.0);
-                    paw_ui::theme::dialog_actions(ui, |ui| {
-                        if paw_ui::theme::primary_button(ui, "Escalar").clicked() || enter {
-                            keep = false;
-                            let (nw, nh) = (*w, *h);
-                            then = Some(Box::new(move |st| {
-                                if let Some(d) = st.doc_mut() {
-                                    commit_if_floating(d);
-                                    d.ed.scale_image(nw, nh);
-                                    d.fit = true;
-                                }
-                            }));
-                        }
-                        if ui.button("Cancelar").clicked() || esc {
-                            keep = false;
-                        }
-                    });
-                }
-                Dialog::Feather(r) => {
-                    dialog_slider(ui, r, 1..=100, " px");
-                    paw_ui::theme::dialog_actions(ui, |ui| {
-                        if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
-                            keep = false;
-                            let r = *r;
-                            then = Some(Box::new(move |st| {
-                                if let Some(d) = st.doc_mut() {
-                                    d.ed.feather_selection(r);
-                                }
-                            }));
-                        }
-                        if ui.button("Cancelar").clicked() || esc {
-                            keep = false;
-                        }
-                    });
-                }
-                Dialog::Grow(px) => {
-                    dialog_slider(ui, px, -100..=100, " px");
-                    ui.label(
-                        RichText::new("Positivo expande, negativo contrai.")
-                            .small()
-                            .weak(),
-                    );
-                    paw_ui::theme::dialog_actions(ui, |ui| {
-                        if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
-                            keep = false;
-                            let px = *px;
-                            then = Some(Box::new(move |st| {
-                                if let Some(d) = st.doc_mut() {
-                                    d.ed.grow_selection(px);
-                                }
-                            }));
-                        }
-                        if ui.button("Cancelar").clicked() || esc {
-                            keep = false;
-                        }
-                    });
-                }
-                Dialog::LayerProps(id) => {
-                    let id = *id;
-                    let cur = st.cur;
-                    if let Some(l) = st.docs.get(cur).and_then(|d| d.ed.doc().layer(id).cloned()) {
-                        let mut name = l.name.clone();
-                        if ui.add(egui::TextEdit::singleline(&mut name)).changed() {
-                            st.docs[cur]
-                                .ed
-                                .edit_layer(id, "name", "Renomear camada", |x| x.name = name);
-                        }
-                        let mut o = l.opacity * 100.0;
-                        if ui
-                            .add(
-                                paw_ui::Slider::new(&mut o, 0.0..=100.0)
-                                    .suffix("%")
-                                    .text("Opacidade"),
-                            )
-                            .changed()
-                        {
-                            st.docs[cur]
-                                .ed
-                                .edit_layer(id, "opacity", "Opacidade da camada", |x| {
-                                    x.opacity = o / 100.0
-                                });
-                        }
-                        let mut mode = l.mode;
-                        egui::ComboBox::from_id_salt("props-blend")
-                            .selected_text(mode.label())
-                            .show_ui(ui, |ui| {
-                                for m in BlendMode::ALL {
-                                    ui.selectable_value(&mut mode, m, m.label());
-                                }
-                            });
-                        if mode != l.mode {
-                            st.docs[cur]
-                                .ed
-                                .edit_layer(id, "mode", "Modo de mistura", |x| x.mode = mode);
-                        }
-                    }
-                    if ui.button("Fechar").clicked() || enter || esc {
+                let applied_now = *applied;
+                let pts = points.clone();
+                paw_ui::theme::dialog_actions(ui, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
                         keep = false;
-                        st.docs[cur].ed.end_change();
+                        then = Some(Box::new(move |st| {
+                            if !applied_now && let Some(d) = st.doc_mut() {
+                                let id = d.active;
+                                let _ = d.ed.apply_filter(id, &Filter::Curves(pts), "Curvas");
+                            }
+                        }));
+                    }
+                    if ui.button("Cancelar").clicked() || esc {
+                        keep = false;
+                        then = Some(Box::new(move |st| {
+                            if applied_now && let Some(d) = st.doc_mut() {
+                                d.ed.undo();
+                            }
+                        }));
+                    }
+                });
+            }
+            Dialog::CanvasSize { w, h, anchor } => {
+                ui.horizontal(|ui| {
+                    size_field(ui, w);
+                    ui.label("×");
+                    size_field(ui, h);
+                });
+                ui.label(
+                    RichText::new("Onde a imagem fica na tela nova:")
+                        .small()
+                        .weak(),
+                );
+                egui::Grid::new("anchor").show(ui, |ui| {
+                    for i in 0..9u8 {
+                        if ui.selectable_label(*anchor == i, "●").clicked() {
+                            *anchor = i;
+                        }
+                        if i % 3 == 2 {
+                            ui.end_row();
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                paw_ui::theme::dialog_actions(ui, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
+                        keep = false;
+                        let (nw, nh, anchor) = (*w, *h, *anchor);
+                        then = Some(Box::new(move |st| {
+                            if let Some(d) = st.doc_mut() {
+                                commit_if_floating(d);
+                                let (ow, oh) = (d.ed.doc().width as i64, d.ed.doc().height as i64);
+                                let (ax, ay) = ((anchor % 3) as i64, (anchor / 3) as i64);
+                                let dx = (nw as i64 - ow) * ax / 2;
+                                let dy = (nh as i64 - oh) * ay / 2;
+                                d.ed.resize_canvas(nw, nh, dx, dy);
+                                d.fit = true;
+                            }
+                        }));
+                    }
+                    if ui.button("Cancelar").clicked() || esc {
+                        keep = false;
+                    }
+                });
+            }
+            Dialog::ScaleImage {
+                w,
+                h,
+                keep: lock,
+                ratio,
+            } => {
+                let before = (*w, *h);
+                ui.horizontal(|ui| {
+                    size_field(ui, w);
+                    ui.label("×");
+                    size_field(ui, h);
+                });
+                ui.checkbox(lock, "Manter proporção");
+                if *lock {
+                    if *w != before.0 {
+                        *h = ((*w as f32 / *ratio).round() as usize).clamp(1, 8192);
+                    } else if *h != before.1 {
+                        *w = ((*h as f32 * *ratio).round() as usize).clamp(1, 8192);
                     }
                 }
-                Dialog::ConfirmClose(i) => {
-                    let i = *i;
-                    ui.label("Este documento tem mudanças que não foram salvas.");
-                    paw_ui::theme::dialog_actions(ui, |ui| {
-                        if paw_ui::theme::primary_button(ui, "Salvar").clicked() {
-                            keep = false;
-                            then = Some(Box::new(move |st| {
-                                st.cur = i.min(st.docs.len().saturating_sub(1));
-                                save(st);
-                                if st.docs.get(i).is_some_and(|d| !d.ed.is_dirty()) {
-                                    close_doc(st, i);
-                                }
-                            }));
-                        }
-                        if ui.button("Descartar").clicked() {
-                            keep = false;
-                            then = Some(Box::new(move |st| close_doc(st, i)));
-                        }
-                        if ui.button("Cancelar").clicked() || esc {
-                            keep = false;
-                        }
-                    });
+                ui.add_space(8.0);
+                paw_ui::theme::dialog_actions(ui, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Escalar").clicked() || enter {
+                        keep = false;
+                        let (nw, nh) = (*w, *h);
+                        then = Some(Box::new(move |st| {
+                            if let Some(d) = st.doc_mut() {
+                                commit_if_floating(d);
+                                d.ed.scale_image(nw, nh);
+                                d.fit = true;
+                            }
+                        }));
+                    }
+                    if ui.button("Cancelar").clicked() || esc {
+                        keep = false;
+                    }
+                });
+            }
+            Dialog::Feather(r) => {
+                dialog_slider(ui, r, 1..=100, " px");
+                paw_ui::theme::dialog_actions(ui, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
+                        keep = false;
+                        let r = *r;
+                        then = Some(Box::new(move |st| {
+                            if let Some(d) = st.doc_mut() {
+                                d.ed.feather_selection(r);
+                            }
+                        }));
+                    }
+                    if ui.button("Cancelar").clicked() || esc {
+                        keep = false;
+                    }
+                });
+            }
+            Dialog::Grow(px) => {
+                dialog_slider(ui, px, -100..=100, " px");
+                ui.label(
+                    RichText::new("Positivo expande, negativo contrai.")
+                        .small()
+                        .weak(),
+                );
+                paw_ui::theme::dialog_actions(ui, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
+                        keep = false;
+                        let px = *px;
+                        then = Some(Box::new(move |st| {
+                            if let Some(d) = st.doc_mut() {
+                                d.ed.grow_selection(px);
+                            }
+                        }));
+                    }
+                    if ui.button("Cancelar").clicked() || esc {
+                        keep = false;
+                    }
+                });
+            }
+            Dialog::LayerProps(id) => {
+                let id = *id;
+                let cur = st.cur;
+                if let Some(l) = st.docs.get(cur).and_then(|d| d.ed.doc().layer(id).cloned()) {
+                    let mut name = l.name.clone();
+                    if ui.add(egui::TextEdit::singleline(&mut name)).changed() {
+                        st.docs[cur]
+                            .ed
+                            .edit_layer(id, "name", "Renomear camada", |x| x.name = name);
+                    }
+                    let mut o = l.opacity * 100.0;
+                    if ui
+                        .add(
+                            paw_ui::Slider::new(&mut o, 0.0..=100.0)
+                                .suffix("%")
+                                .text("Opacidade"),
+                        )
+                        .changed()
+                    {
+                        st.docs[cur]
+                            .ed
+                            .edit_layer(id, "opacity", "Opacidade da camada", |x| {
+                                x.opacity = o / 100.0
+                            });
+                    }
+                    let mut mode = l.mode;
+                    egui::ComboBox::from_id_salt("props-blend")
+                        .selected_text(mode.label())
+                        .show_ui(ui, |ui| {
+                            for m in BlendMode::ALL {
+                                ui.selectable_value(&mut mode, m, m.label());
+                            }
+                        });
+                    if mode != l.mode {
+                        st.docs[cur]
+                            .ed
+                            .edit_layer(id, "mode", "Modo de mistura", |x| x.mode = mode);
+                    }
                 }
-                Dialog::Recover(files) => {
-                    ui.label(format!(
-                        "{} documento(s) não foram salvos da última vez que o app fechou.",
-                        files.len()
-                    ));
-                    let files = files.clone();
-                    paw_ui::theme::dialog_actions(ui, |ui| {
-                        if paw_ui::theme::primary_button(ui, "Recuperar").clicked() {
-                            keep = false;
-                            let files = files.clone();
-                            then = Some(Box::new(move |st| {
-                                for f in files {
-                                    if let Ok(ed) = file::load_project(&f) {
-                                        add_doc(st, ed, None);
-                                        if let Some(d) = st.doc_mut() {
-                                            d.name = "Recuperado".into();
-                                            d.ed.end_change();
-                                        }
+                if ui.button("Fechar").clicked() || enter || esc {
+                    keep = false;
+                    st.docs[cur].ed.end_change();
+                }
+            }
+            Dialog::ConfirmClose(i) => {
+                let i = *i;
+                ui.label("Este documento tem mudanças que não foram salvas.");
+                paw_ui::theme::dialog_actions(ui, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Salvar").clicked() {
+                        keep = false;
+                        then = Some(Box::new(move |st| {
+                            st.cur = i.min(st.docs.len().saturating_sub(1));
+                            save(st);
+                            if st.docs.get(i).is_some_and(|d| !d.ed.is_dirty()) {
+                                close_doc(st, i);
+                            }
+                        }));
+                    }
+                    if ui.button("Descartar").clicked() {
+                        keep = false;
+                        then = Some(Box::new(move |st| close_doc(st, i)));
+                    }
+                    if ui.button("Cancelar").clicked() || esc {
+                        keep = false;
+                    }
+                });
+            }
+            Dialog::Recover(files) => {
+                ui.label(format!(
+                    "{} documento(s) não foram salvos da última vez que o app fechou.",
+                    files.len()
+                ));
+                let files = files.clone();
+                paw_ui::theme::dialog_actions(ui, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Recuperar").clicked() {
+                        keep = false;
+                        let files = files.clone();
+                        then = Some(Box::new(move |st| {
+                            for f in files {
+                                if let Ok(ed) = file::load_project(&f) {
+                                    add_doc(st, ed, None);
+                                    if let Some(d) = st.doc_mut() {
+                                        d.name = "Recuperado".into();
+                                        d.ed.end_change();
                                     }
-                                    let _ = std::fs::remove_file(&f);
                                 }
-                                st.say("Documentos recuperados. Salve com Ctrl+S.");
-                            }));
-                        }
-                        if ui.button("Descartar").clicked() {
-                            keep = false;
-                            then = Some(Box::new(move |_| {
-                                for f in &files {
-                                    let _ = std::fs::remove_file(f);
-                                }
-                            }));
-                        }
-                    });
-                }
-                Dialog::ConfirmQuit => {
-                    ui.label("Há documentos com mudanças que não foram salvas.");
-                    paw_ui::theme::dialog_actions(ui, |ui| {
-                        if paw_ui::theme::primary_button(ui, "Sair sem salvar").clicked() {
-                            keep = false;
-                            then = Some(Box::new(|st| st.allow_close = true));
-                        }
-                        if ui.button("Cancelar").clicked() || esc {
-                            keep = false;
-                        }
-                    });
-                }
-            });
+                                let _ = std::fs::remove_file(&f);
+                            }
+                            st.say("Documentos recuperados. Salve com Ctrl+S.");
+                        }));
+                    }
+                    if ui.button("Descartar").clicked() {
+                        keep = false;
+                        then = Some(Box::new(move |_| {
+                            for f in &files {
+                                let _ = std::fs::remove_file(f);
+                            }
+                        }));
+                    }
+                });
+            }
+            Dialog::ConfirmQuit => {
+                ui.label("Há documentos com mudanças que não foram salvas.");
+                paw_ui::theme::dialog_actions(ui, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Sair sem salvar").clicked() {
+                        keep = false;
+                        then = Some(Box::new(|st| st.allow_close = true));
+                    }
+                    if ui.button("Cancelar").clicked() || esc {
+                        keep = false;
+                    }
+                });
+            }
+        };
+        if blocking {
+            paw_ui::dialog::modal(ctx, "paint", title, width, body);
+        } else {
+            paw_ui::dialog::window(ctx, "paint", title, width, body);
+        }
         if keep {
             st.dialog = Some(dialog);
         }
@@ -2375,7 +2388,7 @@ impl PaintApp {
                     },
                 );
         });
-        self.apply_dock_commands();
+        self.apply_dock_commands(ctx.content_rect().width());
         if self.st.last_autosave.elapsed().as_secs() >= 45 {
             autosave(&mut self.st);
         }
@@ -2389,10 +2402,10 @@ impl PaintApp {
         self.save_layout();
     }
 
-    fn apply_dock_commands(&mut self) {
+    fn apply_dock_commands(&mut self, width: f32) {
         for c in std::mem::take(&mut self.st.dock_commands) {
             match c {
-                DockCommand::Reset => self.dock = default_layout(),
+                DockCommand::Reset => self.dock = default_layout(width),
                 DockCommand::Toggle(p) => {
                     if let Some(loc) = self.dock.find_tab(&p) {
                         self.dock.remove_tab(loc);
@@ -3184,7 +3197,7 @@ mod tests {
             h.app.dock = layout;
             h.frame(vec![]);
         }
-        h.app.dock = default_layout();
+        h.app.dock = default_layout(1480.0);
         h.frame(vec![]);
         let _ = pos2(0.0, 0.0);
     }

@@ -341,81 +341,74 @@ impl Radial {
 
     /// Janela para escolher a ação de cada posição.
     fn editor(&mut self, ctx: &Context, catalog: &[RadialAction]) {
-        let mut open = true;
         let mut changed = false;
         let mut done = false;
-        egui::Window::new("Roda de atalhos")
-            .id(Id::new("paw-radial-editor"))
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new(
-                        "Segure o botão do meio do mouse, arraste até a ação e solte.\n\
+        crate::dialog::window(ctx, "radial-editor", "Roda de atalhos", 440.0, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Segure o botão do meio do mouse, arraste até a ação e solte.\n\
                          Um toque rápido deixa a roda aberta para clicar.",
-                    )
-                    .color(theme::TEXT_DIM),
-                );
-                ui.add_space(8.0);
-                egui::Grid::new("radial-slots")
-                    .num_columns(3)
-                    .spacing(vec2(12.0, 6.0))
-                    .show(ui, |ui| {
-                        for (i, dir) in DIRECTIONS.iter().enumerate() {
-                            ui.label(egui::RichText::new(*dir).color(theme::TEXT_DIM));
-                            let icon = catalog
-                                .iter()
-                                .find(|a| a.id == self.slots[i])
-                                .and_then(|a| a.icon);
-                            let (r, _) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
-                            if let Some(icon) = icon {
-                                icons::paint(ui.painter(), r.shrink(1.0), icon, theme::TEXT);
-                            }
-                            let current = catalog
-                                .iter()
-                                .find(|a| a.id == self.slots[i])
-                                .map_or("(vazio)".to_string(), |a| a.label.clone());
-                            egui::ComboBox::from_id_salt(("radial-slot", i))
-                                .selected_text(current)
-                                .width(220.0)
-                                .height(320.0)
-                                .show_ui(ui, |ui| {
+                )
+                .color(theme::TEXT_DIM),
+            );
+            ui.add_space(8.0);
+            egui::Grid::new("radial-slots")
+                .num_columns(3)
+                .spacing(vec2(12.0, 6.0))
+                .show(ui, |ui| {
+                    for (i, dir) in DIRECTIONS.iter().enumerate() {
+                        ui.label(egui::RichText::new(*dir).color(theme::TEXT_DIM));
+                        let icon = catalog
+                            .iter()
+                            .find(|a| a.id == self.slots[i])
+                            .and_then(|a| a.icon);
+                        let (r, _) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
+                        if let Some(icon) = icon {
+                            icons::paint(ui.painter(), r.shrink(1.0), icon, theme::TEXT);
+                        }
+                        let current = catalog
+                            .iter()
+                            .find(|a| a.id == self.slots[i])
+                            .map_or("(vazio)".to_string(), |a| a.label.clone());
+                        egui::ComboBox::from_id_salt(("radial-slot", i))
+                            .selected_text(current)
+                            .width(220.0)
+                            .height(320.0)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(self.slots[i].is_empty(), "(vazio)")
+                                    .clicked()
+                                {
+                                    self.slots[i].clear();
+                                    changed = true;
+                                }
+                                for a in catalog {
                                     if ui
-                                        .selectable_label(self.slots[i].is_empty(), "(vazio)")
+                                        .selectable_label(self.slots[i] == a.id, &a.label)
                                         .clicked()
                                     {
-                                        self.slots[i].clear();
+                                        self.slots[i] = a.id.clone();
                                         changed = true;
                                     }
-                                    for a in catalog {
-                                        if ui
-                                            .selectable_label(self.slots[i] == a.id, &a.label)
-                                            .clicked()
-                                        {
-                                            self.slots[i] = a.id.clone();
-                                            changed = true;
-                                        }
-                                    }
-                                });
-                            ui.end_row();
-                        }
-                    });
-                theme::dialog_actions(ui, |ui| {
-                    if theme::primary_button(ui, "Fechar").clicked() {
-                        done = true;
-                    }
-                    if ui.button("Restaurar padrão").clicked() {
-                        self.slots = self.defaults.clone();
-                        changed = true;
+                                }
+                            });
+                        ui.end_row();
                     }
                 });
+            theme::dialog_actions(ui, |ui| {
+                if theme::primary_button(ui, "Fechar").clicked() {
+                    done = true;
+                }
+                if ui.button("Restaurar padrão").clicked() {
+                    self.slots = self.defaults.clone();
+                    changed = true;
+                }
             });
+        });
         if changed {
             self.save();
         }
-        if !open || done || ctx.input(|i| i.key_pressed(Key::Escape)) {
+        if done || ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.editing = false;
         }
     }

@@ -117,9 +117,13 @@ Cantos com raio 3 (widgets) e 4 (janelas). Bordas de 1 px em `BORDER`. Espaço e
   andar para o lado.
 - **Barra de estado** embaixo: informação que muda sempre (tempo, contagens, zoom), nunca
   botão perigoso.
-- **Diálogos** são janelas pequenas, sem seta de recolher (`collapsible(false)`), com largura
-  fixa e abertas por `dialog_pos`: centralizadas na horizontal, perto do topo. Confirmação de
-  perigo usa `Modal` com os botões na ordem Salvar, Não salvar, Cancelar.
+- **Diálogos** passam por `paw_ui::dialog`: `window` para opções (Exportar, Novo, Filtro…) e
+  `modal` para decisão que bloqueia (sair sem salvar, recuperação, efeito rodando). Mesma
+  posição (centralizado na horizontal, perto do topo), largura fixa que encolhe em janela
+  estreita, sem seta de recolher e sem "×": fecha por Cancelar/Fechar ou Esc. Conteúdo alto vai
+  em `dialog::scroll` e o pé fica à vista. Confirmação de perigo: Salvar, Não salvar, Cancelar.
+  Janelas de ferramenta que ficam abertas enquanto se trabalha (Histórico) são a exceção e
+  mantêm o "×".
 - **Pé dos diálogos** (`theme::dialog_actions`): linha fina separando, botões alinhados à
   direita, a ação principal na ponta em laranja (`theme::primary_button`) e Cancelar à esquerda
   dela.

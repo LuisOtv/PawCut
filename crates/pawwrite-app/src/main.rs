@@ -10,7 +10,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("PawWrite")
             .with_app_id("pawwrite")
-            .with_inner_size([1180.0, 780.0])
+            .with_inner_size(paw_ui::initial_window_size([1180.0, 780.0]))
             .with_min_inner_size([720.0, 480.0])
             .with_drag_and_drop(true),
         // Igual aos outros apps: X11 para soltar arquivos na janela (PAW_WAYLAND=1 usa Wayland).
