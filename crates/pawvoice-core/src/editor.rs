@@ -516,7 +516,7 @@ impl Editor {
         let seg = self.add_source(&planar);
         let t = self.track_mut(left)?;
         t.channels = 2;
-        t.segments = vec![seg];
+        t.segments = merge(vec![seg]);
         t.envelope.clear();
         t.pan = 0.0;
         self.session.tracks.retain(|x| x.id != right);
@@ -1227,6 +1227,157 @@ mod tests {
 
     fn mono(e: &Editor, id: u64) -> Vec<f32> {
         e.render(id).into_iter().next().unwrap_or_default()
+    }
+
+    /// Operações aleatórias: o editor nunca derruba e as faixas ficam coerentes (o tamanho é a
+    /// soma dos trechos, nenhum trecho passa do fim da fonte, a mixagem se calcula).
+    #[test]
+    fn monkey_test_keeps_the_session_consistent() {
+        fn check(e: &Editor, step: usize, seed: u64) {
+            for t in &e.session().tracks {
+                let sum: usize = t.segments.iter().map(|s| s.len()).sum();
+                assert_eq!(t.len(), sum, "seed {seed} passo {step}: tamanho da faixa");
+                for s in &t.segments {
+                    assert!(
+                        s.start < s.end,
+                        "seed {seed} passo {step}: trecho vazio {s:?} na faixa {} ({:?}) rótulo do desfazer {:?}",
+                        t.id,
+                        t.segments,
+                        e.undo_label()
+                    );
+                    if s.source != crate::SILENCE {
+                        let src = e.sources().get(&s.source).unwrap_or_else(|| {
+                            panic!("seed {seed} passo {step}: fonte {} sumiu", s.source)
+                        });
+                        assert!(
+                            s.end <= src.frames(),
+                            "seed {seed} passo {step}: trecho passa da fonte"
+                        );
+                    }
+                }
+                let r = e.render(t.id);
+                assert_eq!(r.len(), t.channels as usize);
+                assert!(r.iter().all(|c| c.len() == t.len()));
+            }
+            let len = e.session().len();
+            assert!(e.mix(0, len.min(5000)).iter().all(|v| v.is_finite()));
+        }
+        for seed in 1..=4u64 {
+            let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut rnd = move |n: usize| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x % n.max(1) as u64) as usize
+            };
+            let mut e = Editor::new(Session::new(48_000), BTreeMap::new());
+            e.add_track(ramp(2000), 0, None);
+            for step in 0..150 {
+                let ids: Vec<u64> = e.session().tracks.iter().map(|t| t.id).collect();
+                let len = e.session().len().max(1);
+                let (a, b) = {
+                    let (x, y) = (rnd(len + 200), rnd(len + 200));
+                    (x.min(y), x.max(y))
+                };
+                let sel: Vec<u64> = ids.iter().copied().filter(|_| rnd(2) == 0).collect();
+                let one = ids.get(rnd(ids.len().max(1))).copied().unwrap_or(0);
+                match rnd(22) {
+                    0 => {
+                        e.add_track(ramp(100 + rnd(2000)), rnd(500), None);
+                    }
+                    1 => {
+                        let _ = e.delete(&sel, a, b);
+                    }
+                    2 => {
+                        let _ = e.silence(&sel, a, b);
+                    }
+                    3 => {
+                        let _ = e.trim(&sel, a, b);
+                    }
+                    4 => {
+                        let _ = e.copy(&sel, a, b);
+                    }
+                    5 => {
+                        let _ = e.cut(&sel, a, b);
+                    }
+                    6 => {
+                        let _ = e.paste(ids.first().copied(), rnd(len));
+                    }
+                    7 => {
+                        let _ = e.duplicate(&sel, a, b);
+                    }
+                    8 => {
+                        let _ = e.split_new(&sel, a, b);
+                    }
+                    9 => {
+                        let to = ids.get(rnd(ids.len().max(1))).copied().unwrap_or(0);
+                        let _ = e.move_clip(one, a, b, to, rnd(len + 100));
+                    }
+                    10 => {
+                        let _ = e.remove_track(one);
+                    }
+                    11 => {
+                        let _ = e.split_stereo(one, rnd(2) == 0);
+                    }
+                    12 => {
+                        if ids.len() >= 2 {
+                            let _ = e.join_stereo(ids[0], ids[1]);
+                        }
+                    }
+                    13 => {
+                        let _ = e.swap_channels(one);
+                    }
+                    14 => {
+                        let _ = e.process(&sel, a, b, "x", |p| {
+                            for ch in p {
+                                for v in ch.iter_mut() {
+                                    *v *= 0.5;
+                                }
+                            }
+                        });
+                    }
+                    15 | 16 => {
+                        // efeito que muda a duração (encolhe ou estica) em faixas selecionadas
+                        if let Ok(mut job) = e.begin_process(&sel, a, b) {
+                            let grow = rnd(2) == 0;
+                            job.run_resize(|p| {
+                                for ch in p.iter_mut() {
+                                    if grow {
+                                        let c = ch.clone();
+                                        ch.extend_from_slice(&c);
+                                    } else {
+                                        ch.truncate(ch.len() / 2);
+                                    }
+                                }
+                            });
+                            let _ = e.finish_process(job, "tempo");
+                        }
+                    }
+                    17 => {
+                        e.undo();
+                    }
+                    18 => {
+                        e.redo();
+                    }
+                    19 => {
+                        let _ = e.add_labels(rnd(2) == 0, &[(a, b, "x".into())], "r");
+                    }
+                    20 => {
+                        e.set_envelope(
+                            one,
+                            vec![
+                                EnvPoint { at: a, value: 0.5 },
+                                EnvPoint { at: b, value: 1.5 },
+                            ],
+                        );
+                    }
+                    _ => {
+                        let _ = e.write_at(one, a, ramp(50 + rnd(300)));
+                    }
+                }
+                check(&e, step, seed);
+            }
+        }
     }
 
     #[test]
