@@ -360,11 +360,19 @@ impl Radial {
                 );
                 ui.add_space(8.0);
                 egui::Grid::new("radial-slots")
-                    .num_columns(2)
+                    .num_columns(3)
                     .spacing(vec2(12.0, 6.0))
                     .show(ui, |ui| {
                         for (i, dir) in DIRECTIONS.iter().enumerate() {
                             ui.label(egui::RichText::new(*dir).color(theme::TEXT_DIM));
+                            let icon = catalog
+                                .iter()
+                                .find(|a| a.id == self.slots[i])
+                                .and_then(|a| a.icon);
+                            let (r, _) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
+                            if let Some(icon) = icon {
+                                icons::paint(ui.painter(), r.shrink(1.0), icon, theme::TEXT);
+                            }
                             let current = catalog
                                 .iter()
                                 .find(|a| a.id == self.slots[i])
@@ -394,14 +402,13 @@ impl Radial {
                             ui.end_row();
                         }
                     });
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
+                theme::dialog_actions(ui, |ui| {
+                    if theme::primary_button(ui, "Fechar").clicked() {
+                        done = true;
+                    }
                     if ui.button("Restaurar padrão").clicked() {
                         self.slots = self.defaults.clone();
                         changed = true;
-                    }
-                    if ui.button("Fechar").clicked() {
-                        done = true;
                     }
                 });
             });

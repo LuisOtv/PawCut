@@ -2243,6 +2243,13 @@ impl VoiceApp {
                 self.tool = Tool::Envelope;
             }
             sep(ui);
+            let (g, _) = ui.allocate_exact_size(vec2(18.0, 28.0), Sense::hover());
+            icons::paint(
+                ui.painter(),
+                Rect::from_center_size(g.center(), vec2(16.0, 16.0)),
+                Icon::Gear,
+                theme::TEXT,
+            );
             ui.menu_button("Configuração de áudio", |ui| self.audio_setup_menu(ui))
                 .response
                 .on_hover_text("Microfone, canais de gravação (mono/estéreo) e saída");

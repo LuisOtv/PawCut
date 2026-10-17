@@ -294,6 +294,8 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
             layer_tree(st, ui, None, 0);
         });
     ui.add_space(2.0);
+    // Num docker estreito os sete botões encolhem juntos em vez de o último sair da linha.
+    let bw = ((ui.available_width() - 6.0 * ui.spacing().item_spacing.x) / 7.0).clamp(20.0, 28.0);
     ui.horizontal(|ui| {
         let cur = st.cur;
         let mut act: Option<&str> = None;
@@ -306,7 +308,7 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
             ("up", "Subir"),
             ("down", "Descer"),
         ] {
-            let (r, resp) = ui.allocate_exact_size(vec2(28.0, 24.0), Sense::click());
+            let (r, resp) = ui.allocate_exact_size(vec2(bw, 24.0), Sense::click());
             let p = ui.painter();
             p.rect_filled(
                 r,

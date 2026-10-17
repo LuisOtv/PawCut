@@ -1297,8 +1297,10 @@ impl PaintApp {
         let compact = ui.available_width() < 1180.0;
         ui.horizontal_centered(|ui| {
             if compact {
+                // O resto (nome da ferramenta, dois menus, três rótulos, três campos de 72 px e o
+                // botão "⋯") ocupa uns 840 px; os trilhos dividem o que sobra.
                 ui.spacing_mut().slider_width =
-                    ((ui.available_width() - 770.0) / 3.0).clamp(44.0, 110.0);
+                    ((ui.available_width() - 840.0) / 3.0).clamp(36.0, 110.0);
             }
             ui.add_space(4.0);
             ui.label(RichText::new(st.tool.label()).strong());

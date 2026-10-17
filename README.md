@@ -18,6 +18,10 @@ scripts/install.sh pawvoice   # só um (pawcut, pawvoice, pawwrite, pawpaint)
 
 Como os apps se parecem e se comportam está em [`docs/DESIGN.md`](docs/DESIGN.md).
 
+**Roda de atalhos (nos 4 apps):** segure o botão do meio do mouse, arraste até a ação e solte
+(como a roda de comunicação dos jogos). Um toque rápido deixa a roda aberta para clicar; o centro
+dela abre a personalização das oito posições (também no menu: "Roda de atalhos…").
+
 Bibliotecas compartilhadas em `crates/`:
 - `paw-ui`: tema, ícones, avisos e backups;
 - `paw-audio`: loudness, filtros, gate, compressor, tocar e gravar;
@@ -119,6 +123,9 @@ Editor de imagens no estilo do Krita: pintura, camadas, seleções, filtros e do
   12 megapixels leva ~0,5 s); a prévia de um filtro lento só é refeita ao soltar o slider; o autosave e o salvamento
   rodam em segundo plano com uma cópia barata do documento; o carimbo do pincel ficou ~2x mais rápido, o que pesa
   nos pincéis grandes.
+- **Caixa de ferramentas como a do Photoshop:** diminua o painel e ela vira uma coluna só (ou fixe
+  uma coluna no botão de setinhas no topo). Arrastar a tela é Espaço + arrastar (o botão do meio
+  abre a roda de atalhos).
 - **Janelas pequenas:** a barra do pincel recolhe o excesso num menu "⋯", os dockers rolam e os diálogos mantêm a
   largura. Nos diálogos, Esc cancela e Enter confirma.
 

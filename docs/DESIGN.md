@@ -57,8 +57,8 @@ Nenhuma outra cor carrega significado.
 - Noto Sans (ou DejaVu Sans se faltar). Corpo e botões em 12,5 px, texto pequeno 10,5 px,
   títulos 16 px, tempo e números alinhados em monoespaçada.
 - Rótulos de linha em `TEXT_DIM`, valores em `TEXT`. Títulos de seção em branco.
-- Nunca use emoji como ícone: a fonte do sistema pode não ter. Use `paw_ui::icons` (vetoriais,
-  desenhados com o painter) ou um símbolo comum (↺ ◆ ×).
+- Nunca use emoji nem símbolo de fonte como ícone (🔒, ↺, ↔): a fonte do sistema pode não ter,
+  e cada um tem um traço diferente. Use `paw_ui::icons`.
 
 ### Grade
 
@@ -78,10 +78,30 @@ Cantos com raio 3 (widgets) e 4 (janelas). Bordas de 1 px em `BORDER`. Espaço e
 
 ### Ícones e botões
 
+- **Um estilo só** (`paw_ui::icons`): contorno de traço uniforme (2/24 do tamanho), desenhado
+  num grid de 24 × 24 com margem de 2, cantos arredondados e pontas redondas, como os ícones de
+  linha do Resolve e do Krita. Só o transporte (tocar, pausar, parar, gravar) é cheio. Um ícone
+  novo entra no `enum Icon` e em `Icon::ALL`; o teste confere que ele não sai do quadrado e o
+  exemplo `cargo run -p paw-ui --example icon_sheet` mostra a folha inteira para comparar.
+- Ferramentas e ações de todos os apps usam os mesmos desenhos (a borracha do PawPaint é a mesma
+  da roda de atalhos; o salvar é o mesmo nos quatro).
 - Botão de ícone: `paw_ui::icons::button(ui, icon, size, ligado, dica)`. **Todo** botão sem
   texto tem dica (tooltip), e a dica mostra o atalho: "Cortar no cursor (Ctrl+B)".
 - Estado ligado = fundo mais claro + ícone em `ACCENT`. Desligado = `TEXT_DIM`. Passar o mouse
   clareia. Desativado não responde e fica apagado.
+
+### Sliders
+
+- Sempre `paw_ui::Slider` (nunca o `egui::Slider`, que tem botão retangular e campo que muda de
+  largura): trilho fino de 4 px, parte preenchida em `ACCENT`, botão redondo claro e o número num
+  campo de tamanho fixo (`slider::VALUE_W`) à direita.
+- Intervalo que passa pelo zero (ganho, pan, brilho, matiz) preenche **a partir do zero**, com
+  uma marquinha no meio. Tamanho de pincel e zoom usam escala logarítmica.
+- Com `.text("Rótulo")` o rótulo vai à **esquerda**, numa coluna fixa (`slider::LABEL_W`): vários
+  sliders seguidos ficam com os trilhos alinhados. Numa `Grid` o slider inteiro é uma célula.
+- No Inspector do PawCut o slider ocupa a coluna do valor e o número fica sempre na mesma posição;
+  um parâmetro sem slider útil (posição) deixa o espaço vazio para os números continuarem
+  alinhados.
 
 ## 3. Estrutura da tela
 
@@ -100,6 +120,12 @@ Cantos com raio 3 (widgets) e 4 (janelas). Bordas de 1 px em `BORDER`. Espaço e
 - **Diálogos** são janelas pequenas, sem seta de recolher (`collapsible(false)`), com largura
   fixa e abertas por `dialog_pos`: centralizadas na horizontal, perto do topo. Confirmação de
   perigo usa `Modal` com os botões na ordem Salvar, Não salvar, Cancelar.
+- **Pé dos diálogos** (`theme::dialog_actions`): linha fina separando, botões alinhados à
+  direita, a ação principal na ponta em laranja (`theme::primary_button`) e Cancelar à esquerda
+  dela.
+- **Caixa de ferramentas** (PawPaint): grade por grupos (pintura, seleção, mover, formas) que
+  reflui conforme a largura do painel até virar uma coluna só, como a do Photoshop; o botão de
+  setinhas no topo fixa em uma coluna. Barra de cima larga demais recolhe o resto num "⋯".
 - **Menus** da barra de cima rolam quando não cabem na tela (`top_menu`), nunca cortam itens.
 - **Avisos** vão para `paw_ui::toasts` (canto de baixo, somem sozinhos, erro em vermelho e fica
   mais tempo). Diálogo bloqueante só para o que exige decisão.
@@ -169,6 +195,26 @@ O app abre bem em 960 x 600 e continua usável.
   e confere que a janela não muda de largura.
 
 ## 5. Interação
+
+### Roda de atalhos (botão do meio)
+
+Igual nos quatro apps (`paw_ui::radial`), como a roda de comunicação dos jogos e o "pie menu" do
+Blender:
+
+- **Segure** o botão do meio em qualquer lugar, **arraste** na direção da ação e **solte**. Soltar
+  no centro (ou numa fatia vazia) cancela.
+- Um **toque rápido** deixa a roda aberta: clique numa fatia para escolher, no miolo para
+  personalizar, fora ou Esc para fechar.
+- Oito posições, a partir de cima no sentido horário. O miolo mostra o nome completo da ação
+  apontada. Cada app tem um catálogo (id, nome, ícone) e a janela "Roda de atalhos…" (no menu
+  Configurações, Ferramentas ou Workspace) escolhe a ação de cada posição; fica salvo em
+  `radial.json` na pasta de configuração.
+- O botão do meio é **só** da roda: nenhum painel arrasta nada com ele (use
+  `dragged_by(PointerButton::Primary)`). Arrastar a tela do PawPaint é Espaço + arrastar; o
+  visualizador ampliado do PawCut move com Alt + arrastar.
+- Com a roda ou a personalização abertas, os atalhos de teclado do app calam (`Radial::is_open`).
+
+### Geral
 
 - **Atalhos editáveis** e iguais entre apps: Espaço toca e pausa, Ctrl+Z / Ctrl+Shift+Z,
   Ctrl+S / Ctrl+Shift+S, Ctrl+N, Ctrl+O, Ctrl+C / Ctrl+X / Ctrl+V, Delete, Ctrl+roda dá zoom, a
@@ -343,6 +389,10 @@ zero.
 | PawPaint: seleção retangular arrastada toda para fora da imagem derrubava o app (fuzz) | limites nos dois lados, nunca só em um |
 | PawPaint: um ponto do pincel em 1e30 ou NaN travava o app em laço infinito | 8: validar número antes de laço de desenho |
 | PawPaint: sliders e dock de pincéis cortados em painel estreito | 4: docks rolam, slider mede o espaço que sobrou |
+| Sliders com botão retangular e número que mudava de largura, rótulos depois do valor, ícones de estilos diferentes (e emoji) | 2: `paw_ui::Slider` e `paw_ui::icons` em todos os apps |
+| PawPaint: a caixa de ferramentas não encolhia abaixo de 175 px (mínimo padrão do `egui_dock`) | `separator.extra` do dock no tamanho que o painel aguenta de verdade |
+| Um slider dentro de uma `Grid` virava duas colunas (trilho e campo), empurrando o valor para fora do docker | widget composto desenha numa `horizontal` interna |
+| PawVoice: arrastar com o botão do meio selecionava áudio por baixo da roda | 5: painéis só respondem ao botão esquerdo |
 
 ## 11. Checklist para uma tela nova
 
@@ -363,4 +413,7 @@ zero.
 - [ ] Passou pelo `scripts/ui-fuzz.sh` sem cair, em mais de uma semente.
 - [ ] Funciona com um arquivo grande (foto de 12 MP, texto de 1 MB, narração de 30 min) sem congelar.
 - [ ] Toda operação que recebe número do usuário sobrevive a NaN, infinito, enorme e zero.
+- [ ] Sliders são `paw_ui::Slider`; ícones são `paw_ui::icons` (nada de emoji).
+- [ ] Ações novas entram no catálogo da roda de atalhos do app.
+- [ ] Diálogos terminam com `dialog_actions` e a ação principal em `primary_button`.
 - [ ] Texto em português, curto, sem traço longo.
