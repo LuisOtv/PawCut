@@ -398,6 +398,13 @@ pub enum Dialog {
     Recover(Vec<PathBuf>),
 }
 
+/// A imagem do painel Referência.
+pub struct Reference {
+    pub name: String,
+    pub img: image::RgbaImage,
+    pub tex: Option<TextureHandle>,
+}
+
 /// O que o mouse está fazendo na tela, entre apertar e soltar.
 pub enum Interaction {
     Stroke,
@@ -589,11 +596,4 @@ mod tests {
             }
         }
     }
-}
-
-/// A imagem do painel Referência.
-pub struct Reference {
-    pub name: String,
-    pub img: image::RgbaImage,
-    pub tex: Option<TextureHandle>,
 }

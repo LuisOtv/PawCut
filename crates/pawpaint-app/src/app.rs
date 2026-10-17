@@ -2933,14 +2933,14 @@ mod tests {
             tex: None,
         });
         let ctx = egui::Context::default();
-        let mut run = |st: &mut State, events: Vec<Event>| {
+        let run = |st: &mut State, events: Vec<Event>| {
             let raw = RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))),
                 events,
                 ..Default::default()
             };
             ctx.run_ui(raw, |ui| {
-                egui::CentralPanel::default().show_inside(ui, |ui| docks::reference(st, ui));
+                egui::CentralPanel::default().show(ui, |ui| docks::reference(st, ui));
             })
             .drop_without_applying_deltas();
         };
