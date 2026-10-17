@@ -1213,9 +1213,8 @@ impl WriteApp {
                 Dialog::Unsaved(then) => {
                     let then = *then;
                     ui.label("O roteiro tem mudanças que não foram salvas.");
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Salvar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Salvar").clicked() {
                             keep = false;
                             action = Some(Box::new(move |me| {
                                 if me.path.is_some() {
@@ -1245,9 +1244,8 @@ impl WriteApp {
                         ))
                         .weak(),
                     );
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Descartar e abrir").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Descartar e abrir").clicked() {
                             keep = false;
                             let path = path.clone();
                             action = Some(Box::new(move |me| me.open_path(&path)));
@@ -1260,9 +1258,8 @@ impl WriteApp {
                 Dialog::Recover { text, path } => {
                     ui.label("Da última vez o app fechou antes de você salvar.");
                     ui.label(RichText::new(format!("{} palavras de texto", core::count_words(text))).weak());
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Recuperar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Recuperar").clicked() {
                             keep = false;
                             let (text, path) = (text.clone(), path.clone());
                             action = Some(Box::new(move |me| {

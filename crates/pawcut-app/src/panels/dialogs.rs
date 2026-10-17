@@ -1288,9 +1288,8 @@ impl Workspace {
             ui.set_width(360.0);
             ui.heading("Alterações não salvas");
             ui.label("O projeto tem alterações que ainda não foram salvas.");
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Salvar").clicked() {
+            paw_ui::theme::dialog_actions(ui, |ui| {
+                if paw_ui::theme::primary_button(ui, "Salvar").clicked() {
                     choice = Some(0);
                 }
                 if ui.button("Descartar").clicked() {

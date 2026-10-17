@@ -19,6 +19,8 @@ const RAIL_H: f32 = 4.0;
 const KNOB_R: f32 = 6.0;
 /// Campo do valor, do mesmo tamanho em todos os sliders.
 pub const VALUE_W: f32 = 72.0;
+/// Coluna do rótulo (quando o slider tem `text`).
+pub const LABEL_W: f32 = 104.0;
 
 pub struct Slider<'a, N: Numeric> {
     value: &'a mut N,
@@ -29,6 +31,7 @@ pub struct Slider<'a, N: Numeric> {
     show_value: bool,
     decimals: Option<usize>,
     width: Option<f32>,
+    from_zero: bool,
 }
 
 impl<'a, N: Numeric> Slider<'a, N> {
@@ -42,6 +45,7 @@ impl<'a, N: Numeric> Slider<'a, N> {
             show_value: true,
             decimals: None,
             width: None,
+            from_zero: true,
         }
     }
 
@@ -73,6 +77,13 @@ impl<'a, N: Numeric> Slider<'a, N> {
 
     /// Sempre preenchido; existe só para trocar `egui::Slider` sem mexer no resto.
     pub fn trailing_fill(self, _on: bool) -> Self {
+        self
+    }
+
+    /// Preencher a partir do zero quando o intervalo passa por ele (padrão). Desligue quando o
+    /// número não é um valor com sinal (ex.: zoom guardado em logaritmo).
+    pub fn fill_from_zero(mut self, on: bool) -> Self {
+        self.from_zero = on;
         self
     }
 
@@ -108,12 +119,39 @@ pub fn from_t(t: f64, lo: f64, hi: f64, log: bool) -> f64 {
 
 impl<N: Numeric> Widget for Slider<'_, N> {
     fn ui(self, ui: &mut Ui) -> Response {
+        // Trilho, valor e rótulo numa linha só: dentro de uma `Grid` contam como uma célula.
+        ui.horizontal(|ui| self.contents(ui)).inner
+    }
+}
+
+impl<N: Numeric> Slider<'_, N> {
+    fn contents(self, ui: &mut Ui) -> Response {
         let (lo, hi) = (self.range.start().to_f64(), self.range.end().to_f64());
         let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
         let height = ui.spacing().interact_size.y;
         let width = self
             .width
             .unwrap_or_else(|| ui.spacing().slider_width.clamp(48.0, RAIL_W * 2.0));
+        // Rótulo à esquerda numa coluna de largura fixa: vários sliders seguidos (num diálogo, num
+        // docker) ficam com os trilhos alinhados.
+        let label = (!self.text.is_empty()).then(|| {
+            let mut t = self.text.clone();
+            if let Some(f) = t.get(..1) {
+                let up = f.to_uppercase();
+                t.replace_range(..1, &up);
+            }
+            ui.allocate_ui_with_layout(
+                vec2(LABEL_W, height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(LABEL_W);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(t).color(theme::TEXT_DIM)).truncate(),
+                    )
+                },
+            )
+            .inner
+        });
         let (rect, mut resp) = ui.allocate_exact_size(vec2(width, height), Sense::click_and_drag());
         let rail = Rect::from_center_size(rect.center(), vec2(rect.width() - 2.0 * KNOB_R, RAIL_H));
         let mut v = self.value.to_f64();
@@ -153,7 +191,15 @@ impl<N: Numeric> Widget for Slider<'_, N> {
             }
         }
         if ui.is_rect_visible(rect) {
-            paint(ui, &resp, rail, self.value.to_f64(), lo, hi, self.log);
+            paint(
+                ui,
+                &resp,
+                rail,
+                self.value.to_f64(),
+                (lo, hi),
+                self.log,
+                self.from_zero,
+            );
         }
         resp.widget_info(|| {
             egui::WidgetInfo::slider(ui.is_enabled(), self.value.to_f64(), &self.text)
@@ -176,8 +222,8 @@ impl<N: Numeric> Widget for Slider<'_, N> {
             );
             out = out.union(drag);
         }
-        if !self.text.is_empty() {
-            out = out.union(ui.label(egui::RichText::new(&self.text).color(theme::TEXT_DIM)));
+        if let Some(l) = label {
+            out = out.union(l);
         }
         out
     }
@@ -186,7 +232,7 @@ impl<N: Numeric> Widget for Slider<'_, N> {
 /// Casas decimais que fazem sentido para o tamanho do intervalo.
 fn auto_decimals(lo: f64, hi: f64) -> usize {
     let span = hi - lo;
-    if span >= 50.0 {
+    if span >= 100.0 {
         0
     } else if span >= 5.0 {
         1
@@ -195,7 +241,15 @@ fn auto_decimals(lo: f64, hi: f64) -> usize {
     }
 }
 
-fn paint(ui: &Ui, resp: &Response, rail: Rect, v: f64, lo: f64, hi: f64, log: bool) {
+fn paint(
+    ui: &Ui,
+    resp: &Response,
+    rail: Rect,
+    v: f64,
+    (lo, hi): (f64, f64),
+    log: bool,
+    from_zero: bool,
+) {
     let p = ui.painter();
     let hot = resp.hovered() || resp.dragged_by(egui::PointerButton::Primary) || resp.has_focus();
     p.rect_filled(rail.expand(1.0), 3.0, theme::BORDER);
@@ -203,7 +257,7 @@ fn paint(ui: &Ui, resp: &Response, rail: Rect, v: f64, lo: f64, hi: f64, log: bo
     let x_of = |t: f64| rail.left() + rail.width() * t as f32;
     let knob_x = x_of(to_t(v, lo, hi, log));
     // Intervalo que passa pelo zero (ganho, pan, brilho): preenche a partir do zero.
-    let zero = if lo < 0.0 && hi > 0.0 && !log {
+    let zero = if from_zero && lo < 0.0 && hi > 0.0 && !log {
         Some(x_of(to_t(0.0, lo, hi, false)))
     } else {
         None

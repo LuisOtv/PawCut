@@ -63,7 +63,42 @@ fn diamond(ui: &mut egui::Ui, animated: bool, here: bool) -> egui::Response {
     })
 }
 
-/// Botão ↺ (voltar ao padrão).
+/// Valor do Inspector como no Resolve: slider ocupando a coluna e o número sempre na mesma
+/// posição à direita. Sem slider (posição, valores misturados), o espaço fica vazio para os
+/// números continuarem alinhados.
+fn slider_value(
+    ui: &mut egui::Ui,
+    v: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    speed: f64,
+    suffix: &str,
+    slider: bool,
+    log: bool,
+) -> bool {
+    let mut changed = false;
+    let room = ui.available_width() - theme::VALUE_W - ui.spacing().item_spacing.x;
+    if room >= 48.0 {
+        if slider {
+            changed |= ui
+                .add(
+                    paw_ui::Slider::new(v, range.clone())
+                        .show_value(false)
+                        .logarithmic(log)
+                        .width(room),
+                )
+                .changed();
+        } else {
+            // O slider ocuparia `room` mais o espaço entre itens.
+            ui.add_space(room + ui.spacing().item_spacing.x);
+        }
+    }
+    changed |= ui
+        .add(DragValue::new(v).range(range).speed(speed).suffix(suffix))
+        .changed();
+    changed
+}
+
+/// Botão "voltar ao padrão" (ícone da suíte).
 fn reset(ui: &mut egui::Ui, changed_from_default: bool) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
     let color = if !changed_from_default {
@@ -73,11 +108,10 @@ fn reset(ui: &mut egui::Ui, changed_from_default: bool) -> bool {
     } else {
         theme::TEXT_DIM
     };
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        "↺",
-        theme::text(14.0),
+    paw_ui::icons::paint(
+        ui.painter(),
+        egui::Rect::from_center_size(rect.center(), vec2(14.0, 14.0)),
+        paw_ui::icons::Icon::Reset,
         color,
     );
     changed_from_default && resp.on_hover_text("Voltar ao padrão").clicked()
@@ -279,14 +313,15 @@ impl Workspace {
             ui,
             label,
             |ui| {
-                changed = ui
-                    .add(
-                        DragValue::new(&mut v)
-                            .range(range)
-                            .speed(drag_speed(param))
-                            .suffix(suffix),
-                    )
-                    .changed();
+                changed = slider_value(
+                    ui,
+                    &mut v,
+                    range,
+                    drag_speed(param),
+                    suffix,
+                    !matches!(param, Param::X | Param::Y) && !mixed,
+                    param == Param::Scale,
+                );
                 if mixed {
                     ui.label(RichText::new("vários").small().color(theme::TEXT_DIM));
                 }
@@ -713,8 +748,17 @@ impl Workspace {
                             ui,
                             "Espelhar",
                             |ui| {
-                                let h = ui.toggle_value(&mut t.flip_h, "↔ Horiz.").changed();
-                                let v = ui.toggle_value(&mut t.flip_v, "↕ Vert.").changed();
+                                use paw_ui::icons::{self, Icon};
+                                let h = icons::button(ui, Icon::FlipH, 16.0, t.flip_h, "Espelhar na horizontal")
+                                    .clicked();
+                                let v = icons::button(ui, Icon::FlipV, 16.0, t.flip_v, "Espelhar na vertical")
+                                    .clicked();
+                                if h {
+                                    t.flip_h = !t.flip_h;
+                                }
+                                if v {
+                                    t.flip_v = !t.flip_v;
+                                }
                                 if h || v {
                                     self.apply_all(&clips, "insp-flip", |c| {
                                         Some(Edit::SetClip {
@@ -749,14 +793,15 @@ impl Workspace {
                                 ui,
                                 label,
                                 |ui| {
-                                    changed = ui
-                                        .add(
-                                            DragValue::new(&mut pct)
-                                                .range(0.0..=90.0)
-                                                .speed(0.3)
-                                                .suffix(" %"),
-                                        )
-                                        .changed()
+                                    changed = slider_value(
+                                        ui,
+                                        &mut pct,
+                                        0.0..=90.0,
+                                        0.3,
+                                        " %",
+                                        true,
+                                        false,
+                                    );
                                 },
                                 |ui| {
                                     ui.add_space(22.0);

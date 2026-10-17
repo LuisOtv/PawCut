@@ -2108,6 +2108,7 @@ impl Workspace {
                 let mut z = self.tl.ppf.ln();
                 let slider = paw_ui::Slider::new(&mut z, 0.02f32.ln()..=40f32.ln())
                     .show_value(false)
+                    .fill_from_zero(false)
                     .width(110.0);
                 if ui.add(slider).changed() {
                     let factor = z.exp() / self.tl.ppf;

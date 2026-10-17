@@ -231,11 +231,16 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         let mut lock = layer.locked;
         let mut alock = layer.alpha_lock;
-        if ui
-            .toggle_value(&mut lock, "Trava")
-            .on_hover_text("Não aceita pintura nem filtros")
-            .changed()
+        if paw_ui::icons::button(
+            ui,
+            if lock { Icon::Lock } else { Icon::Unlock },
+            15.0,
+            lock,
+            "Travar camada: não aceita pintura nem filtros",
+        )
+        .clicked()
         {
+            lock = !lock;
             st.docs[st.cur]
                 .ed
                 .edit_layer(active, "lock", "Travar camada", |l| l.locked = lock);
@@ -470,11 +475,18 @@ fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64, depth: usize) {
     let eye = Rect::from_min_size(rect.min + vec2(2.0, 4.0), vec2(20.0, 20.0));
     let eye_resp = ui.interact(eye, ui.id().with(("eye", id)), Sense::click());
     let p = ui.painter();
-    if l.visible {
-        p.circle_filled(eye.center(), 5.0, theme::TEXT);
-    } else {
-        p.circle_stroke(eye.center(), 5.0, Stroke::new(1.5, theme::TEXT_DIM));
-    }
+    paw_ui::icons::paint(
+        p,
+        Rect::from_center_size(eye.center(), vec2(15.0, 15.0)),
+        if l.visible { Icon::Eye } else { Icon::EyeOff },
+        if eye_resp.hovered() {
+            Color32::WHITE
+        } else if l.visible {
+            theme::TEXT
+        } else {
+            theme::TEXT_DIM
+        },
+    );
     // Miniatura pequena: quadrado com a cor média não vale o custo; mostra o modo se não for Normal.
     let renaming = matches!(&st.renaming, Some((rid, _)) if *rid == id);
     if renaming {
@@ -498,12 +510,20 @@ fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64, depth: usize) {
         }
     } else {
         let tag = format!(
-            "{}{}{}{}",
+            "{}{}{}",
             if l.mask.is_some() { "[M] " } else { "" },
-            if l.locked { "🔒 " } else { "" },
             if l.alpha_lock { "α " } else { "" },
             l.name
         );
+        // Cadeado desenhado (emoji não existe em toda fonte) no fim da linha.
+        if l.locked {
+            paw_ui::icons::paint(
+                ui.painter(),
+                Rect::from_center_size(rect.right_center() - vec2(12.0, 0.0), vec2(13.0, 13.0)),
+                Icon::Lock,
+                theme::TEXT_DIM,
+            );
+        }
         ui.painter().with_clip_rect(rect).text(
             rect.min + vec2(68.0, 14.0),
             Align2::LEFT_CENTER,
@@ -517,7 +537,7 @@ fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64, depth: usize) {
         );
         if l.mode != BlendMode::Normal || l.opacity < 1.0 {
             ui.painter().text(
-                rect.right_center() - vec2(6.0, 0.0),
+                rect.right_center() - vec2(if l.locked { 24.0 } else { 6.0 }, 0.0),
                 Align2::RIGHT_CENTER,
                 format!(
                     "{}{}",
@@ -723,8 +743,13 @@ pub fn brush_editor(st: &mut State, ui: &mut egui::Ui) {
                               v: &mut f32,
                               r: std::ops::RangeInclusive<f32>,
                               suffix: &str| {
-                    ui.label(name);
-                    ui.add(paw_ui::Slider::new(v, r).suffix(suffix));
+                    ui.label(RichText::new(name).color(theme::TEXT_DIM));
+                    // Tamanho em escala logarítmica, como no Krita: 1 a 30 px ocupam meio trilho.
+                    ui.add(
+                        paw_ui::Slider::new(v, r)
+                            .suffix(suffix)
+                            .logarithmic(name == "Tamanho"),
+                    );
                     ui.end_row();
                 };
                 slider(ui, "Tamanho", &mut b.size, 1.0..=500.0, " px");

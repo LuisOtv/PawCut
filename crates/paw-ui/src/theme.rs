@@ -305,6 +305,44 @@ pub fn fixed_width<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui:
     .inner
 }
 
+/// Botão da ação principal de um diálogo (Aplicar, Criar, Exportar): laranja, como no Resolve.
+pub fn primary_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let enabled = ui.is_enabled();
+    ui.add(
+        egui::Button::new(egui::RichText::new(text).strong().color(if enabled {
+            Color32::WHITE
+        } else {
+            TEXT_DIM
+        }))
+        .fill(if enabled {
+            ACCENT.gamma_multiply(0.85)
+        } else {
+            BAR_LIGHT
+        })
+        .min_size(egui::vec2(84.0, 24.0)),
+    )
+}
+
+/// Linha de botões no pé de um diálogo: alinhados à direita, a ação principal na ponta (a
+/// primeira adicionada fica mais à direita) e uma linha fina separando do conteúdo.
+pub fn dialog_actions<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.add_space(6.0);
+    let w = ui.available_width().max(260.0);
+    let (line, _) = ui.allocate_exact_size(egui::vec2(w, 1.0), egui::Sense::hover());
+    ui.painter().rect_filled(line, 0.0, BORDER);
+    ui.add_space(6.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(w, 26.0),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().button_padding = egui::vec2(12.0, 3.0);
+            add(ui)
+        },
+    )
+    .inner
+}
+
 /// Largura para um campo de texto/combo: a desejada, mas nunca mais do que cabe no espaço
 /// que sobrou (em painéis estreitos o campo encolhe em vez de vazar para fora da linha).
 pub fn fit_width(ui: &egui::Ui, wanted: f32) -> f32 {

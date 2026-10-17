@@ -4312,8 +4312,7 @@ impl VoiceApp {
                         ui.label(RichText::new("Dá para recuperar como faixas.").weak());
                     }
                 }
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
+                paw_ui::theme::dialog_actions(ui, |ui| {
                     let (ok, cancel) = match dialog {
                         Dialog::ConfirmClose => ("Sair sem salvar", "Cancelar"),
                         Dialog::ConfirmDiscard(_) => ("Descartar e continuar", "Cancelar"),
@@ -4321,7 +4320,8 @@ impl VoiceApp {
                         _ => ("Aplicar", "Cancelar"),
                     };
                     if ui
-                        .add_enabled(ready, egui::Button::new(RichText::new(ok).strong()))
+                        .add_enabled_ui(ready, |ui| paw_ui::theme::primary_button(ui, ok))
+                        .inner
                         .clicked()
                     {
                         apply = true;

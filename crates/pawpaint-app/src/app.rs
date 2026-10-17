@@ -412,7 +412,8 @@ impl TabViewer for Viewer<'_> {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
                 // Sliders acompanham a largura do docker (o padrão de 100 px cortava o valor
                 // quando o docker ficava estreito).
-                ui.spacing_mut().slider_width = (ui.available_width() - 150.0).clamp(50.0, 200.0);
+                // Rótulo (~90 px) + trilho + campo do valor (72 px): o trilho fica com o resto.
+                ui.spacing_mut().slider_width = (ui.available_width() - 190.0).clamp(40.0, 200.0);
                 // Dockers com mais conteúdo que altura rolam em vez de cortar (o quadrado de cor
                 // perdia as amostras embaixo).
                 let scroll = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
@@ -1794,8 +1795,8 @@ impl PaintApp {
                         }
                     });
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Criar").clicked() || enter {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Criar").clicked() || enter {
                             keep = false;
                             let (w, h, bg, color) = (*w, *h, *bg, *color);
                             then = Some(Box::new(move |st| {
@@ -1888,8 +1889,8 @@ impl PaintApp {
                     }
                     ui.add_space(8.0);
                     let applied_now = *applied;
-                    ui.horizontal(|ui| {
-                        if ui.button("Aplicar").clicked() || enter {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
                             keep = false;
                             then = Some(Box::new(move |st| {
                                 if !applied_now && let Some(d) = st.doc_mut() {
@@ -2010,8 +2011,8 @@ impl PaintApp {
                     }
                     let applied_now = *applied;
                     let pts = points.clone();
-                    ui.horizontal(|ui| {
-                        if ui.button("Aplicar").clicked() || enter {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
                             keep = false;
                             then = Some(Box::new(move |st| {
                                 if !applied_now && let Some(d) = st.doc_mut() {
@@ -2052,8 +2053,8 @@ impl PaintApp {
                         }
                     });
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Aplicar").clicked() || enter {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
                             keep = false;
                             let (nw, nh, anchor) = (*w, *h, *anchor);
                             then = Some(Box::new(move |st| {
@@ -2095,8 +2096,8 @@ impl PaintApp {
                         }
                     }
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Escalar").clicked() || enter {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Escalar").clicked() || enter {
                             keep = false;
                             let (nw, nh) = (*w, *h);
                             then = Some(Box::new(move |st| {
@@ -2114,8 +2115,8 @@ impl PaintApp {
                 }
                 Dialog::Feather(r) => {
                     dialog_slider(ui, r, 1..=100, " px");
-                    ui.horizontal(|ui| {
-                        if ui.button("Aplicar").clicked() || enter {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
                             keep = false;
                             let r = *r;
                             then = Some(Box::new(move |st| {
@@ -2136,8 +2137,8 @@ impl PaintApp {
                             .small()
                             .weak(),
                     );
-                    ui.horizontal(|ui| {
-                        if ui.button("Aplicar").clicked() || enter {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
                             keep = false;
                             let px = *px;
                             then = Some(Box::new(move |st| {
@@ -2198,8 +2199,8 @@ impl PaintApp {
                 Dialog::ConfirmClose(i) => {
                     let i = *i;
                     ui.label("Este documento tem mudanças que não foram salvas.");
-                    ui.horizontal(|ui| {
-                        if ui.button("Salvar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Salvar").clicked() {
                             keep = false;
                             then = Some(Box::new(move |st| {
                                 st.cur = i.min(st.docs.len().saturating_sub(1));
@@ -2224,8 +2225,8 @@ impl PaintApp {
                         files.len()
                     ));
                     let files = files.clone();
-                    ui.horizontal(|ui| {
-                        if ui.button("Recuperar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Recuperar").clicked() {
                             keep = false;
                             let files = files.clone();
                             then = Some(Box::new(move |st| {
@@ -2254,8 +2255,8 @@ impl PaintApp {
                 }
                 Dialog::ConfirmQuit => {
                     ui.label("Há documentos com mudanças que não foram salvas.");
-                    ui.horizontal(|ui| {
-                        if ui.button("Sair sem salvar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Sair sem salvar").clicked() {
                             keep = false;
                             then = Some(Box::new(|st| st.allow_close = true));
                         }
