@@ -1272,6 +1272,28 @@ impl PaintApp {
                     ui.close();
                     zoom_by(st, 0.8);
                 }
+                ui.separator();
+                if item(ui, "Girar a visão para a direita", "Ctrl+]", has_doc) {
+                    ui.close();
+                    turn_view(st, 15.0);
+                }
+                if item(ui, "Girar a visão para a esquerda", "Ctrl+[", has_doc) {
+                    ui.close();
+                    turn_view(st, -15.0);
+                }
+                if item(ui, "Zerar a rotação da visão", "5", has_doc) {
+                    ui.close();
+                    reset_view_turn(st);
+                }
+                if item(ui, "Espelhar a visão", "M", has_doc) {
+                    ui.close();
+                    flip_view(st);
+                }
+                ui.label(
+                    RichText::new("Shift + Espaço + arrastar também gira")
+                        .weak()
+                        .small(),
+                );
             });
             ui.menu_button("Configurações", |ui| {
                 ui.menu_button("Dockers", |ui| {
@@ -1437,6 +1459,28 @@ impl PaintApp {
 fn commit_if_floating(d: &mut DocView) {
     if d.float.is_some() {
         canvas::commit_float(d);
+    }
+}
+
+/// Gira a visão `deg` graus em volta do centro.
+pub fn turn_view(st: &mut State, deg: f32) {
+    if let Some(d) = st.doc_mut() {
+        canvas::rotate_view(d, deg);
+        d.fit = false;
+    }
+}
+
+pub fn reset_view_turn(st: &mut State) {
+    if let Some(d) = st.doc_mut() {
+        d.view_rot = 0.0;
+        d.view_flip = false;
+    }
+}
+
+/// Espelha a visão na horizontal (para ver o desenho "com olhos novos").
+pub fn flip_view(st: &mut State) {
+    if let Some(d) = st.doc_mut() {
+        d.view_flip = !d.view_flip;
     }
 }
 
@@ -1676,6 +1720,18 @@ impl PaintApp {
         }
         if hit(ctrl, Key::Num1) {
             zoom_to(st, 1.0);
+        }
+        if hit(ctrl, Key::CloseBracket) {
+            turn_view(st, 15.0);
+        }
+        if hit(ctrl, Key::OpenBracket) {
+            turn_view(st, -15.0);
+        }
+        if hit(Modifiers::NONE, Key::Num5) {
+            reset_view_turn(st);
+        }
+        if hit(Modifiers::NONE, Key::M) {
+            flip_view(st);
         }
         if hit(Modifiers::NONE, Key::Plus) || hit(Modifiers::NONE, Key::Equals) {
             zoom_by(st, 1.25);
@@ -2569,6 +2625,84 @@ mod tests {
         assert_eq!(h.px(140, 100), [255, 255, 255, 255]);
     }
 
+    /// Pinta na janela, de `a` até `b` (em pixels da janela), com o mouse.
+    fn paint_screen(h: &mut Harness, a: Pos2, b: Pos2) {
+        h.frame(vec![Event::PointerMoved(a)]);
+        h.frame(vec![Event::PointerButton {
+            pos: a,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }]);
+        for i in 1..=6 {
+            h.frame(vec![Event::PointerMoved(a.lerp(b, i as f32 / 6.0))]);
+        }
+        h.frame(vec![Event::PointerButton {
+            pos: b,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        h.frame(vec![]);
+    }
+
+    #[test]
+    fn rotated_and_mirrored_views_paint_where_the_image_is_shown() {
+        let setup = |rot: f32, flip: bool| {
+            let mut h = Harness::new();
+            h.app.st.brush = Brush {
+                size: 6.0,
+                hardness: 1.0,
+                ..Brush::basic()
+            };
+            h.app.st.fg = [255, 0, 0];
+            h.app.st.tool = Tool::Brush;
+            {
+                let d = h.app.st.doc_mut().unwrap();
+                d.view_rot = rot;
+                d.view_flip = flip;
+                d.fit = false;
+                d.zoom = 1.0;
+            }
+            h.frame(vec![]);
+            h.frame(vec![]);
+            h
+        };
+        let to_screen = |h: &Harness, x: f32, y: f32| {
+            let d = h.app.st.doc().unwrap();
+            canvas::ViewXf::new(d.view_center, d.zoom, d.view_rot, d.view_flip, (300.0, 200.0))
+                .to_screen(x, y)
+        };
+        // Girada 90°: um traço na janela, da esquerda para a direita, vira vertical na imagem
+        // (a imagem aparece deitada).
+        let mut h = setup(90.0, false);
+        let c = h.app.st.doc().unwrap().view_center;
+        paint_screen(&mut h, c + vec2(-60.0, 0.0), c + vec2(60.0, 0.0));
+        let drawn: Vec<(usize, usize)> = (0..200)
+            .flat_map(|y| (0..300).map(move |x| (x, y)))
+            .filter(|(x, y)| h.px(*x, *y)[1] < 100)
+            .collect();
+        assert!(drawn.len() > 300, "pintou: {}", drawn.len());
+        let (min_x, max_x) = drawn.iter().fold((999, 0), |(a, b), (x, _)| (a.min(*x), b.max(*x)));
+        let (min_y, max_y) = drawn.iter().fold((999, 0), |(a, b), (_, y)| (a.min(*y), b.max(*y)));
+        assert!(max_x - min_x < 12, "estreito na horizontal: {min_x}..{max_x}");
+        assert!(max_y - min_y > 100, "comprido na vertical: {min_y}..{max_y}");
+        // o ponto de tela do centro da imagem cai no centro dela
+        let d = h.app.st.doc().unwrap();
+        let back = canvas::ViewXf::new(d.view_center, d.zoom, d.view_rot, d.view_flip, (300.0, 200.0));
+        let p = back.to_doc(to_screen(&h, 77.0, 33.0));
+        assert!((p.x - 77.0).abs() < 1e-3 && (p.y - 33.0).abs() < 1e-3);
+
+        // Espelhada: um traço que vai até o lado direito da janela pinta o lado esquerdo.
+        let mut h = setup(0.0, true);
+        let c = h.app.st.doc().unwrap().view_center;
+        paint_screen(&mut h, c + vec2(20.0, 0.0), c + vec2(110.0, 0.0));
+        assert!(h.px(150 - 100, 100)[1] < 100, "pintou à esquerda do centro");
+        assert!(h.px(150 + 100, 100)[1] > 200, "e não à direita");
+        // visão girada não muda a imagem: salvar e desfazer seguem normais
+        assert!(h.app.st.doc().unwrap().ed.is_dirty());
+    }
+
     #[test]
     fn pen_pressure_from_touch_events_thins_the_stroke() {
         use pawpaint_core::brush::Sensor;
@@ -2607,11 +2741,16 @@ mod tests {
             h.frame(vec![e]);
             h.frame(vec![]);
             // espessura do traço na coluna 140
-            (0..200).filter(|y| h.px(140, *y)[3] > 128 && h.px(140, *y)[0] < 128).count()
+            (0..200)
+                .filter(|y| h.px(140, *y)[3] > 128 && h.px(140, *y)[0] < 128)
+                .count()
         };
         let (soft, firm) = (width_with(0.1), width_with(1.0));
         assert!(firm >= 20, "pressão total: {firm}");
-        assert!(soft * 2 < firm, "pressão leve fica bem mais fina: {soft} vs {firm}");
+        assert!(
+            soft * 2 < firm,
+            "pressão leve fica bem mais fina: {soft} vs {firm}"
+        );
     }
 
     #[test]

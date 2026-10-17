@@ -274,6 +274,12 @@ pub struct DocView {
     pub cursor: Option<(f32, f32)>,
     /// Canto de cima à esquerda da imagem na janela (último quadro).
     pub view_origin: egui::Pos2,
+    /// Rotação da visão em graus (só muda como a imagem aparece, não a imagem).
+    pub view_rot: f32,
+    /// Centro da imagem na janela (último quadro): em volta dele a visão gira.
+    pub view_center: egui::Pos2,
+    /// Visão espelhada na horizontal.
+    pub view_flip: bool,
     /// Tamanho da área do canvas na janela (último quadro): a Visão geral desenha com ele o
     /// retângulo do que está aparecendo.
     pub canvas_size: Vec2,
@@ -302,6 +308,9 @@ impl DocView {
             crop: None,
             cursor: None,
             view_origin: egui::Pos2::ZERO,
+            view_rot: 0.0,
+            view_center: egui::Pos2::ZERO,
+            view_flip: false,
             canvas_size: Vec2::ZERO,
             name: "Sem título".to_string(),
             edit_mask: false,
@@ -409,6 +418,10 @@ pub enum Interaction {
         start: (f32, f32),
     },
     Pan,
+    /// Girando a visão: ângulo (graus) do cursor em volta do centro no quadro anterior.
+    RotateView {
+        last: f32,
+    },
     Picker,
     FloatMove {
         grab: (f32, f32),
