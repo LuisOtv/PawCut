@@ -375,20 +375,34 @@ pub fn time_stretch(s: &[f32], sample_rate: u32, speed: f32) -> Vec<f32> {
         let center = (k as f64 * hop_in).round() as isize;
         let mut best = center;
         if k > 0 {
-            // acha o deslocamento cujo começo mais se parece com a continuação natural
-            let mut best_score = f64::MIN;
-            let step = 2;
-            for d in (-(tol as isize)..=tol as isize).step_by(1) {
-                let cand = center + d;
+            // Acha o deslocamento cujo começo mais se parece com a continuação natural: primeiro
+            // uma busca grossa (de 8 em 8, olhando 1 amostra a cada 8) e depois uma fina em volta
+            // do melhor (de 1 em 1, olhando 1 a cada 2): bem mais rápido que olhar tudo.
+            let corr = |cand: isize, step: usize| -> f64 {
                 let mut score = 0.0;
                 let mut j = 0;
                 while j < hop_out {
                     score += sample(cand + j as isize) * sample(natural + j as isize);
                     j += step;
                 }
-                if score > best_score {
-                    best_score = score;
-                    best = cand;
+                score
+            };
+            let (mut coarse_best, mut coarse_score) = (center, f64::MIN);
+            for d in (-(tol as isize)..=tol as isize).step_by(8) {
+                let sc = corr(center + d, 8);
+                if sc > coarse_score {
+                    (coarse_best, coarse_score) = (center + d, sc);
+                }
+            }
+            let mut best_score = f64::MIN;
+            for d in -8isize..=8 {
+                let cand = coarse_best + d;
+                if (cand - center).unsigned_abs() > tol {
+                    continue;
+                }
+                let sc = corr(cand, 2);
+                if sc > best_score {
+                    (best, best_score) = (cand, sc);
                 }
             }
         }
@@ -1124,5 +1138,37 @@ mod tests {
             let _ = declip(&mut s, 0.9, 3);
             let _ = align_lag(&s, &s, 10);
         }
+    }
+
+    /// Quanto custa mudar o tempo/tom de uma narração de 1 minuto (rode com --release).
+    #[test]
+    #[ignore]
+    fn stretch_and_pitch_cost() {
+        let voice: Vec<f32> = (0..SR as usize * 60)
+            .map(|i| {
+                let t = i as f32 / SR as f32;
+                0.3 * (TAU as f32 * 180.0 * t).sin() * (0.5 + 0.5 * (t * 3.0).sin())
+                    + 0.05 * (TAU as f32 * 2100.0 * t).sin()
+            })
+            .collect();
+        let t = std::time::Instant::now();
+        let out = time_stretch(&voice, SR, 1.25);
+        println!("tempo 1,25x de 60 s: {:?} ({} amostras)", t.elapsed(), out.len());
+        let t = std::time::Instant::now();
+        let mut p = voice.clone();
+        pitch_shift(&mut p, SR, 3.0);
+        println!("tom +3 de 60 s: {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let mut r = voice.clone();
+        reverb(&mut r, SR, 0.6, 0.5, -10.0, 0);
+        println!("reverb de 60 s: {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let mut e = voice.clone();
+        equalize(&mut e, SR, &[EqBand::new(EqKind::Peak, 800.0, 4.0, 1.0); 5]);
+        println!("eq de 5 bandas de 60 s: {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let mut e = voice.clone();
+        spectral_delete(&mut e, SR, 2000.0, 2300.0, 40.0);
+        println!("apagar frequências de 60 s: {:?}", t.elapsed());
     }
 }
