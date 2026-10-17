@@ -1157,6 +1157,30 @@ impl VoiceApp {
         self.selected = keep;
     }
 
+    /// Crossfade entre duas faixas selecionadas: uma sai enquanto a outra entra no trecho
+    /// escolhido (`top_out`: a de cima sai e a de baixo entra; senão o contrário).
+    pub fn crossfade_tracks(&mut self, top_out: bool) {
+        if self.sel_tracks().len() != 2 {
+            self.warn("Selecione exatamente duas faixas e o trecho do crossfade");
+            return;
+        }
+        // na ordem da tela, não na ordem dos cliques
+        let order = self.track_ids();
+        let mut sel = self.sel_tracks();
+        sel.sort_by_key(|id| order.iter().position(|o| o == id));
+        let keep = std::mem::replace(&mut self.selected, sel);
+        let mut call = 0;
+        self.apply_effect("Crossfade de faixas", move |p| {
+            // um trecho por faixa, na ordem da tela
+            let fade_in = (call == 1) == top_out;
+            call += 1;
+            for ch in p.iter_mut() {
+                paw_audio::dsp::fade(ch, fade_in);
+            }
+        });
+        self.selected = keep;
+    }
+
     pub fn remove_silences(&mut self, threshold: f32, min: f32) {
         self.stop();
         let mut total = 0;
@@ -2505,6 +2529,14 @@ impl VoiceApp {
                 if ui.button("Tom (sem mudar o tempo)…").clicked() {
                     ui.close();
                     self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Pitch(2.0)));
+                }
+                if ui.button("Crossfade: faixa de cima sai, a de baixo entra").clicked() {
+                    ui.close();
+                    self.crossfade_tracks(true);
+                }
+                if ui.button("Crossfade: faixa de baixo sai, a de cima entra").clicked() {
+                    ui.close();
+                    self.crossfade_tracks(false);
                 }
                 if ui.button("Auto-duck (música abaixa na voz)…").clicked() {
                     ui.close();
@@ -5275,6 +5307,25 @@ mod tests {
             app.apply_effect_ex(label, d.resizes(), job);
         }
         assert_eq!(mono(&app, id).len(), 48_000);
+    }
+
+    #[test]
+    fn crossfade_swaps_two_tracks_over_the_selection() {
+        let (mut app, top) = app_with(vec![0.8; 4_800]);
+        let bottom = app.ed.add_track(vec![vec![0.8; 4_800]], 0, None);
+        // selecionadas fora de ordem de propósito
+        app.selected = vec![bottom, top];
+        app.sel = Some((0, 4_800));
+        app.crossfade_tracks(true);
+        let (t, b) = (mono(&app, top), mono(&app, bottom));
+        assert!(t[10] > 0.7 && t[4_790] < 0.1, "cima sai: {} {}", t[10], t[4_790]);
+        assert!(b[10] < 0.1 && b[4_790] > 0.7, "baixo entra");
+        assert!((t[2_400] + b[2_400] - 0.8).abs() < 0.05, "soma constante");
+        // uma só faixa: avisa e não mexe
+        let before = mono(&app, top);
+        app.selected = vec![top];
+        app.crossfade_tracks(true);
+        assert_eq!(mono(&app, top), before);
     }
 
     #[test]
