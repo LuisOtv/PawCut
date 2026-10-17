@@ -591,6 +591,43 @@ impl Editor {
         Ok((tid, at_i))
     }
 
+    /// Vários rótulos de uma vez, num único passo de desfazer (ex.: um por trecho de fala).
+    /// Cria uma faixa de rótulos nova quando `new_track` é verdade ou não há nenhuma.
+    pub fn add_labels(
+        &mut self,
+        new_track: bool,
+        items: &[(usize, usize, String)],
+        undo_label: &'static str,
+    ) -> Result<u64, EditError> {
+        if items.is_empty() {
+            return Err(EditError::EmptyRange);
+        }
+        self.checkpoint(undo_label);
+        let tid = if new_track || self.session.label_tracks.is_empty() {
+            self.new_label_track()
+        } else {
+            self.session.label_tracks[0].id
+        };
+        let t = self
+            .session
+            .label_tracks
+            .iter_mut()
+            .find(|t| t.id == tid)
+            .ok_or(EditError::NoTrack)?;
+        for (at, end, text) in items {
+            let i = t.labels.partition_point(|l| l.at <= *at);
+            t.labels.insert(
+                i,
+                Label {
+                    at: *at,
+                    end: (*end).max(*at),
+                    text: text.clone(),
+                },
+            );
+        }
+        Ok(tid)
+    }
+
     pub fn set_label_text(
         &mut self,
         track: u64,
@@ -1185,6 +1222,29 @@ mod tests {
 
     fn mono(e: &Editor, id: u64) -> Vec<f32> {
         e.render(id).into_iter().next().unwrap_or_default()
+    }
+
+    #[test]
+    fn add_labels_is_one_undo_step_and_keeps_labels_sorted() {
+        let mut e = Editor::new(Session::new(48_000), BTreeMap::new());
+        e.add_track(ramp(100), 0, None);
+        let tid = e
+            .add_labels(
+                true,
+                &[
+                    (50, 60, "b".into()),
+                    (10, 20, "a".into()),
+                    (80, 80, "c".into()),
+                ],
+                "Rotular",
+            )
+            .unwrap();
+        let t = e.session().label_track(tid).unwrap();
+        let order: Vec<&str> = t.labels.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(order, ["a", "b", "c"]);
+        assert!(e.add_labels(false, &[], "x").is_err());
+        assert!(e.undo());
+        assert!(e.session().label_tracks.is_empty());
     }
 
     #[test]
