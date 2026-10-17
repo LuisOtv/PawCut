@@ -202,6 +202,20 @@ enum AfterDiscard {
     Open(PathBuf),
 }
 
+/// Número da batida na régua de compassos: "3" no primeiro tempo do compasso 3, "3.2" no segundo.
+pub fn beat_label(beat_index: i64, per_bar: u32) -> String {
+    let per_bar = per_bar.max(1) as i64;
+    let (bar, beat) = (
+        beat_index.div_euclid(per_bar) + 1,
+        beat_index.rem_euclid(per_bar) + 1,
+    );
+    if beat == 1 {
+        format!("{bar}")
+    } else {
+        format!("{bar}.{beat}")
+    }
+}
+
 /// O que um arrasto no painel das faixas está fazendo.
 #[derive(Clone)]
 enum Drag {
@@ -289,6 +303,8 @@ pub struct VoiceApp {
     pub looping: bool,
     /// Região de repetição (como a do Audacity): com o loop ligado, toca só ela.
     pub loop_region: Option<(usize, usize)>,
+    /// Régua em compassos: andamento (bpm) e tempos por compasso; `None` = minutos e segundos.
+    pub ruler_beats: Option<(f32, u32)>,
     recorder: Recorder,
     audio: AudioSettings,
     inputs: Vec<Device>,
@@ -552,6 +568,7 @@ impl VoiceApp {
             play_rev: 0,
             looping: false,
             loop_region: None,
+            ruler_beats: None,
             recorder: Recorder::new(RATE),
             audio: AudioSettings::default(),
             inputs: Vec::new(),
@@ -2097,6 +2114,36 @@ impl VoiceApp {
                     self.fit();
                 }
                 ui.separator();
+                ui.menu_button("Régua", |ui| {
+                    if ui
+                        .selectable_label(self.ruler_beats.is_none(), "Minutos e segundos")
+                        .clicked()
+                    {
+                        self.ruler_beats = None;
+                    }
+                    let on = self.ruler_beats.is_some();
+                    if ui.selectable_label(on, "Compassos e batidas").clicked() && !on {
+                        self.ruler_beats = Some((120.0, 4));
+                    }
+                    if let Some((bpm, per_bar)) = &mut self.ruler_beats {
+                        theme::fixed_width(ui, theme::NUM_W + 20.0, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::DragValue::new(bpm)
+                                        .range(30.0..=300.0)
+                                        .speed(0.5)
+                                        .max_decimals(1)
+                                        .suffix(" bpm"),
+                                );
+                                ui.add(
+                                    egui::DragValue::new(per_bar)
+                                        .range(1..=12)
+                                        .suffix(" tempos"),
+                                );
+                            });
+                        });
+                    }
+                });
                 ui.checkbox(&mut self.show_script, "Roteiro e teleprompter");
             });
             ui.menu_button("Transporte", |ui| {
@@ -2906,12 +2953,22 @@ impl VoiceApp {
             theme::BAR,
         );
         let secs_per_px = self.spp / RATE as f64;
-        let step = [
-            0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
-        ]
-        .into_iter()
-        .find(|s| s / secs_per_px >= 80.0)
-        .unwrap_or(600.0);
+        let beat = self
+            .ruler_beats
+            .map(|(bpm, _)| 60.0 / bpm.clamp(20.0, 400.0) as f64);
+        let step = match beat {
+            // Em compassos: 1, 2, 4… tempos entre os números, o que couber.
+            Some(b) => (0..12)
+                .map(|k| b * (1u32 << k) as f64)
+                .find(|s| s / secs_per_px >= 60.0)
+                .unwrap_or(b * 4096.0),
+            None => [
+                0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
+            ]
+            .into_iter()
+            .find(|s| s / secs_per_px >= 80.0)
+            .unwrap_or(600.0),
+        };
         let mut t = (self.view_start / RATE as f64 / step).floor() * step;
         let rp = painter.with_clip_rect(ruler);
         while x_of(t * RATE as f64, self) < area.right() {
@@ -2927,10 +2984,14 @@ impl VoiceApp {
                     Stroke::new(1.0, Color32::from_gray(70)),
                 );
             }
+            let text = match (beat, self.ruler_beats) {
+                (Some(b), Some((_, per_bar))) => beat_label((t / b).round() as i64, per_bar),
+                _ => format_time((t * RATE as f64) as usize, RATE),
+            };
             rp.text(
                 pos2(x + 3.0, ruler.top() + 4.0),
                 Align2::LEFT_TOP,
-                format_time((t * RATE as f64) as usize, RATE),
+                text,
                 theme::mono(10.0),
                 theme::TEXT,
             );
@@ -5247,6 +5308,34 @@ mod tests {
         let before = mono(&app, voice_id);
         app.auto_duck(voice_id, -35.0, 12.0, 20.0, 200.0);
         assert_eq!(mono(&app, voice_id), before);
+    }
+
+    #[test]
+    fn beat_ruler_labels_bars_and_beats() {
+        assert_eq!(beat_label(0, 4), "1");
+        assert_eq!(beat_label(1, 4), "1.2");
+        assert_eq!(beat_label(4, 4), "2");
+        assert_eq!(beat_label(11, 4), "3.4");
+        assert_eq!(beat_label(-1, 4), "0.4", "antes do zero não quebra");
+        assert_eq!(beat_label(5, 0), "6", "compasso de 0 tempos vira 1");
+        // a régua em compassos desenha sem travar, com qualquer andamento
+        let (mut app, _) = app_with(vec![0.1; 48_000]);
+        let ctx = egui::Context::default();
+        for beats in [
+            None,
+            Some((120.0, 4)),
+            Some((20.0, 1)),
+            Some((f32::NAN, 12)),
+            Some((1e9, 3)),
+        ] {
+            app.ruler_beats = beats;
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 700.0))),
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |ui| app.frame(ui))
+                .drop_without_applying_deltas();
+        }
     }
 
     #[test]
