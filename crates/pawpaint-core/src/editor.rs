@@ -15,6 +15,11 @@ use crate::tile::{TILE, TiledImage, premultiply, unpremultiply};
 use crate::transform::{self, Affine};
 
 const HISTORY: usize = 60;
+/// Memória (bytes de pixels) que o desfazer e o refazer podem reter além do documento atual.
+/// Sem isso, 60 filtros numa foto de 12 megapixels guardariam gigabytes.
+const HISTORY_BUDGET: usize = 1_500_000_000;
+/// Passos de desfazer que sempre ficam, mesmo que um só passe do limite.
+const HISTORY_MIN: usize = 3;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum EditError {
@@ -101,6 +106,22 @@ pub struct Editor {
     mirror: (bool, bool),
     paint_mask: bool,
     pixel_rev: u64,
+    history_budget: usize,
+    checkpoints: u64,
+}
+
+/// Chama `f(identidade, bytes)` para cada bloco de pixel, de máscara e de seleção do documento.
+fn for_each_block(doc: &Doc, f: &mut dyn FnMut(usize, usize)) {
+    for l in &doc.layers {
+        l.pixels.visit_tiles(&mut *f);
+        if let Some(m) = &l.mask {
+            m.visit_tiles(&mut *f);
+        }
+    }
+    if let Some(s) = &doc.selection {
+        let (id, n) = s.mask_identity();
+        f(id, n);
+    }
 }
 
 impl Editor {
@@ -136,6 +157,8 @@ impl Editor {
             mirror: (false, false),
             paint_mask: false,
             pixel_rev: 0,
+            history_budget: HISTORY_BUDGET,
+            checkpoints: 0,
         }
     }
 
@@ -224,6 +247,73 @@ impl Editor {
         self.redo.clear();
         self.coalesce = None;
         self.revision += 1;
+        // Somar a memória é uma passada por todos os blocos: só de quatro em quatro passos.
+        self.checkpoints += 1;
+        if self.checkpoints.is_multiple_of(4) {
+            self.trim_history();
+        }
+    }
+
+    /// Limite de memória do histórico (para testes e para quem quiser mudar).
+    pub fn set_history_budget(&mut self, bytes: usize) {
+        self.history_budget = bytes;
+        self.trim_history();
+    }
+
+    /// Memória que o histórico retém além do documento atual (blocos compartilhados contam uma
+    /// vez, e os que o documento atual também usa não contam).
+    pub fn history_bytes(&self) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        for_each_block(&self.doc, &mut |id, _| {
+            seen.insert(id);
+        });
+        let mut total = 0;
+        for (doc, _) in self.undo.iter().chain(&self.redo) {
+            for_each_block(doc, &mut |id, n| {
+                if seen.insert(id) {
+                    total += n;
+                }
+            });
+        }
+        total
+    }
+
+    /// Esquece os passos mais antigos até a memória caber no limite. Os mais novos têm
+    /// prioridade (e o refazer também entra na conta).
+    fn trim_history(&mut self) {
+        if self.undo.len() <= HISTORY_MIN {
+            return;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for_each_block(&self.doc, &mut |id, _| {
+            seen.insert(id);
+        });
+        let mut total = 0usize;
+        for (doc, _) in &self.redo {
+            for_each_block(doc, &mut |id, n| {
+                if seen.insert(id) {
+                    total += n;
+                }
+            });
+        }
+        // Do passo mais novo para o mais velho: o primeiro que estoura o limite e tudo antes dele
+        // vão embora, mas sempre sobram `HISTORY_MIN` passos.
+        let mut cut = 0;
+        for i in (0..self.undo.len()).rev() {
+            for_each_block(&self.undo[i].0, &mut |id, n| {
+                if seen.insert(id) {
+                    total += n;
+                }
+            });
+            if total > self.history_budget {
+                cut = i + 1;
+                break;
+            }
+        }
+        let cut = cut.min(self.undo.len() - HISTORY_MIN);
+        if cut > 0 {
+            self.undo.drain(..cut);
+        }
     }
 
     pub fn end_change(&mut self) {
@@ -2014,5 +2104,38 @@ mod perf_probe {
         let back = crate::file::load_project(&p).unwrap();
         assert_eq!(back.doc().layers.len(), e.doc().layers.len());
         let _ = id;
+    }
+
+    #[test]
+    fn history_is_trimmed_by_memory_not_only_by_count() {
+        // Cada preenchimento de tela cheia cria blocos novos: 640x480 = 480 blocos de 16 KB.
+        let mut e = Editor::new(640, 480, Background::White);
+        let id = e.doc().layers[0].id;
+        e.set_history_budget(30_000_000);
+        for k in 0..40u8 {
+            e.fill_selection(id, [k * 6, 10, 10]).unwrap();
+        }
+        let steps = e.history().0.len();
+        assert!(
+            (HISTORY_MIN..40).contains(&steps),
+            "passos guardados: {steps}"
+        );
+        // O corte só roda de quatro em quatro passos: no máximo o limite mais quatro passos.
+        let step_bytes = 480 * 64 * 64 * 4;
+        assert!(
+            e.history_bytes() <= 30_000_000 + 4 * step_bytes,
+            "histórico retém {} bytes",
+            e.history_bytes()
+        );
+        // Os passos que sobraram continuam desfazendo de verdade.
+        assert!(e.undo());
+        assert_eq!(e.doc().layers[0].pixels.pixel(5, 5), [38 * 6, 10, 10, 255]);
+        // Com o limite padrão, um documento pequeno mantém todos os 60 passos.
+        let mut small = Editor::new(100, 80, Background::White);
+        let sid = small.doc().layers[0].id;
+        for k in 0..70u8 {
+            small.fill_selection(sid, [k, 0, 0]).unwrap();
+        }
+        assert_eq!(small.history().0.len(), HISTORY);
     }
 }

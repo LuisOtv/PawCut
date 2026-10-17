@@ -73,6 +73,14 @@ impl TiledImage {
         Arc::make_mut(t).as_mut_slice()
     }
 
+    /// Chama `f(identidade, bytes)` para cada bloco que existe. Blocos compartilhados entre cópias
+    /// (o desfazer) têm a mesma identidade: serve para somar a memória sem contar duas vezes.
+    pub fn visit_tiles(&self, mut f: impl FnMut(usize, usize)) {
+        for t in self.tiles.iter().flatten() {
+            f(Arc::as_ptr(t) as usize, t.len());
+        }
+    }
+
     /// Roda `f(tx, ty, bloco)` em todos os blocos, dividindo as linhas de blocos entre os núcleos.
     /// Cada bloco só é criado ou copiado (se compartilhado com o desfazer) quando `f` pede.
     pub fn par_tiles_mut(&mut self, f: impl Fn(usize, usize, TileMut<'_>) + Sync) {

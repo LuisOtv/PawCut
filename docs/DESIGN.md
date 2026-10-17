@@ -278,6 +278,10 @@ zero.
   que andava coluna por coluna levava 8 s, por linhas leva 0,5 s); não guardam cópia do original
   (relêem dos blocos); e só escrevem os blocos que mudaram, para o desfazer continuar
   compartilhando o resto.
+- **Desfazer com limite de memória, não só de passos.** Guardar o documento inteiro a cada passo
+  é de graça enquanto os blocos são compartilhados, mas 60 filtros de tela cheia numa foto de
+  12 megapixels são gigabytes. O histórico soma a memória dos blocos que só ele retém
+  (`history_bytes`) e esquece os passos mais antigos acima de 1,5 GB, sempre deixando alguns.
 - **Prévia ao vivo adapta ao custo.** Se a última prévia demorou mais que ~60 ms, o filtro só é
   refeito quando o slider é solto (`preview_action`); a primeira prévia sempre aparece.
 - **Cache pela identidade do dado, não pela revisão do documento.** O contorno da seleção
@@ -333,6 +337,7 @@ zero.
 | PawWrite: barra de busca estourava a janela estreita | 4: barras quebram a linha |
 | PawPaint: salvar ou autosave de foto grande congelava a janela por ~10 s | 7: cópia barata do documento, salvamento em thread, PNGs em paralelo |
 | PawPaint: desfoque numa foto de 12 MP levava 8 s e a prévia refazia a cada pixel do slider | 8: varrer a memória em ordem, dividir entre núcleos, prévia lenta só ao soltar |
+| PawPaint: 60 passos de desfazer em foto grande podiam guardar gigabytes de pixels | 8: o histórico também tem limite de memória |
 | PawPaint: o contorno da seleção era recalculado a cada pincelada | 8: cache pela identidade do dado |
 | PawPaint: o pincel fazia duas buscas em mapa por pixel e clonava o pincel a cada carimbo | 8: trabalho por bloco; resumo da saída garante que o desenho não mudou |
 | PawPaint: seleção retangular arrastada toda para fora da imagem derrubava o app (fuzz) | limites nos dois lados, nunca só em um |

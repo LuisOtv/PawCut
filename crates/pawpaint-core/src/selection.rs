@@ -57,6 +57,11 @@ impl Selection {
         &self.mask
     }
 
+    /// Identidade e tamanho (bytes) da máscara, para somar a memória do histórico.
+    pub fn mask_identity(&self) -> (usize, usize) {
+        (Arc::as_ptr(&self.mask) as usize, self.mask.len())
+    }
+
     /// As duas seleções compartilham a mesma máscara (uma cópia barata, sem mudança): dá para
     /// reaproveitar o que foi calculado a partir dela sem comparar milhões de bytes.
     pub fn same_mask(&self, other: &Selection) -> bool {
