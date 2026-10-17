@@ -491,6 +491,23 @@ impl VoiceApp {
         theme::apply(ctx);
         let mut app = Self::empty();
         app.screenshot = std::env::var_os("PAWVOICE_SCREENSHOT").map(PathBuf::from);
+        // Para os testes visuais: `PAWVOICE_DIALOG=equalizer` abre esse diálogo logo de cara.
+        if let Ok(name) = std::env::var("PAWVOICE_DIALOG") {
+            use crate::fx_dialogs::FxDialog;
+            app.dialog = match name.as_str() {
+                "equalizer" => Some(Dialog::Fx(FxDialog::equalizer())),
+                "reverb" => Some(Dialog::Fx(FxDialog::reverb())),
+                "tempo" => Some(Dialog::Fx(FxDialog::Tempo(1.1))),
+                "duck" => Some(Dialog::Duck {
+                    control: 0,
+                    threshold: -35.0,
+                    amount: 12.0,
+                    attack: 80.0,
+                    release: 600.0,
+                }),
+                _ => None,
+            };
+        }
         app.toasts.bottom_margin = 64.0;
         app.audio = std::fs::read_to_string(settings_path())
             .ok()

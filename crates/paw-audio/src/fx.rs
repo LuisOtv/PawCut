@@ -1153,7 +1153,11 @@ mod tests {
             .collect();
         let t = std::time::Instant::now();
         let out = time_stretch(&voice, SR, 1.25);
-        println!("tempo 1,25x de 60 s: {:?} ({} amostras)", t.elapsed(), out.len());
+        println!(
+            "tempo 1,25x de 60 s: {:?} ({} amostras)",
+            t.elapsed(),
+            out.len()
+        );
         let t = std::time::Instant::now();
         let mut p = voice.clone();
         pitch_shift(&mut p, SR, 3.0);

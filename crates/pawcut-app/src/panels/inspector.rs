@@ -772,28 +772,30 @@ impl Workspace {
                             );
                         }
                         if fit_fill_scales(&project, &first).is_some() {
-                            row(
-                                ui,
-                                "Panorâmica",
-                                |ui| {
-                                    ui.add(
-                                        DragValue::new(&mut self.pan_focus.0)
-                                            .range(-100.0..=100.0)
-                                            .speed(0.5)
-                                            .suffix(" %"),
-                                    )
-                                    .on_hover_text("Onde a imagem está no começo do clipe");
-                                    ui.label("→");
-                                    ui.add(
-                                        DragValue::new(&mut self.pan_focus.1)
-                                            .range(-100.0..=100.0)
-                                            .speed(0.5)
-                                            .suffix(" %"),
-                                    )
-                                    .on_hover_text("Onde a imagem está no fim do clipe");
-                                },
-                                |_| {},
-                            );
+                            for (label, tip, second) in [
+                                ("Panorâmica de", "Onde a imagem está no começo do clipe", false),
+                                ("até", "Onde a imagem está no fim do clipe", true),
+                            ] {
+                                let v = if second {
+                                    &mut self.pan_focus.1
+                                } else {
+                                    &mut self.pan_focus.0
+                                };
+                                row(
+                                    ui,
+                                    label,
+                                    |ui| {
+                                        ui.add(
+                                            DragValue::new(v)
+                                                .range(-100.0..=100.0)
+                                                .speed(0.5)
+                                                .suffix(" %"),
+                                        )
+                                        .on_hover_text(tip);
+                                    },
+                                    |_| {},
+                                );
+                            }
                             row(
                                 ui,
                                 "",
@@ -1062,28 +1064,27 @@ impl Workspace {
                             }
                         }
                         if !still {
-                            row(
-                                ui,
-                                "Rampa",
-                                |ui| {
-                                    ui.add(
-                                        DragValue::new(&mut self.ramp.0)
-                                            .range(0.1..=10.0)
-                                            .speed(0.02)
-                                            .max_decimals(2)
-                                            .suffix(" ×"),
-                                    );
-                                    ui.label("→");
-                                    ui.add(
-                                        DragValue::new(&mut self.ramp.1)
-                                            .range(0.1..=10.0)
-                                            .speed(0.02)
-                                            .max_decimals(2)
-                                            .suffix(" ×"),
-                                    );
-                                },
-                                |_| {},
-                            );
+                            for (label, second) in [("Rampa de", false), ("até", true)] {
+                                let v = if second {
+                                    &mut self.ramp.1
+                                } else {
+                                    &mut self.ramp.0
+                                };
+                                row(
+                                    ui,
+                                    label,
+                                    |ui| {
+                                        ui.add(
+                                            DragValue::new(v)
+                                                .range(0.1..=10.0)
+                                                .speed(0.02)
+                                                .max_decimals(2)
+                                                .suffix(" ×"),
+                                        );
+                                    },
+                                    |_| {},
+                                );
+                            }
                             row(
                                 ui,
                                 "",
@@ -1421,11 +1422,18 @@ impl Workspace {
                         |ui| {
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.preset_name)
-                                    .desired_width(theme::fit_width(ui, 110.0))
+                                    .desired_width(ui.available_width())
                                     .hint_text("nome"),
                             );
+                        },
+                        |_| {},
+                    );
+                    row(
+                        ui,
+                        "",
+                        |ui| {
                             if ui
-                                .button("Salvar")
+                                .button("Salvar preset")
                                 .on_hover_text("Guarda a aparência deste clipe")
                                 .clicked()
                             {

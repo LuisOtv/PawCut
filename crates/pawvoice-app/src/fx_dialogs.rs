@@ -222,7 +222,7 @@ impl FxDialog {
     /// Largura da janela.
     pub fn width(&self) -> f32 {
         match self {
-            FxDialog::Equalizer { .. } => 520.0,
+            FxDialog::Equalizer { .. } => 560.0,
             _ => 360.0,
         }
     }
@@ -600,7 +600,7 @@ fn eq_ui(ui: &mut Ui, bands: &mut Vec<EqBand>, rate: u32) {
         ui.horizontal(|ui| {
             ui.checkbox(&mut b.on, "");
             egui::ComboBox::from_id_salt(("eq-kind", i))
-                .width(130.0)
+                .width(160.0)
                 .selected_text(b.kind.label())
                 .show_ui(ui, |ui| {
                     for k in EqKind::ALL {
