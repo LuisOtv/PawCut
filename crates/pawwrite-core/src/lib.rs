@@ -299,6 +299,64 @@ pub fn seconds(words: usize, wpm: f32) -> f32 {
     words as f32 / wpm.max(1.0) * 60.0
 }
 
+/// Capítulos do YouTube a partir das seções do roteiro (títulos `#` e `##`), com o tempo de fala
+/// de cada uma ao ritmo `wpm`. O YouTube pede o primeiro em 00:00, pelo menos três capítulos e
+/// pelo menos 10 s cada um; quando o roteiro não dá isso, o erro diz o que falta.
+pub fn youtube_chapters(text: &str, wpm: f32) -> Result<String, String> {
+    let a = analyze(text);
+    let mut at = 0.0f32;
+    // (início, título)
+    let mut chapters: Vec<(f32, String)> = Vec::new();
+    for s in &a.sections {
+        if s.level == 0 {
+            // a abertura antes do primeiro título só vira capítulo se tiver fala
+            if s.words > 0 {
+                chapters.push((at, "Introdução".to_string()));
+            }
+        } else if s.level <= 2 {
+            chapters.push((at, s.title.trim().to_string()));
+        }
+        at += seconds(s.words, wpm);
+    }
+    let total = at;
+    if chapters.is_empty() {
+        return Err("O roteiro não tem títulos (# Título) para virar capítulos".into());
+    }
+    // o primeiro capítulo começa em 0 mesmo que haja falas antes dele
+    chapters[0].0 = 0.0;
+    if chapters.len() < 3 {
+        return Err(format!(
+            "O YouTube pede pelo menos 3 capítulos e o roteiro tem {}",
+            chapters.len()
+        ));
+    }
+    for (i, (start, title)) in chapters.iter().enumerate() {
+        let end = chapters.get(i + 1).map_or(total, |c| c.0);
+        if end - start < 10.0 {
+            return Err(format!(
+                "O capítulo “{title}” dura só {:.0} s (o YouTube pede 10 s ou mais)",
+                (end - start).max(0.0)
+            ));
+        }
+    }
+    Ok(chapters
+        .iter()
+        .map(|(t, title)| format!("{} {}", chapter_time(*t), title))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// `00:00`, `07:05` ou `1:02:03`.
+fn chapter_time(secs: f32) -> String {
+    let t = secs.round().max(0.0) as u64;
+    let (h, m, s) = (t / 3600, t / 60 % 60, t % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
+
 /// "45 s", "3 min 20 s", "1 h 05 min".
 pub fn format_duration(secs: f32) -> String {
     let total = secs.round().max(0.0) as u64;
@@ -523,5 +581,42 @@ mod tests {
             "trocar ficou lento: {:?}",
             start.elapsed()
         );
+    }
+
+    #[test]
+    fn youtube_chapters_follow_the_spoken_time() {
+        // 150 palavras por minuto: 25 palavras = 10 s
+        let words = |n: usize| vec!["palavra"; n].join(" ");
+        let script = format!(
+            "{}\n# Primeiro\n{}\n[B-roll: nota não conta]\n## Segundo\n{}\n# Terceiro\n{}",
+            words(75),
+            words(150),
+            words(300),
+            words(75)
+        );
+        let out = youtube_chapters(&script, 150.0).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines,
+            ["00:00 Introdução", "00:30 Primeiro", "01:30 Segundo", "03:30 Terceiro"]
+        );
+        // sem abertura, o primeiro título vira 00:00
+        let script = format!("# A\n{}\n# B\n{}\n# C\n{}", words(50), words(50), words(50));
+        let out = youtube_chapters(&script, 150.0).unwrap();
+        assert!(out.starts_with("00:00 A\n00:20 B\n00:40 C"), "{out}");
+        // poucos capítulos, capítulo curto demais e roteiro sem título explicam o problema
+        assert!(youtube_chapters(&format!("# A\n{}\n# B\n{}", words(50), words(50)), 150.0)
+            .unwrap_err()
+            .contains("pelo menos 3"));
+        let err = youtube_chapters(&format!("# A\n{}\n# B\n{}\n# C\n{}", words(50), words(5), words(50)), 150.0).unwrap_err();
+        assert!(err.contains("“B”") && err.contains("10 s"), "{err}");
+        assert!(youtube_chapters("só fala", 150.0).unwrap_err().contains("pelo menos 3"));
+        assert!(youtube_chapters("", 150.0).unwrap_err().contains("títulos"));
+        // mais de uma hora usa h:mm:ss
+        let long = format!("# A\n{}\n# B\n{}\n# C\n{}", words(9000), words(150), words(150));
+        assert!(youtube_chapters(&long, 150.0).unwrap().contains("1:00:00 B"));
+        // ritmo absurdo não quebra
+        let _ = youtube_chapters(&script, 0.0);
+        let _ = youtube_chapters(&script, f32::NAN);
     }
 }

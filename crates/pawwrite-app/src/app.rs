@@ -831,6 +831,16 @@ impl WriteApp {
                     ui.ctx().copy_text(core::spoken(&self.text));
                     self.say("Fala copiada");
                 }
+                if item(ui, "Copiar capítulos do YouTube", "", has) {
+                    ui.close();
+                    match core::youtube_chapters(&self.text, self.settings.wpm) {
+                        Ok(chapters) => {
+                            ui.ctx().copy_text(chapters);
+                            self.say("Capítulos copiados: cole na descrição do vídeo");
+                        }
+                        Err(why) => self.warn(why),
+                    }
+                }
                 ui.separator();
                 if item(ui, "Sair", "", true) {
                     ui.close();
