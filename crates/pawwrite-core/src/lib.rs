@@ -268,17 +268,18 @@ pub fn to_srt(text: &str, wpm: f32, max_chars: usize) -> String {
             let dur = seconds(chunk.len(), wpm).max(0.8);
             // quebra em duas linhas perto do meio
             let text = chunk.join(" ");
-            let body = if text.len() > max_chars {
-                let mid = text.len() / 2;
-                let cut = text
-                    .char_indices()
-                    .filter(|(_, c)| *c == ' ')
-                    .map(|(k, _)| k)
-                    .min_by_key(|k| k.abs_diff(mid))
-                    .unwrap_or(mid);
-                format!("{}\n{}", &text[..cut], text[cut..].trim_start())
-            } else {
-                text
+            let mid = text.len() / 2;
+            // só quebra num espaço (uma palavra enorme sem espaço fica numa linha só)
+            let cut = text
+                .char_indices()
+                .filter(|(_, c)| *c == ' ')
+                .map(|(k, _)| k)
+                .min_by_key(|k| k.abs_diff(mid));
+            let body = match cut {
+                Some(cut) if text.len() > max_chars => {
+                    format!("{}\n{}", &text[..cut], text[cut..].trim_start())
+                }
+                _ => text,
             };
             n += 1;
             out.push_str(&format!(
