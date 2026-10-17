@@ -682,6 +682,20 @@ pub fn canvas_panel(st: &mut State, ui: &mut egui::Ui) {
             clip.line_segment([at - vec2(0.0, r), at + vec2(0.0, r)], Stroke::new(w, c));
         }
     }
+    // Ajustando o tamanho (Alt + arrastar): círculo e número no ponto onde começou.
+    if let Some(Interaction::BrushSize { origin, .. }) = st.interaction {
+        let r = (st.brush.size * zoom / 2.0).max(1.5);
+        clip.circle_stroke(origin, r, Stroke::new(1.0, Color32::BLACK));
+        clip.circle_stroke(origin, r + 1.0, Stroke::new(1.0, Color32::WHITE));
+        clip.text(
+            origin + vec2(0.0, r + 8.0),
+            egui::Align2::CENTER_TOP,
+            format!("{:.0} px", st.brush.size),
+            egui::FontId::proportional(13.0),
+            Color32::WHITE,
+        );
+        ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+    }
     // Cursor: círculo do pincel nas ferramentas de pintura.
     if over && st.interaction.is_none()
         || matches!(
@@ -872,6 +886,13 @@ fn start_interaction(
     }
     if cloning && st.clone_source.is_none() {
         st.warn("Alt+clique escolhe de onde copiar");
+        return;
+    }
+    if mods.alt && matches!(st.tool, Tool::Brush | Tool::Eraser | Tool::Smudge) {
+        st.interaction = Some(Interaction::BrushSize {
+            origin: screen,
+            start: st.brush.size,
+        });
         return;
     }
     match st.tool {
@@ -1087,6 +1108,11 @@ fn update_interaction(
             let to_bg = mods.shift;
             pick_color(st, pt, to_bg);
         }
+        Interaction::BrushSize { origin, start } => {
+            // o raio acompanha o cursor: 1 px de tela = 2/zoom de diâmetro
+            let zoom = st.docs[cur].zoom.max(0.01);
+            st.brush.size = (*start + (screen.x - origin.x) * 2.0 / zoom).clamp(1.0, 500.0);
+        }
         Interaction::Gradient { cur: c, .. } => *c = pt,
         Interaction::Select {
             cur: c, pts, tool, ..
@@ -1224,6 +1250,7 @@ fn finish_interaction(st: &mut State, pt: (f32, f32), _mods: egui::Modifiers) {
         Interaction::Pan
         | Interaction::RotateView { .. }
         | Interaction::Picker
+        | Interaction::BrushSize { .. }
         | Interaction::Crop { .. } => {}
     }
 }

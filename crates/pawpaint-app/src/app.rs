@@ -2975,6 +2975,45 @@ mod tests {
     }
 
     #[test]
+    fn alt_drag_resizes_the_brush_without_painting() {
+        let mut h = Harness::new();
+        h.app.st.brush = Brush {
+            size: 10.0,
+            hardness: 1.0,
+            ..Brush::basic()
+        };
+        h.app.st.tool = Tool::Brush;
+        h.frame(vec![Event::ModifiersChanged(Modifiers::ALT)]);
+        let a = h.screen(100.0, 100.0);
+        h.frame(vec![Event::PointerMoved(a)]);
+        h.frame(vec![Event::PointerButton {
+            pos: a,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::ALT,
+        }]);
+        for dx in [10.0, 30.0, 60.0] {
+            h.frame(vec![Event::PointerMoved(a + vec2(dx, 0.0))]);
+        }
+        let grown = h.app.st.brush.size;
+        assert!(grown > 20.0, "cresceu: {grown}");
+        // para a esquerda diminui, e nunca passa de 1
+        h.frame(vec![Event::PointerMoved(a - vec2(500.0, 0.0))]);
+        assert_eq!(h.app.st.brush.size, 1.0);
+        h.frame(vec![Event::PointerButton {
+            pos: a,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::ALT,
+        }]);
+        h.frame(vec![Event::ModifiersChanged(Modifiers::NONE)]);
+        assert!(h.app.st.interaction.is_none());
+        // nada foi pintado na imagem
+        assert_eq!(h.px(100, 100), [255, 255, 255, 255]);
+        assert!(!h.app.st.doc().unwrap().ed.is_dirty());
+    }
+
+    #[test]
     fn clone_stamp_copies_from_the_alt_click_source() {
         let mut h = Harness::new();
         {

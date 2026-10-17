@@ -458,6 +458,11 @@ pub enum Interaction {
         last: f32,
     },
     Picker,
+    /// Alt + arrastar na horizontal muda o tamanho do pincel (o círculo cresce em volta do ponto).
+    BrushSize {
+        origin: egui::Pos2,
+        start: f32,
+    },
     FloatMove {
         grab: (f32, f32),
         orig: (f32, f32),
