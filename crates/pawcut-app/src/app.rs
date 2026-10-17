@@ -57,6 +57,7 @@ impl TabViewer for Workspace {
             Panel::TimelineViewer => self.timeline_viewer_ui(ui),
             Panel::Inspector => self.inspector_ui(ui),
             Panel::Timeline => self.timeline_ui(ui),
+            Panel::Notes => self.notes_ui(ui),
         }
     }
 }
@@ -90,6 +91,8 @@ impl PawCutApp {
             ctx,
             AppState::new(pawcut_core::Project::new(Default::default())),
         );
+        ws.presets_path = Some(crate::config::presets_path());
+        ws.presets = crate::presets::load(&crate::config::presets_path());
         if !args.is_empty() {
             ws.open_paths(args);
         }
@@ -253,6 +256,12 @@ impl PawCutApp {
                 self.item(ui, "Extrair In/Out (fecha o buraco)", Action::ExtractInOut);
                 self.item(ui, "Levantar In/Out (deixa o buraco)", Action::LiftInOut);
                 self.item(ui, "Ligar / separar áudio e vídeo", Action::LinkUnlink);
+                self.item(ui, "Alinhar clipes pelo áudio", Action::AlignAudio);
+                self.item(
+                    ui,
+                    "Transcrever o áudio em legendas (whisper)",
+                    Action::Transcribe,
+                );
                 ui.separator();
                 self.item(ui, "Insert do Source", Action::InsertEdit);
                 self.item(ui, "Overwrite do Source", Action::OverwriteEdit);
@@ -283,6 +292,13 @@ impl PawCutApp {
                 self.item(ui, "Empurrar 1 frame para trás", Action::NudgeLeft);
                 self.item(ui, "Empurrar 1 frame para frente", Action::NudgeRight);
                 self.item(ui, "Mostrar no Media Pool", Action::ShowInPool);
+                if ui
+                    .button("Slideshow com as imagens do Media Pool…")
+                    .clicked()
+                {
+                    ui.close();
+                    self.ws.slideshow = Some((3.0, 0.5));
+                }
                 ui.separator();
                 if ui.button("Adicionar faixa de vídeo").clicked() {
                     ui.close();

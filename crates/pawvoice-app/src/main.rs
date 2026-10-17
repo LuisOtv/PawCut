@@ -2,6 +2,7 @@
 
 mod app;
 mod effects;
+mod fx_dialogs;
 mod input_watch;
 mod wave;
 

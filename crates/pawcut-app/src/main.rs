@@ -8,6 +8,8 @@ mod file_dialog;
 mod keymap;
 mod layout;
 mod panels;
+mod presets;
+mod stabilize;
 mod state;
 #[cfg(test)]
 mod ui_tests;
