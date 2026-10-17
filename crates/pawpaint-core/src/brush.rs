@@ -553,6 +553,9 @@ impl Stroker {
                 b.scatter,
             )
         };
+        // Valores de pincel absurdos (de um arquivo editado à mão) não podem travar o app.
+        size = if size.is_finite() { size.clamp(0.0, 8192.0) } else { 24.0 };
+        flow = if flow.is_finite() { flow.clamp(0.0, 1.0) } else { 1.0 };
         let dynamics = self.brush.dynamics;
         if !dynamics.is_none() {
             let sensor = |me: &mut Self, s: Sensor| -> f32 {
@@ -574,6 +577,8 @@ impl Stroker {
             if dynamics.follow_stroke {
                 angle += self.seg.angle;
             }
+            size = if size.is_finite() { size.clamp(0.0, 8192.0) } else { 24.0 };
+            flow = if flow.is_finite() { flow.clamp(0.0, 1.0) } else { 1.0 };
         }
         let (mut cx, mut cy) = (cx, cy);
         if scatter > 0.0 {
@@ -594,7 +599,14 @@ impl Stroker {
         if spray > 0 {
             // Spray: várias partículas pequenas espalhadas dentro do círculo do pincel.
             let psize = (size * self.brush.spray_size.clamp(0.02, 1.0)).max(1.0);
-            for _ in 0..spray.min(200) {
+            // Com simetria, espelho e mosaico o carimbo se repete muitas vezes: o spray divide
+            // as partículas para o trabalho por movimento do mouse continuar limitado.
+            let copies = self.radial.clamp(1, 32) as usize
+                * if self.wrap { 9 } else { 1 }
+                * (1 + self.mirror.0 as usize)
+                * (1 + self.mirror.1 as usize);
+            let particles = (spray as usize).min(200).min((2000 / copies).max(1));
+            for _ in 0..particles {
                 self.seed = self
                     .seed
                     .wrapping_mul(1_664_525)
@@ -1059,6 +1071,45 @@ mod dynamics_tests {
         // nada além do raio (com folga do tamanho da partícula)
         for (x, y) in [(120usize, 100usize), (280, 100), (200, 40), (200, 160)] {
             assert_eq!(alpha(x, y), 0, "{x},{y}");
+        }
+    }
+
+    #[test]
+    fn absurd_dynamics_spray_and_modes_do_not_panic_or_hang() {
+        let weird = [-3.0f32, 1e9, f32::NAN, 0.5];
+        for &a in &weird {
+            for &b in &weird {
+                let mut br = base();
+                br.dynamics = Dynamics {
+                    size: Sensor::Pressure,
+                    size_min: a,
+                    flow: Sensor::Fade,
+                    flow_min: b,
+                    follow_stroke: true,
+                    fade_len: a,
+                };
+                br.spray = 1_000_000;
+                br.spray_size = b;
+                br.scatter = a;
+                let mut s = Stroker::new(120, 80);
+                s.begin(br, [1, 2, 3], false);
+                s.wrap = true;
+                s.radial = 40;
+                s.mirror = (true, true);
+                for (x, y) in [(10.0, 10.0), (60.0, 40.0), (1e6, -1e6), (f32::NAN, 5.0), (5.0, 5.0)] {
+                    s.add_point_pressure(x, y, a);
+                }
+                s.finish(20.0, 20.0);
+            }
+        }
+        // pincel gigante e minúsculo
+        for size in [0.0f32, 0.01, 1e9] {
+            let mut br = base();
+            br.size = size;
+            let mut s = Stroker::new(200, 100);
+            s.begin(br, [0; 3], false);
+            s.add_point(50.0, 50.0);
+            s.add_point(150.0, 60.0);
         }
     }
 
