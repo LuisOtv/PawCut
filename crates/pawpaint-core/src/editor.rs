@@ -1967,6 +1967,40 @@ mod tests {
         assert_eq!(e.doc().layer(id).unwrap().pixels.pixel(5, 5)[3], 0);
     }
 
+    #[test]
+    fn new_features_survive_absurd_values() {
+        let weird = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1e30, -1e30, 0.0, -3.0];
+        let mut e = ed();
+        let base = top(&e);
+        for &a in &weird {
+            // camadas de ajuste com números ruins
+            for f in [
+                Filter::BrightnessContrast { brightness: a, contrast: a },
+                Filter::HueSaturation { hue: a, saturation: a, lightness: a },
+                Filter::Levels { black: a, white: a, gamma: a },
+                Filter::Curves(vec![(a, a), (0.5, a), (a, 0.5)]),
+                Filter::Threshold(a),
+                Filter::Posterize(u32::MAX),
+            ] {
+                let id = e.add_adjustment_layer(f, None, Some(base)).unwrap();
+                let img = crate::composite::flatten(e.doc());
+                assert_eq!(img.width(), 100);
+                e.delete_layer(id).unwrap();
+            }
+            // carimbo de clone, simetria, mosaico e pressão com valores ruins
+            e.set_radial(if a.is_finite() { a as u32 } else { 7 });
+            e.set_wrap(true);
+            e.begin_stroke(base, Brush::basic(), [1, 2, 3], false, BlendMode::Normal).unwrap();
+            e.set_clone_source((a, a));
+            e.stroke_point_pressure(a, a, a);
+            e.stroke_point_pressure(10.0, 10.0, a);
+            e.end_stroke(a, a);
+            e.set_radial(1);
+            e.set_wrap(false);
+        }
+        assert!(e.doc().layer(base).is_some());
+    }
+
     // ---- camadas de ajuste
 
     fn pix(e: &Editor, x: u32, y: u32) -> [u8; 4] {
