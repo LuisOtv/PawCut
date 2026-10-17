@@ -112,7 +112,11 @@ fn placement(rng: &mut Rng, ed: &Editor, media: &[MediaId]) -> Option<Placement>
 }
 
 fn random_edit(rng: &mut Rng, ed: &Editor, media: &[MediaId]) -> (Edit, &'static str) {
-    let at = rng.frame(600) - 20;
+    let mut at = rng.frame(600) - 20;
+    // de vez em quando um frame absurdo
+    if rng.below(40) == 0 {
+        at = [i64::MAX, i64::MIN, i64::MAX - 5, 1 << 50, -(1 << 50)][rng.below(5) as usize];
+    }
     match rng.below(26) {
         0 => {
             let items = (0..1 + rng.below(3))
@@ -361,6 +365,7 @@ fn random_edit(rng: &mut Rng, ed: &Editor, media: &[MediaId]) -> (Edit, &'static
 
 #[test]
 fn random_edits_keep_the_timeline_valid() {
+    let mut total_ok = 0;
     for seed in 1..=12u64 {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let mut ed = new_editor();
@@ -395,7 +400,7 @@ fn random_edits_keep_the_timeline_valid() {
                 );
             }
         }
-        assert!(ok > 3, "seed {seed}: quase nenhuma edição passou ({ok})");
+        total_ok += ok;
         // desfazer tudo volta ao projeto inicial
         while ed.undo() {}
         check(&ed, seed, 999, "undo all");
@@ -405,4 +410,8 @@ fn random_edits_keep_the_timeline_valid() {
         assert_eq!(p.audio_tracks, initial.audio_tracks, "seed {seed}");
         assert_eq!(p.markers, initial.markers, "seed {seed}");
     }
+    assert!(
+        total_ok > 20 * 12 / 4,
+        "poucas edições passaram ({total_ok})"
+    );
 }

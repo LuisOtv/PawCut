@@ -260,7 +260,64 @@ pub enum EditError {
     NoChange,
 }
 
+/// Maior posição (ou duração) aceita na linha do tempo: mais de 100 anos a 30 fps. Valores
+/// maiores só vêm de arquivo estragado ou de erro de conta, e estourariam as somas.
+pub const MAX_FRAME: Frame = 100_000_000_000;
+
+fn in_range(frames: &[Frame]) -> bool {
+    frames.iter().all(|f| (-MAX_FRAME..=MAX_FRAME).contains(f))
+}
+
+fn draft_ok(d: &ClipDraft) -> bool {
+    in_range(&[d.duration]) && d.source_start.abs() <= MAX_FRAME as f64
+}
+
+/// Recusa edições com posições ou durações fora do intervalo aceito.
+fn check_ranges(edit: &Edit) -> Result<(), EditError> {
+    let ok = match edit {
+        Edit::Overwrite { at, items } | Edit::Insert { at, items } => {
+            in_range(&[*at]) && items.iter().all(|i| draft_ok(&i.draft))
+        }
+        Edit::Append { items } => items.iter().all(|i| draft_ok(&i.draft)),
+        Edit::Blade { at, .. } | Edit::CloseGap { at, .. } => in_range(&[*at]),
+        Edit::Move { delta, .. }
+        | Edit::Trim { delta, .. }
+        | Edit::RippleTrim { delta, .. }
+        | Edit::Roll { delta, .. }
+        | Edit::Slip { delta, .. } => in_range(&[*delta]),
+        Edit::SetDissolve { frames, .. } => in_range(&[*frames]),
+        Edit::RippleTrimToPlayhead { at, .. } => in_range(&[*at]),
+        Edit::RippleDeleteRange { start, end, .. } | Edit::DeleteRange { start, end, .. } => {
+            in_range(&[*start, *end])
+        }
+        Edit::SetMarker { frame, .. } => in_range(&[*frame]),
+        Edit::SetKeyframe { at, .. } | Edit::SetKeyframeEase { at, .. } => {
+            at.is_finite() && at.abs() <= MAX_FRAME as f64
+        }
+        Edit::Paste { at, clips } => {
+            in_range(&[*at])
+                && clips.iter().all(|(_, c)| {
+                    in_range(&[c.start, c.duration, c.fade_in, c.fade_out, c.dissolve_in])
+                        && c.source_start.abs() <= MAX_FRAME as f64
+                })
+        }
+        Edit::SetClip { change, .. } => match change {
+            ClipChange::FadeIn(f) | ClipChange::FadeOut(f) => in_range(&[*f]),
+            ClipChange::Freeze(Some(t)) => t.is_finite() && t.abs() <= MAX_FRAME as f64,
+            ClipChange::VolumeDb(v) => v.is_finite() && v.abs() <= 200.0,
+            _ => true,
+        },
+        _ => true,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(EditError::InvalidValue("posição ou duração fora do limite"))
+    }
+}
+
 pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
+    check_ranges(&edit)?;
     match edit {
         Edit::AddMedia(info) => {
             let id = MediaId(p.ids.fresh());
