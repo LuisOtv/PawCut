@@ -94,6 +94,9 @@ Editor de roteiros para vídeo: texto limpo e o tempo de fala sempre à vista.
   mostra só a fala (sem títulos, notas e comentários). Também dá para exportar ou copiar só a fala.
   Arquivo → *Exportar legendas (.srt) pelo ritmo* gera legendas da fala com o tempo calculado, para importar
   no PawCut e ajustar. Rótulos do PawVoice viram capítulos do YouTube.
+- **Para o YouTube:** Arquivo → *Copiar capítulos do YouTube* monta a lista (`00:00 Introdução`, `00:45 …`) a partir dos
+  títulos e do tempo de fala, e avisa se falta algo (pelo menos 3 capítulos de 10 s). Ver → *Análise do texto* mostra as
+  muletas (então, tipo, né…), as palavras que mais se repetem, as frases longas demais e o que é dito nos primeiros 30 s.
 - **Mais:** mover seções pela estrutura (botão direito), meta de duração do vídeo na barra de baixo e modo leitura
   (F5) com a fala em letra grande rolando sozinha.
 - **Seguro com o seu texto:** arrastar um arquivo para a janela, abrir outro ou criar um novo pergunta antes de
