@@ -1963,7 +1963,7 @@ impl PaintApp {
                     };
                     let mut changed = false;
                     if let Some(pos) = resp.interact_pointer_pos() {
-                        if resp.drag_started() || resp.clicked() {
+                        if resp.drag_started_by(egui::PointerButton::Primary) || resp.clicked() {
                             let near = points
                                 .iter()
                                 .position(|(x, y)| to_screen(*x, *y).distance(pos) < 10.0);
@@ -1973,7 +1973,7 @@ impl PaintApp {
                             }));
                             changed = true;
                         }
-                        if resp.dragged()
+                        if resp.dragged_by(egui::PointerButton::Primary)
                             && let Some(i) = *drag
                             && i < points.len()
                         {
@@ -1990,7 +1990,7 @@ impl PaintApp {
                         points.remove(i);
                         changed = true;
                     }
-                    if resp.drag_stopped() {
+                    if resp.drag_stopped_by(egui::PointerButton::Primary) {
                         *drag = None;
                     }
                     ui.label(

@@ -119,7 +119,9 @@ impl<N: Numeric> Widget for Slider<'_, N> {
         let mut v = self.value.to_f64();
         let mut changed = false;
         if let Some(p) = resp.interact_pointer_pos()
-            && (resp.dragged() || resp.clicked() || resp.drag_started())
+            && (resp.dragged_by(egui::PointerButton::Primary)
+                || resp.clicked()
+                || resp.drag_started_by(egui::PointerButton::Primary))
         {
             let t = ((p.x - rail.left()) / rail.width().max(1.0)) as f64;
             v = from_t(t, lo, hi, self.log);
@@ -195,7 +197,7 @@ fn auto_decimals(lo: f64, hi: f64) -> usize {
 
 fn paint(ui: &Ui, resp: &Response, rail: Rect, v: f64, lo: f64, hi: f64, log: bool) {
     let p = ui.painter();
-    let hot = resp.hovered() || resp.dragged() || resp.has_focus();
+    let hot = resp.hovered() || resp.dragged_by(egui::PointerButton::Primary) || resp.has_focus();
     p.rect_filled(rail.expand(1.0), 3.0, theme::BORDER);
     p.rect_filled(rail, 2.0, theme::BG_DARK);
     let x_of = |t: f64| rail.left() + rail.width() * t as f32;
@@ -231,7 +233,7 @@ fn paint(ui: &Ui, resp: &Response, rail: Rect, v: f64, lo: f64, hi: f64, log: bo
         );
     }
     let knob = pos2(knob_x, rail.center().y);
-    let knob_fill = if resp.dragged() {
+    let knob_fill = if resp.dragged_by(egui::PointerButton::Primary) {
         Color32::WHITE
     } else if hot {
         Color32::from_gray(0xee)

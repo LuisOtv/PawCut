@@ -143,6 +143,35 @@ pub struct WriteApp {
     last_title: String,
     screenshot: Option<PathBuf>,
     frames: u64,
+    /// Roda de atalhos (botão do meio).
+    radial: paw_ui::radial::Radial,
+}
+
+/// Roda de atalhos padrão (de cima, no sentido horário).
+const RADIAL_DEFAULTS: &[&str] = &[
+    "heading", "note", "find", "bigger", "reading", "smaller", "outline", "save",
+];
+
+/// Tudo que pode ir para a roda de atalhos.
+fn radial_catalog() -> Vec<paw_ui::radial::RadialAction> {
+    use paw_ui::icons::Icon;
+    use paw_ui::radial::RadialAction as A;
+    vec![
+        A::new("heading", "Nova seção (#)", Icon::Text),
+        A::new("note", "Nota de edição", Icon::Keyframe),
+        A::new("comment", "Comentário (//)", Icon::Document),
+        A::new("find", "Localizar", Icon::Search),
+        A::new("replace", "Substituir", Icon::Swap),
+        A::new("reading", "Modo leitura", Icon::Book),
+        A::new("outline", "Estrutura", Icon::Outline),
+        A::new("bigger", "Letra maior", Icon::ZoomIn),
+        A::new("smaller", "Letra menor", Icon::ZoomOut),
+        A::new("save", "Salvar", Icon::Save),
+        A::new("open", "Abrir", Icon::FolderOpen),
+        A::new("new", "Novo", Icon::Plus),
+        A::new("voice", "Abrir no PawVoice", Icon::Mic),
+        A::new("copy_speech", "Copiar só a fala", Icon::Copy),
+    ]
 }
 
 fn char_of_byte(text: &str, byte: usize) -> usize {
@@ -229,7 +258,142 @@ impl WriteApp {
             last_title: String::new(),
             screenshot: None,
             frames: 0,
+            radial: paw_ui::radial::Radial::load(
+                if cfg!(test) {
+                    None
+                } else {
+                    Some(config_dir().join("radial.json"))
+                },
+                RADIAL_DEFAULTS,
+            ),
         }
+    }
+
+    /// Põe `text` no começo da linha do cursor (marcadores de seção, nota e comentário).
+    fn insert_line(&mut self, text: &str) {
+        let at = self.cursor.min(self.text.len());
+        let line_start = self.text[..at].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = self.text[at..]
+            .find('\n')
+            .map_or(self.text.len(), |i| at + i);
+        let empty = self.text[line_start..line_end].trim().is_empty();
+        // Linha vazia: escreve ali; senão abre uma linha nova embaixo.
+        let (pos, insert) = if empty {
+            (line_start, text.to_string())
+        } else {
+            (line_end, format!("\n{text}"))
+        };
+        self.text.insert_str(pos, &insert);
+        let end = char_of_byte(&self.text, pos + insert.len());
+        self.cursor = pos + insert.len();
+        self.jump = Some((end, end));
+    }
+
+    /// Executa uma ação escolhida na roda de atalhos.
+    fn run_radial(&mut self, ctx: &egui::Context, id: &str) {
+        let font = |s: &mut Settings, d: f32| s.font_size = (s.font_size + d).clamp(10.0, 40.0);
+        match id {
+            "heading" => self.insert_line("# "),
+            "note" => self.insert_line("[B-roll: ]"),
+            "comment" => self.insert_line("// "),
+            "find" => self.open_find(false),
+            "replace" => self.open_find(true),
+            "reading" => self.toggle_reading(),
+            "outline" => {
+                self.settings.outline = !self.settings.outline;
+                self.save_settings();
+            }
+            "bigger" => {
+                font(&mut self.settings, 1.0);
+                self.save_settings();
+            }
+            "smaller" => {
+                font(&mut self.settings, -1.0);
+                self.save_settings();
+            }
+            "save" => self.save(),
+            "open" => self.guard(Then::Open),
+            "new" => self.guard(Then::New),
+            "voice" => self.open_in_voice(),
+            "copy_speech" => {
+                ctx.copy_text(core::spoken(&self.text));
+                self.say("Fala copiada");
+            }
+            _ => {}
+        }
+    }
+
+    /// Barra de ferramentas com os ícones da suíte (a mesma altura das barras dos outros apps).
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        use paw_ui::icons::{self, Icon};
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let b = |ui: &mut egui::Ui, icon, on, tip: &str| {
+                icons::button(ui, icon, 16.0, on, tip).clicked()
+            };
+            if b(ui, Icon::Plus, false, "Novo (Ctrl+N)") {
+                self.guard(Then::New);
+            }
+            if b(ui, Icon::FolderOpen, false, "Abrir (Ctrl+O)") {
+                self.guard(Then::Open);
+            }
+            if b(ui, Icon::Save, false, "Salvar (Ctrl+S)") {
+                self.save();
+            }
+            ui.separator();
+            if b(ui, Icon::Search, self.find.is_some(), "Localizar (Ctrl+F)") {
+                self.open_find(false);
+            }
+            if b(
+                ui,
+                Icon::Text,
+                false,
+                "Nova seção: começa a linha com # (aparece na Estrutura)",
+            ) {
+                self.insert_line("# ");
+            }
+            if b(
+                ui,
+                Icon::Keyframe,
+                false,
+                "Nota de edição [B-roll: …] (não conta no tempo)",
+            ) {
+                self.insert_line("[B-roll: ]");
+            }
+            ui.separator();
+            if b(
+                ui,
+                Icon::Outline,
+                self.settings.outline,
+                "Estrutura e tempo (Ctrl+\\)",
+            ) {
+                self.settings.outline = !self.settings.outline;
+                self.save_settings();
+            }
+            if b(
+                ui,
+                Icon::Book,
+                self.reading.is_some(),
+                "Modo leitura / teleprompter (F5)",
+            ) {
+                self.toggle_reading();
+            }
+            if b(ui, Icon::ZoomOut, false, "Letra menor (Ctrl+-)") {
+                self.settings.font_size = (self.settings.font_size - 1.0).max(10.0);
+                self.save_settings();
+            }
+            if b(ui, Icon::ZoomIn, false, "Letra maior (Ctrl++)") {
+                self.settings.font_size = (self.settings.font_size + 1.0).min(40.0);
+                self.save_settings();
+            }
+            ui.separator();
+            let has = !core::spoken(&self.text).is_empty();
+            ui.add_enabled_ui(has, |ui| {
+                if b(ui, Icon::Mic, false, "Abrir no PawVoice (teleprompter)") {
+                    self.open_in_voice();
+                }
+            });
+        });
     }
 
     fn dirty(&self) -> bool {
@@ -714,6 +878,16 @@ impl WriteApp {
                     self.save_settings();
                 }
             });
+            ui.menu_button("Configurações", |ui| {
+                if ui
+                    .button("Roda de atalhos…")
+                    .on_hover_text("Botão do meio do mouse: segure, arraste até a ação e solte")
+                    .clicked()
+                {
+                    ui.close();
+                    self.radial.editing = true;
+                }
+            });
             ui.menu_button("Ajuda", |ui| {
                 if item(ui, "Como escrever o roteiro", "", true) {
                     ui.close();
@@ -1153,7 +1327,7 @@ impl WriteApp {
                 self.open_path(p);
             }
         }
-        if self.dialog.is_none() {
+        if self.dialog.is_none() && !self.radial.is_open() {
             self.shortcuts(&ctx);
         }
         if self.analyzed != self.text {
@@ -1190,6 +1364,12 @@ impl WriteApp {
         egui::Panel::top("menu")
             .frame(bar(theme::BG_DARK))
             .show(ui, |ui| self.menu_bar(ui));
+        if self.reading.is_none() {
+            egui::Panel::top("toolbar")
+                .exact_size(34.0)
+                .frame(bar(theme::BAR))
+                .show(ui, |ui| self.toolbar(ui));
+        }
         egui::Panel::bottom("status")
             .exact_size(24.0)
             .frame(bar(theme::BG_DARK))
@@ -1215,6 +1395,10 @@ impl WriteApp {
                 }
             });
         self.dialogs(&ctx);
+        let catalog = radial_catalog();
+        if let Some(id) = self.radial.show(&ctx, &catalog) {
+            self.run_radial(&ctx, &id);
+        }
         self.toasts.tick(&ctx);
         self.toasts.ui(&ctx);
     }
@@ -1309,6 +1493,60 @@ mod tests {
 
         fn bytes(&self) -> Result<Vec<u8>, String> {
             std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+
+    #[test]
+    fn wheel_inserts_markers_on_the_cursor_line_and_every_action_is_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = WriteApp::empty(Settings::default());
+        app.data = dir.path().join("dados");
+        app.text = "Primeira linha\n\nTerceira".into();
+        // Cursor na linha vazia: o marcador entra ali.
+        app.cursor = "Primeira linha\n".len();
+        app.insert_line("# ");
+        assert_eq!(app.text, "Primeira linha\n# \nTerceira");
+        // Cursor no meio de uma linha com texto: abre uma linha nova embaixo.
+        app.cursor = 3;
+        app.insert_line("[B-roll: ]");
+        assert_eq!(app.text, "Primeira linha\n[B-roll: ]\n# \nTerceira");
+        // Botão do meio + arrastar para cima: "Nova seção" (roda padrão) no fim do texto.
+        app.cursor = app.text.len();
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut t = 0.0;
+        let mut frame = |app: &mut WriteApp, events: Vec<egui::Event>| {
+            t += 0.05;
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    pos2(0.0, 0.0),
+                    vec2(1100.0, 700.0),
+                )),
+                time: Some(t),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |ui| app.frame(ui))
+                .drop_without_applying_deltas();
+        };
+        let c = pos2(600.0, 350.0);
+        let mid = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Middle,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        frame(&mut app, vec![egui::Event::PointerMoved(c)]);
+        frame(&mut app, vec![mid(c, true)]);
+        let up = c + vec2(0.0, -90.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(up)]);
+        frame(&mut app, vec![mid(up, false)]);
+        assert!(app.text.ends_with("Terceira\n# "), "{:?}", app.text);
+        for a in radial_catalog() {
+            if matches!(a.id.as_str(), "save" | "open" | "new" | "voice") {
+                continue;
+            }
+            app.run_radial(&ctx, &a.id);
         }
     }
 

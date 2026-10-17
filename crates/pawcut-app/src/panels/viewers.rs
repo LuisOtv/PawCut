@@ -109,7 +109,7 @@ impl Workspace {
             [pos2(x, r.top() + 2.0), pos2(x, r.bottom() - 2.0)],
             Stroke::new(2.0, theme::PLAYHEAD),
         );
-        if (resp.clicked() || resp.dragged())
+        if (resp.clicked() || resp.dragged_by(egui::PointerButton::Primary))
             && let Some(pos) = resp.interact_pointer_pos()
         {
             return Some(
@@ -191,8 +191,10 @@ impl Workspace {
         }
         let resp = ui.interact(r.image, ui.id().with("tl-image"), Sense::click_and_drag());
 
-        // Botão do meio arrasta a imagem quando ampliada.
-        if self.viewer_zoom > 0.0 && resp.dragged_by(egui::PointerButton::Middle) {
+        // Alt + arrastar move a imagem quando ampliada (o botão do meio é da roda de atalhos e
+        // o Espaço toca).
+        let panning = self.viewer_zoom > 0.0 && ui.input(|i| i.modifiers.alt);
+        if panning && resp.dragged_by(egui::PointerButton::Primary) {
             self.viewer_pan += resp.drag_delta();
         }
 
@@ -247,15 +249,15 @@ impl Workspace {
                 }
                 self.eyedropper = None;
             }
-        } else if resp.clicked() || resp.drag_started() {
+        } else if resp.clicked() || resp.drag_started_by(egui::PointerButton::Primary) {
             self.st.active_monitor = Monitor::Timeline;
         }
         // Arrastar a imagem move o clipe visual selecionado (posição do Inspector).
         let target = self
             .visual_selection(self.st.playhead)
             .filter(|_| self.eyedropper.is_none());
-        if let Some(clip) = target {
-            if resp.dragged() {
+        if let Some(clip) = target.filter(|_| !panning) {
+            if resp.dragged_by(egui::PointerButton::Primary) {
                 let k = s.width as f32 / pic.width();
                 let d = resp.drag_delta() * k;
                 if d != Vec2::ZERO

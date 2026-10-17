@@ -232,6 +232,8 @@ struct EffectJob {
 const INLINE_EFFECT_SAMPLES: usize = RATE as usize * 60;
 
 pub struct VoiceApp {
+    /// Roda de atalhos (botão do meio).
+    pub radial: paw_ui::radial::Radial,
     pub ed: Editor,
     pub path: Option<PathBuf>,
     pub tool: Tool,
@@ -293,6 +295,49 @@ pub struct VoiceApp {
     /// Testes visuais: `PAWVOICE_SCREENSHOT=arquivo.png` salva a janela e fecha.
     screenshot: Option<PathBuf>,
     frames: u64,
+}
+
+/// Roda de atalhos padrão (de cima, no sentido horário).
+const RADIAL_DEFAULTS: &[&str] = &[
+    "play", "record", "redo", "silence", "delete", "enhance", "undo", "fit",
+];
+
+/// Tudo que pode ir para a roda de atalhos.
+pub fn radial_catalog() -> Vec<paw_ui::radial::RadialAction> {
+    use paw_ui::radial::RadialAction as A;
+    vec![
+        A::new("play", "Tocar / parar", Icon::Play),
+        A::new("stop", "Parar", Icon::Stop),
+        A::new("record", "Gravar", Icon::Record),
+        A::new("record_new", "Gravar em faixa nova", Icon::Mic),
+        A::new("undo", "Desfazer", Icon::Undo),
+        A::new("redo", "Refazer", Icon::Redo),
+        A::new("cut", "Recortar", Icon::Scissors),
+        A::new("copy", "Copiar", Icon::Copy),
+        A::new("paste", "Colar", Icon::Paste),
+        A::new("delete", "Apagar", Icon::Trash),
+        A::new("silence", "Silenciar", Icon::Minus),
+        A::new("trim", "Aparar", Icon::Trim),
+        A::new("duplicate", "Duplicar", Icon::Duplicate),
+        A::new("split_new", "Separar em faixa nova", Icon::Blade),
+        A::new("label", "Rótulo aqui", Icon::Keyframe),
+        A::new("select_all", "Selecionar tudo", Icon::SelRect),
+        A::new("select_none", "Tirar seleção", Icon::Close),
+        A::new("zero", "Ajustar ao zero", Icon::Waveform),
+        A::new("tool_select", "Ferramenta de seleção", Icon::IBeam),
+        A::new("tool_envelope", "Ferramenta de envelope", Icon::Envelope),
+        A::new("fit", "Caber tudo", Icon::Fit),
+        A::new("zoom_sel", "Zoom na seleção", Icon::Search),
+        A::new("zoom_in", "Ampliar", Icon::ZoomIn),
+        A::new("zoom_out", "Reduzir", Icon::ZoomOut),
+        A::new("to_start", "Ir ao início", Icon::ToStart),
+        A::new("to_end", "Ir ao fim", Icon::ToEnd),
+        A::new("enhance", "Melhorar voz", Icon::Sparkles),
+        A::new("script", "Roteiro", Icon::Document),
+        A::new("save", "Salvar", Icon::Save),
+        A::new("export", "Exportar", Icon::DeliverPage),
+        A::new("import", "Importar áudio", Icon::Import),
+    ]
 }
 
 fn data_dir() -> PathBuf {
@@ -490,6 +535,14 @@ impl VoiceApp {
             sel_edit: [None, None],
             screenshot: None,
             frames: 0,
+            radial: paw_ui::radial::Radial::load(
+                if cfg!(test) {
+                    None
+                } else {
+                    Some(settings_path().with_file_name("radial.json"))
+                },
+                RADIAL_DEFAULTS,
+            ),
         }
     }
 
@@ -1392,11 +1445,82 @@ impl VoiceApp {
         });
     }
 
+    // ---------------------------------------------------------------- roda de atalhos
+
+    /// Executa uma ação escolhida na roda de atalhos.
+    pub fn run_radial(&mut self, id: &str) {
+        if self.effect.is_some() {
+            return;
+        }
+        match id {
+            "play" => self.toggle_play(),
+            "stop" => self.stop(),
+            "record" => {
+                if self.recorder.is_recording() {
+                    self.finish_recording();
+                } else {
+                    self.start_recording(false);
+                }
+            }
+            "record_new" => self.start_recording(true),
+            "undo" => self.undo(),
+            "redo" => self.redo(),
+            "cut" => self.cut(),
+            "copy" => self.copy(),
+            "paste" => self.paste(),
+            "delete" => self.delete_selection(),
+            "silence" => self.silence(),
+            "trim" => self.trim(),
+            "duplicate" => self.duplicate(),
+            "split_new" => self.split_new(),
+            "label" => self.add_label_here(),
+            "select_all" => self.select_all(),
+            "select_none" => self.select_none(),
+            "zero" => self.zero_crossings(),
+            "tool_select" => self.tool = Tool::Select,
+            "tool_envelope" => self.tool = Tool::Envelope,
+            "fit" => self.fit(),
+            "zoom_sel" => self.zoom_selection(),
+            "zoom_in" => {
+                let w = self.wave_width / 2.0;
+                self.zoom(2.0, w);
+            }
+            "zoom_out" => {
+                let w = self.wave_width / 2.0;
+                self.zoom(0.5, w);
+            }
+            "to_start" => {
+                self.stop();
+                self.cursor = 0;
+                self.sel = None;
+                self.view_start = 0.0;
+            }
+            "to_end" => {
+                self.stop();
+                self.cursor = self.ed.session().len();
+                self.sel = None;
+            }
+            "enhance" => {
+                let t = self.lufs_target;
+                self.apply_effect("Melhorar voz", move |p| effects::enhance_voice(p, RATE, t));
+            }
+            "script" => self.show_script = !self.show_script,
+            "save" => self.save(),
+            "export" => self.export_dialog(false),
+            "import" => self.import_dialog(),
+            _ => {}
+        }
+    }
+
     // ---------------------------------------------------------------- teclado
 
     /// Atalhos do Audacity.
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() || self.dialog.is_some() || self.effect.is_some() {
+        if ctx.egui_wants_keyboard_input()
+            || self.dialog.is_some()
+            || self.effect.is_some()
+            || self.radial.is_open()
+        {
             return;
         }
         let pressed = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
@@ -1811,6 +1935,15 @@ impl VoiceApp {
                 {
                     ui.close();
                     self.tool = Tool::Envelope;
+                }
+                ui.separator();
+                if ui
+                    .button("Roda de atalhos…")
+                    .on_hover_text("Botão do meio do mouse: segure, arraste até a ação e solte")
+                    .clicked()
+                {
+                    ui.close();
+                    self.radial.editing = true;
                 }
             });
             ui.menu_button("Faixas", |ui| {
@@ -2820,7 +2953,7 @@ impl VoiceApp {
                 _ => CursorIcon::Text,
             });
         }
-        if resp.drag_started()
+        if resp.drag_started_by(egui::PointerButton::Primary)
             && let Some(p) = ui.input(|i| i.pointer.press_origin())
         {
             self.stop();
@@ -2844,7 +2977,7 @@ impl VoiceApp {
                 },
             });
         }
-        if resp.dragged()
+        if resp.dragged_by(egui::PointerButton::Primary)
             && let Some(p) = resp.interact_pointer_pos()
         {
             match &self.drag {
@@ -2865,7 +2998,7 @@ impl VoiceApp {
                 _ => {}
             }
         }
-        if resp.drag_stopped() {
+        if resp.drag_stopped_by(egui::PointerButton::Primary) {
             if let (
                 Some(Drag::Clips {
                     clips,
@@ -3018,7 +3151,7 @@ impl VoiceApp {
             self.ed.begin_change("Envelope");
             self.ed.set_envelope(id, env);
         }
-        if (resp.drag_started() || resp.clicked())
+        if (resp.drag_started_by(egui::PointerButton::Primary) || resp.clicked())
             && let Some(p) = ui.input(|i| i.pointer.press_origin())
             && let Some(i) = row_at(p.y)
             && let Some(t) = self.ed.session().track(rows[i].0).cloned()
@@ -3048,7 +3181,7 @@ impl VoiceApp {
             };
             self.drag = Some(Drag::Envelope { track: id, index });
         }
-        if resp.dragged()
+        if resp.dragged_by(egui::PointerButton::Primary)
             && let (Some(Drag::Envelope { track, index }), Some(p)) =
                 (self.drag.clone(), resp.interact_pointer_pos())
             && let Some(r) = rows.iter().find(|(t, _)| *t == track).map(|(_, r)| *r)
@@ -3071,7 +3204,7 @@ impl VoiceApp {
                 self.ed.set_envelope(track, env);
             }
         }
-        if resp.drag_stopped() {
+        if resp.drag_stopped_by(egui::PointerButton::Primary) {
             self.drag = None;
         }
     }
@@ -4376,6 +4509,10 @@ impl VoiceApp {
         }
         egui::CentralPanel::no_frame().show(ui, |ui| self.tracks_panel(ui));
         self.dialogs(&ctx);
+        let catalog = radial_catalog();
+        if let Some(id) = self.radial.show(&ctx, &catalog) {
+            self.run_radial(&id);
+        }
         self.effect_overlay(&ctx);
         self.toasts.tick(&ctx);
         self.toasts.ui(&ctx);
@@ -4459,6 +4596,52 @@ mod tests {
             out.drop_without_applying_deltas();
         }
         assert!(app.empty_menu.is_some());
+    }
+
+    #[test]
+    fn middle_button_wheel_runs_actions_and_every_action_is_safe() {
+        let (mut app, id) = app_with(vec![0.1; 48_000]);
+        app.radial.slots[2] = "tool_envelope".into();
+        let ctx = egui::Context::default();
+        let mut t = 0.0;
+        let mut frame = |app: &mut VoiceApp, events: Vec<egui::Event>| {
+            t += 0.05;
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 700.0))),
+                time: Some(t),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |ui| app.frame(ui))
+                .drop_without_applying_deltas();
+        };
+        let c = pos2(700.0, 300.0);
+        let mid = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Middle,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut app, vec![egui::Event::PointerMoved(c)]);
+        frame(&mut app, vec![mid(c, true)]);
+        assert!(app.radial.is_open());
+        let right = c + vec2(90.0, 0.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(right)]);
+        frame(&mut app, vec![mid(right, false)]);
+        assert!(app.tool == Tool::Envelope);
+        assert!(app.sel.is_none(), "a roda não seleciona áudio por baixo");
+        for a in radial_catalog() {
+            if a.id.starts_with("record")
+                || a.id == "enhance"
+                || a.id == "export"
+                || a.id == "import"
+                || a.id == "save"
+            {
+                continue;
+            }
+            app.run_radial(&a.id);
+        }
+        let _ = id;
     }
 
     #[test]

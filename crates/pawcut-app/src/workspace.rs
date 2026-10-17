@@ -107,6 +107,8 @@ pub struct Workspace {
     pub track_views: HashMap<pawcut_core::TrackId, crate::panels::timeline::TrackView>,
     /// Aba escolhida no Inspector (fica a mesma ao trocar de clipe, quando existe).
     pub inspector_tab: crate::panels::inspector::InspectorTab,
+    /// Roda de atalhos (botão do meio).
+    pub radial: paw_ui::radial::Radial,
     /// Paleta de comandos aberta (Ctrl+K).
     pub palette: Option<crate::panels::dialogs::Palette>,
     pub history_open: bool,
@@ -211,6 +213,14 @@ impl Workspace {
             track_views: HashMap::new(),
             inspector_tab: Default::default(),
             palette: None,
+            radial: paw_ui::radial::Radial::load(
+                if cfg!(test) {
+                    None
+                } else {
+                    Some(crate::config::config_dir().join("radial.json"))
+                },
+                crate::keymap::RADIAL_DEFAULTS,
+            ),
             history_open: false,
             backups_open: false,
             backups_root: config::data_dir().join("backups"),
@@ -491,6 +501,10 @@ impl Workspace {
     // ---------------- teclado ----------------
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        // Com a roda de atalhos aberta, Esc e as outras teclas são dela.
+        if self.radial.is_open() {
+            return;
+        }
         let events = ctx.input(|i| i.events.clone());
         let wants_text = ctx.text_edit_focused();
         let mut handled = Vec::new();

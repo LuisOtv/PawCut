@@ -953,7 +953,7 @@ pub fn color(st: &mut State, ui: &mut egui::Ui) {
     mesh.add_triangle(0, 2, 3);
     ui.painter().add(egui::Shape::mesh(mesh));
     let mut changed = false;
-    if (resp.dragged() || resp.clicked())
+    if (resp.dragged_by(egui::PointerButton::Primary) || resp.clicked())
         && let Some(p) = resp.interact_pointer_pos()
     {
         s = ((p.x - sq.left()) / sq.width()).clamp(0.0, 1.0);
@@ -984,7 +984,7 @@ pub fn color(st: &mut State, ui: &mut egui::Ui) {
         }
     }
     ui.painter().add(egui::Shape::mesh(mesh));
-    if (resp.dragged() || resp.clicked())
+    if (resp.dragged_by(egui::PointerButton::Primary) || resp.clicked())
         && let Some(p) = resp.interact_pointer_pos()
     {
         h = ((p.x - bar.left()) / bar.width()).clamp(0.0, 1.0) * 359.99;
@@ -1158,7 +1158,7 @@ pub fn overview(st: &mut State, ui: &mut egui::Ui) {
         Color32::WHITE,
     );
     // A janela que o canvas mostra agora: o centro do canvas na imagem, com o pan atual.
-    if (resp.dragged() || resp.clicked())
+    if (resp.dragged_by(egui::PointerButton::Primary) || resp.clicked())
         && let Some(p) = resp.interact_pointer_pos()
     {
         let (fx, fy) = (

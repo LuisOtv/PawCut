@@ -72,7 +72,83 @@ pub enum Action {
     FreezeFrame,
 }
 
+/// Roda de atalhos padrão (de cima, no sentido horário).
+pub const RADIAL_DEFAULTS: &[&str] = &[
+    "PlayPause",
+    "BladeAtPlayhead",
+    "Redo",
+    "MarkOut",
+    "RippleDelete",
+    "MarkIn",
+    "Undo",
+    "ZoomToFit",
+];
+
+/// Ações da roda de atalhos: todas, com o ícone da suíte quando houver um.
+pub fn radial_catalog() -> Vec<paw_ui::radial::RadialAction> {
+    Action::ALL
+        .iter()
+        .filter(|a| !matches!(a, Action::CommandPalette))
+        .map(|a| paw_ui::radial::RadialAction {
+            id: format!("{a:?}"),
+            label: a.label().split(" (").next().unwrap_or("").to_string(),
+            icon: a.icon(),
+        })
+        .collect()
+}
+
+/// A ação da roda com esse id.
+pub fn radial_action(id: &str) -> Option<Action> {
+    Action::ALL.iter().copied().find(|a| format!("{a:?}") == id)
+}
+
 impl Action {
+    /// Ícone da suíte para a ação (as sem ícone aparecem pelas iniciais na roda).
+    pub fn icon(self) -> Option<paw_ui::icons::Icon> {
+        use paw_ui::icons::Icon as I;
+        Some(match self {
+            Action::PlayPause | Action::PlayForward => I::Play,
+            Action::Stop => I::Stop,
+            Action::PlayReverse => I::Reverse,
+            Action::StepBack => I::PrevFrame,
+            Action::StepForward => I::NextFrame,
+            Action::GoToStart => I::ToStart,
+            Action::GoToEnd => I::ToEnd,
+            Action::SelectionTool => I::Select,
+            Action::BladeTool | Action::BladeAtPlayhead => I::Blade,
+            Action::TrimTool => I::Trim,
+            Action::ToggleSnapping => I::Magnet,
+            Action::ToggleLinkedSelection | Action::LinkUnlink => I::Link,
+            Action::Delete | Action::RippleDelete => I::Trash,
+            Action::InsertEdit => I::Insert,
+            Action::OverwriteEdit => I::Overwrite,
+            Action::AppendEdit => I::Append,
+            Action::Undo => I::Undo,
+            Action::Redo => I::Redo,
+            Action::NewProject => I::Document,
+            Action::Open => I::FolderOpen,
+            Action::Save | Action::SaveAs => I::Save,
+            Action::Import => I::Import,
+            Action::Deliver => I::DeliverPage,
+            Action::ZoomIn => I::ZoomIn,
+            Action::ZoomOut => I::ZoomOut,
+            Action::ZoomToFit => I::Fit,
+            Action::Copy => I::Copy,
+            Action::Paste | Action::PasteAttributes => I::Paste,
+            Action::AddMarker | Action::PrevMarker | Action::NextMarker => I::Keyframe,
+            Action::ToggleSkimming => I::Skim,
+            Action::ShowInPool => I::MediaPool,
+            Action::History => I::Reset,
+            Action::ToggleLoop => I::Loop,
+            Action::MaximizePanel => I::Monitor,
+            Action::SelectAll => I::SelRect,
+            Action::Deselect | Action::ClearMarks => I::Close,
+            Action::ToggleClipEnabled => I::Eye,
+            Action::FreezeFrame => I::Pause,
+            _ => return None,
+        })
+    }
+
     pub const ALL: [Action; 62] = [
         Action::PlayPause,
         Action::PlayForward,

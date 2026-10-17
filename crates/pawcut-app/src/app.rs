@@ -317,6 +317,14 @@ impl PawCutApp {
                 }
                 ui.separator();
                 self.item(ui, "Maximizar painel sob o mouse", Action::MaximizePanel);
+                if ui
+                    .button("Roda de atalhos…")
+                    .on_hover_text("Botão do meio do mouse: segure, arraste até a ação e solte")
+                    .clicked()
+                {
+                    ui.close();
+                    self.ws.radial.editing = true;
+                }
                 if ui.button("Reset UI Layout").clicked() {
                     ui.close();
                     self.layout.reset();
@@ -556,6 +564,12 @@ impl eframe::App for PawCutApp {
                 .show_inside(ui, &mut self.ws);
         });
         self.ws.dialogs_ui(&ctx);
+        let catalog = crate::keymap::radial_catalog();
+        if let Some(id) = self.ws.radial.show(&ctx, &catalog)
+            && let Some(a) = crate::keymap::radial_action(&id)
+        {
+            self.ws.run_action(a);
+        }
 
         self.file_drop_overlay(&ctx);
         self.ws.toasts.ui(&ctx);

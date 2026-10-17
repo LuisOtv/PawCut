@@ -584,7 +584,7 @@ impl Workspace {
         }
 
         // O drag só começa depois que o ponteiro anda alguns pixels: a pegada é onde o botão desceu.
-        if lanes_resp.drag_started()
+        if lanes_resp.drag_started_by(egui::PointerButton::Primary)
             && let Some(pos) = ui
                 .input(|i| i.pointer.press_origin())
                 .or(lanes_resp.interact_pointer_pos())
@@ -682,7 +682,7 @@ impl Workspace {
             }
         }
 
-        if lanes_resp.drag_started() {
+        if lanes_resp.drag_started_by(egui::PointerButton::Primary) {
             self.selected_gap = None;
         }
         let mut snap_line: Option<Frame> = None;
@@ -695,7 +695,7 @@ impl Workspace {
         let alt_held = ui.input(|i| i.modifiers.alt);
         if let Some(pos) = lanes_resp
             .interact_pointer_pos()
-            .filter(|_| lanes_resp.dragged())
+            .filter(|_| lanes_resp.dragged_by(egui::PointerButton::Primary))
         {
             let now = self.frame_at(pos.x, layout.left).round() as Frame;
             match self.tl.drag.clone() {
@@ -896,7 +896,7 @@ impl Workspace {
             }
         }
 
-        if lanes_resp.drag_stopped() {
+        if lanes_resp.drag_stopped_by(egui::PointerButton::Primary) {
             let pos = lanes_resp
                 .interact_pointer_pos()
                 .or(ui.input(|i| i.pointer.latest_pos()));
@@ -1274,18 +1274,20 @@ impl Workspace {
                 self.editing_marker = Some(m.frame);
             }
         }
-        if (ruler_resp.clicked() || ruler_resp.dragged())
+        if (ruler_resp.clicked() || ruler_resp.dragged_by(egui::PointerButton::Primary))
             && let Some(pos) = ruler_resp.interact_pointer_pos()
         {
             self.stop();
             self.st.active_monitor = Monitor::Timeline;
             let f = self.frame_at(pos.x, layout.left).round().max(0.0) as Frame;
             self.st.set_playhead(f);
-            if ruler_resp.dragged() {
+            if ruler_resp.dragged_by(egui::PointerButton::Primary) {
                 self.scrub_audio(f);
             }
         }
-        if !ruler_resp.dragged() && !matches!(self.tl.drag, Some(TlDrag::Scrub)) {
+        if !ruler_resp.dragged_by(egui::PointerButton::Primary)
+            && !matches!(self.tl.drag, Some(TlDrag::Scrub))
+        {
             self.tl.last_scrub = None;
         }
 
@@ -2004,13 +2006,13 @@ impl Workspace {
                         Sense::drag(),
                     )
                     .on_hover_cursor(CursorIcon::ResizeVertical);
-                if gresp.hovered() || gresp.dragged() {
+                if gresp.hovered() || gresp.dragged_by(egui::PointerButton::Primary) {
                     painter.line_segment(
                         [pos2(h.left(), h.bottom()), pos2(h.right(), h.bottom())],
                         Stroke::new(2.0, theme::ACCENT),
                     );
                 }
-                if gresp.dragged() {
+                if gresp.dragged_by(egui::PointerButton::Primary) {
                     let v = self.track_views.entry(track.id).or_default();
                     v.height = (v.height + gresp.drag_delta().y).clamp(MIN_TRACK_H, MAX_TRACK_H);
                 }
