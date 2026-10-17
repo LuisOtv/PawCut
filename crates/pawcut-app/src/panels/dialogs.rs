@@ -19,6 +19,12 @@ pub struct DeliverDialog {
     /// sistema a cada frame.
     pub free: Option<(PathBuf, Option<u64>)>,
     pub only_in_out: bool,
+    /// Um arquivo por trecho entre marcadores (capítulos, Shorts).
+    pub by_markers: bool,
+    /// Trechos que faltam exportar (arquivo, de, até) quando `by_markers`.
+    pub queue: Vec<(PathBuf, (pawcut_core::Frame, pawcut_core::Frame))>,
+    /// Quantos arquivos desta rodada já ficaram prontos.
+    pub finished: usize,
     pub job: Option<ExportJob>,
     pub message: Option<Result<String, String>>,
 }
@@ -304,6 +310,9 @@ impl Workspace {
                 opts: DeliverOptions::default(),
                 free: None,
                 only_in_out: false,
+                by_markers: false,
+                queue: Vec::new(),
+                finished: 0,
                 job: None,
                 message: None,
             });
@@ -766,11 +775,30 @@ impl Workspace {
                             });
                         ui.end_row();
                         label(ui, "Trecho");
-                        ui.horizontal(|ui| {
-                            ui.radio_value(&mut d.only_in_out, false, "Timeline inteira");
+                        ui.horizontal_wrapped(|ui| {
+                            let mut whole = !d.only_in_out && !d.by_markers;
+                            if ui.radio(whole, "Timeline inteira").clicked() {
+                                (d.only_in_out, d.by_markers) = (false, false);
+                                whole = true;
+                            }
                             ui.add_enabled_ui(marks.is_some(), |ui| {
-                                ui.radio_value(&mut d.only_in_out, true, "Só In/Out")
-                                    .on_disabled_hover_text("Marque In (I) e Out (O) na timeline");
+                                if ui
+                                    .radio(d.only_in_out && !whole, "Só In/Out")
+                                    .on_disabled_hover_text("Marque In (I) e Out (O) na timeline")
+                                    .clicked()
+                                {
+                                    (d.only_in_out, d.by_markers) = (true, false);
+                                }
+                            });
+                            ui.add_enabled_ui(!project.markers.is_empty(), |ui| {
+                                if ui
+                                    .radio(d.by_markers, "Um arquivo por marcador")
+                                    .on_hover_text("Corta a timeline em cada marcador (M) e exporta cada pedaço num arquivo, numerado")
+                                    .on_disabled_hover_text("Ponha marcadores (M) na timeline")
+                                    .clicked()
+                                {
+                                    (d.only_in_out, d.by_markers) = (false, true);
+                                }
                             });
                         });
                         ui.end_row();
@@ -1039,8 +1067,33 @@ impl Workspace {
                         }
                     });
                     if let Some(result) = job.finished() {
-                        d.message = Some(result.map(|_| format!("Pronto: {}", d.output)));
                         d.job = None;
+                        match result {
+                            Ok(()) if !d.queue.is_empty() => {
+                                // próximo pedaço da fila
+                                d.finished += 1;
+                                let (out, range) = d.queue.remove(0);
+                                let settings = d.opts.export_settings(&project, out, Some(range));
+                                let c = ctx.clone();
+                                d.job = Some(ExportJob::start(
+                                    (*project).clone(),
+                                    settings,
+                                    move || c.request_repaint(),
+                                ));
+                            }
+                            Ok(()) => {
+                                d.finished += 1;
+                                d.message = Some(Ok(if d.by_markers && d.finished > 1 {
+                                    format!("Pronto: {} arquivos", d.finished)
+                                } else {
+                                    format!("Pronto: {}", d.output)
+                                }));
+                            }
+                            Err(e) => {
+                                d.queue.clear();
+                                d.message = Some(Err(e));
+                            }
+                        }
                     }
                 }
                 None => {
@@ -1114,7 +1167,37 @@ impl Workspace {
             }
             d.output = output.display().to_string();
             d.message = None;
-            let range = if d.only_in_out { marks } else { None };
+            d.finished = 0;
+            d.queue.clear();
+            let mut range = if d.only_in_out { marks } else { None };
+            if d.by_markers {
+                let cuts: Vec<pawcut_core::Frame> =
+                    project.markers.iter().map(|m| m.frame).collect();
+                let notes: Vec<(pawcut_core::Frame, String)> = project
+                    .markers
+                    .iter()
+                    .map(|m| (m.frame, m.note.clone()))
+                    .collect();
+                let segs = marker_segments(&cuts, project.duration());
+                let ext = d.opts.format.ext();
+                let mut files: Vec<(PathBuf, (pawcut_core::Frame, pawcut_core::Frame))> = segs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, seg)| {
+                        let note = notes
+                            .iter()
+                            .find(|(f, _)| *f == seg.0)
+                            .map_or("", |(_, n)| n.as_str());
+                        (segment_path(&output, i + 1, segs.len(), note, ext), *seg)
+                    })
+                    .collect();
+                if !files.is_empty() {
+                    let (out, r) = files.remove(0);
+                    output = out;
+                    range = Some(r);
+                    d.queue = files;
+                }
+            }
             let settings = d.opts.export_settings(&project, output, range);
             let c = ctx.clone();
             d.job = Some(ExportJob::start((*project).clone(), settings, move || {
@@ -1385,6 +1468,55 @@ impl Workspace {
             },
         );
     }
+}
+
+/// Trechos entre marcadores: do começo ao primeiro marcador (se ele não for o frame 0),
+/// de cada marcador ao seguinte e do último ao fim. Pedaços vazios somem.
+pub fn marker_segments(
+    markers: &[pawcut_core::Frame],
+    duration: pawcut_core::Frame,
+) -> Vec<(pawcut_core::Frame, pawcut_core::Frame)> {
+    let mut cuts: Vec<pawcut_core::Frame> = markers
+        .iter()
+        .copied()
+        .filter(|f| *f > 0 && *f < duration)
+        .collect();
+    cuts.push(0);
+    cuts.push(duration);
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts.windows(2).map(|w| (w[0], w[1])).collect()
+}
+
+/// `base` com número (e a nota do marcador) antes da extensão: `video-02-intro.mp4`.
+pub fn segment_path(
+    base: &std::path::Path,
+    n: usize,
+    total: usize,
+    note: &str,
+    ext: &str,
+) -> PathBuf {
+    let stem = base
+        .file_stem()
+        .map_or("video".to_string(), |s| s.to_string_lossy().into_owned());
+    let width = total.to_string().len().max(2);
+    let slug: String = note
+        .trim()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+        .to_lowercase();
+    let name = if slug.is_empty() {
+        format!("{stem}-{n:0width$}.{ext}")
+    } else {
+        let slug: String = slug.chars().take(40).collect();
+        format!("{stem}-{n:0width$}-{slug}.{ext}")
+    };
+    base.with_file_name(name)
 }
 
 /// Espaço livre (bytes) no disco da pasta, pelo `df`; `None` se não deu para saber.
@@ -1659,5 +1791,47 @@ mod tests {
         assert_eq!(DeliverOptions::default().size(w, h), (w, h));
         assert_eq!(fps_text(FrameRate::new(30000, 1001)), "29,97");
         assert_eq!(fps_text(FrameRate::new(24000, 1001)), "23,976");
+    }
+}
+
+#[cfg(test)]
+mod segment_tests {
+    use super::*;
+
+    #[test]
+    fn segments_follow_the_markers() {
+        assert_eq!(
+            marker_segments(&[100, 250], 400),
+            vec![(0, 100), (100, 250), (250, 400)]
+        );
+        // marcador no 0, fora da timeline e repetido não criam pedaços vazios
+        assert_eq!(
+            marker_segments(&[0, 100, 100, 500], 400),
+            vec![(0, 100), (100, 400)]
+        );
+        assert_eq!(marker_segments(&[], 400), vec![(0, 400)]);
+        assert!(marker_segments(&[], 0).is_empty());
+        // fora de ordem
+        assert_eq!(
+            marker_segments(&[300, 100], 400),
+            vec![(0, 100), (100, 300), (300, 400)]
+        );
+    }
+
+    #[test]
+    fn segment_names_are_numbered_and_safe() {
+        let base = std::path::Path::new("/tmp/out/meu video.mp4");
+        assert_eq!(
+            segment_path(base, 2, 12, "Intro: o começo!", "mp4"),
+            PathBuf::from("/tmp/out/meu video-02-intro-o-começo.mp4")
+        );
+        assert_eq!(
+            segment_path(base, 1, 3, "", "mkv"),
+            PathBuf::from("/tmp/out/meu video-01.mkv")
+        );
+        // nome com barra não escapa da pasta
+        let p = segment_path(base, 3, 3, "../../etc/passwd", "mp4");
+        assert_eq!(p.parent().unwrap(), std::path::Path::new("/tmp/out"));
+        assert!(!p.file_name().unwrap().to_string_lossy().contains('/'));
     }
 }

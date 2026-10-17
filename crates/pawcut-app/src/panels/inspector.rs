@@ -1486,8 +1486,8 @@ impl Workspace {
 #[cfg(test)]
 mod pan_tests {
     use super::*;
-    use pawcut_core::*;
     use crate::state::AppState;
+    use pawcut_core::*;
 
     #[test]
     fn pan_clip_fills_the_vertical_frame_and_slides_across_the_width() {
