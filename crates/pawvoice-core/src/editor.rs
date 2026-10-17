@@ -1096,6 +1096,11 @@ impl ProcessJob {
         self.resized = true;
     }
 
+    /// O efeito mudou a duração dos trechos (`run_resize`).
+    pub fn is_resized(&self) -> bool {
+        self.resized
+    }
+
     /// Total de amostras (todos os canais de todos os trechos): mede o tamanho do trabalho.
     pub fn samples(&self) -> usize {
         self.pieces

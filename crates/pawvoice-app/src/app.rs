@@ -866,8 +866,13 @@ impl VoiceApp {
     }
 
     fn finish_effect(&mut self, job: pawvoice_core::ProcessJob, label: &'static str) {
+        let resized = job.is_resized();
         if let Err(e) = self.ed.finish_process(job, label) {
             self.warn(e.to_string());
+        } else if resized {
+            // A seleção de antes não vale mais (o trecho mudou de tamanho).
+            self.sel = None;
+            self.clip_sel.clear();
         }
     }
 
@@ -5230,6 +5235,7 @@ mod tests {
             .map(|i| 0.3 * (std::f32::consts::TAU * 300.0 * i as f32 / 48_000.0).sin())
             .collect();
         let (mut app, id) = app_with(sine.clone());
+        app.sel = Some((0, 48_000));
         app.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Tempo(2.0)));
         let ctx = egui::Context::default();
         // Enter aplica (não há campo de texto em foco)
@@ -5254,6 +5260,7 @@ mod tests {
             (len as i64 - 24_000).abs() <= 2,
             "tempo 2× deixa metade: {len}"
         );
+        assert!(app.sel.is_none(), "a seleção antiga some quando a duração muda");
         assert!(app.ed.undo());
         assert_eq!(mono(&app, id).len(), 48_000);
         // equalizador mantém o tamanho
