@@ -30,7 +30,7 @@ impl TabViewer for Workspace {
     }
 
     fn title(&mut self, tab: &mut Panel) -> egui::WidgetText {
-        tab.title().into()
+        self.tab_fit.title(*tab, tab.title(), false).into()
     }
 
     // Como no Resolve: painéis não fecham pelo "X" nem viram janelas soltas;
@@ -46,6 +46,7 @@ impl TabViewer for Workspace {
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Panel) {
         // Uma aba anterior pode ter editado o projeto neste mesmo frame.
         self.refresh_project_arc();
+        self.tab_fit.record(*tab, ui.available_width());
         if ui.rect_contains_pointer(ui.max_rect()) {
             self.hovered_panel = Some(*tab);
         }
@@ -556,6 +557,7 @@ impl eframe::App for PawCutApp {
             let mut style = theme::dock_style(ui.style().as_ref());
             // Nenhum painel encolhe a ponto de cortar os campos do Inspector.
             style.separator.extra = theme::PROPS_MIN_W;
+            self.ws.tab_fit.observe(&self.layout.dock, Panel::title);
             DockArea::new(&mut self.layout.dock)
                 .style(style)
                 .show_leaf_collapse_buttons(false)

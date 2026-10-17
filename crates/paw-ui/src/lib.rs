@@ -5,6 +5,7 @@ pub mod backups;
 pub mod icons;
 pub mod radial;
 pub mod slider;
+pub mod tabfit;
 pub mod theme;
 pub mod toasts;
 

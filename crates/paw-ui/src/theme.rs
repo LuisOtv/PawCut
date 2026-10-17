@@ -134,6 +134,8 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
     s.tab_bar.bg_fill = BAR;
     s.tab_bar.height = 26.0;
     s.tab_bar.hline_color = BORDER;
+    // Sem barra de rolagem na faixa de abas: títulos que não cabem são encurtados (`tabfit`).
+    s.tab_bar.show_scroll_bar_on_overflow = false;
     s.tab_bar.corner_radius = CornerRadius::ZERO;
     s.tab.tab_body.bg_fill = BG;
     s.tab.tab_body.stroke = Stroke::NONE;

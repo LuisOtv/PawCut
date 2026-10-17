@@ -120,6 +120,7 @@ pub struct Workspace {
     pub maximize_request: bool,
     /// Painel sob o mouse no último frame (para maximizar).
     pub hovered_panel: Option<crate::panels::Panel>,
+    pub tab_fit: paw_ui::tabfit::TabFit<crate::panels::Panel>,
     /// Conta-gotas do chroma key ligado: clicar no viewer pega a cor para esses clipes.
     pub eyedropper: Option<Vec<pawcut_core::ClipId>>,
     /// Alvo da normalização por loudness (LUFS).
@@ -226,6 +227,7 @@ impl Workspace {
             backups_root: config::data_dir().join("backups"),
             maximize_request: false,
             hovered_panel: None,
+            tab_fit: Default::default(),
             looping: false,
             lufs_target: -14.0,
             eyedropper: None,
