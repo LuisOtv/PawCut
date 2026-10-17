@@ -1061,6 +1061,47 @@ impl Workspace {
                                 );
                             }
                         }
+                        if !still {
+                            row(
+                                ui,
+                                "Rampa",
+                                |ui| {
+                                    ui.add(
+                                        DragValue::new(&mut self.ramp.0)
+                                            .range(0.1..=10.0)
+                                            .speed(0.02)
+                                            .max_decimals(2)
+                                            .suffix(" ×"),
+                                    );
+                                    ui.label("→");
+                                    ui.add(
+                                        DragValue::new(&mut self.ramp.1)
+                                            .range(0.1..=10.0)
+                                            .speed(0.02)
+                                            .max_decimals(2)
+                                            .suffix(" ×"),
+                                    );
+                                },
+                                |_| {},
+                            );
+                            row(
+                                ui,
+                                "",
+                                |ui| {
+                                    if ui
+                                        .button("Aplicar rampa")
+                                        .on_hover_text(
+                                            "Divide o clipe em pedaços cuja velocidade vai de um valor ao outro (acelera ou freia aos poucos). O resto da faixa acompanha.",
+                                        )
+                                        .clicked()
+                                    {
+                                        let (a, b) = self.ramp;
+                                        self.st.speed_ramp(a, b, 8);
+                                    }
+                                },
+                                |_| {},
+                            );
+                        }
                         for (label, value, is_in) in [
                             ("Fade in", first.fade_in, true),
                             ("Fade out", first.fade_out, false),

@@ -73,6 +73,10 @@ pub struct AppState {
 }
 
 /// Duração padrão de geradores e imagens soltos na timeline: 5 segundos.
+fn fmt_secs(s: f64) -> String {
+    format!("{s:.1}")
+}
+
 pub fn default_still_frames(project: &Project) -> Frame {
     project.settings.fps.seconds_to_frames(5.0).max(1)
 }
@@ -754,6 +758,112 @@ impl AppState {
                 v.len()
             )),
         }
+    }
+
+    /// Rampa de velocidade: o clipe selecionado (com o áudio ligado) vira `steps` pedaços cuja
+    /// velocidade vai de `from` a `to` (múltiplos da velocidade atual: 1,0 = igual). O resto da
+    /// faixa anda junto para acompanhar a duração nova.
+    pub fn speed_ramp(&mut self, from: f64, to: f64, steps: usize) {
+        let p = self.project().clone();
+        let steps = steps.clamp(2, 24);
+        let (from, to) = (from.clamp(0.1, 10.0), to.clamp(0.1, 10.0));
+        let Some(first) = self.selection.iter().copied().find(|c| {
+            p.clip(*c)
+                .is_some_and(|c| matches!(c.source, ClipSource::Media(_)))
+        }) else {
+            self.warn("Selecione um clipe de vídeo ou áudio");
+            return;
+        };
+        let group = p.expand_linked(&[first]);
+        // (faixa, clipe) de cada membro do grupo
+        let members: Vec<(TrackId, Clip)> = group
+            .iter()
+            .filter_map(|id| {
+                let (t, _) = p.locate(*id)?;
+                Some((t, p.clip(*id)?.clone()))
+            })
+            .collect();
+        let Some((_, lead)) = members.first().cloned() else {
+            return;
+        };
+        let (start, dur) = (lead.start, lead.duration);
+        if dur < steps as Frame * 2 {
+            self.warn("O clipe é curto demais para uma rampa");
+            return;
+        }
+        // Em cada pedaço: o trecho da fonte e a velocidade dele.
+        let base_speed = lead.speed;
+        let piece_src = dur as f64 * base_speed / steps as f64;
+        let mut pieces: Vec<(f64, f64, Frame)> = Vec::new(); // (source_start, speed, duração)
+        for i in 0..steps {
+            let t = (i as f64 + 0.5) / steps as f64;
+            let speed = (base_speed * (from + (to - from) * t)).clamp(0.1, 10.0);
+            let d = ((piece_src / speed).round() as Frame).max(1);
+            pieces.push((lead.source_start + piece_src * i as f64, speed, d));
+        }
+        let new_total: Frame = pieces.iter().map(|p| p.2).sum();
+        let tracks: Vec<TrackId> = members.iter().map(|(t, _)| *t).collect();
+        // Os clipes depois do original nessas faixas (e os ligados a eles) andam junto.
+        let later: Vec<ClipId> = tracks
+            .iter()
+            .filter_map(|t| p.track(*t))
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.start >= start + dur)
+            .map(|c| c.id)
+            .collect();
+        let later = p.expand_linked(&later);
+        self.apply_coalescing(Edit::Delete { clips: group }, "ramp");
+        let delta = new_total - dur;
+        if delta != 0 && !later.is_empty() {
+            self.apply_coalescing(
+                Edit::Move {
+                    clips: later,
+                    delta,
+                    video_track_delta: 0,
+                    audio_track_delta: 0,
+                },
+                "ramp",
+            );
+        }
+        let mut pasted = Vec::new();
+        for (tid, orig) in &members {
+            let mut at = 0;
+            for (i, (src, speed, d)) in pieces.iter().enumerate() {
+                let mut c = orig.clone();
+                c.start = at;
+                c.duration = *d;
+                c.source_start = *src;
+                c.speed = *speed;
+                c.fade_in = if i == 0 { orig.fade_in.min(*d) } else { 0 };
+                c.fade_out = if i + 1 == steps {
+                    orig.fade_out.min(*d)
+                } else {
+                    0
+                };
+                // keyframes pertencem ao clipe inteiro: só o primeiro pedaço os leva
+                if i > 0 {
+                    c.keyframes.clear();
+                }
+                c.link = orig.link.map(|_| LinkId(9_000_000 + i as u64));
+                pasted.push((*tid, c));
+                at += *d;
+            }
+        }
+        match self.editor.apply_coalescing(
+            Edit::Paste {
+                at: start,
+                clips: pasted,
+            },
+            "ramp",
+        ) {
+            Ok(o) => self.selection = o.clips,
+            Err(e) => self.say(e.to_string()),
+        }
+        self.editor.end_coalescing();
+        self.say(format!(
+            "Rampa de {from:.1}× a {to:.1}× em {steps} passos ({} s)",
+            fmt_secs(p.settings.fps.frames_to_seconds(new_total))
+        ));
     }
 
     /// Slideshow: coloca no fim da primeira faixa de vídeo todas as imagens do Media Pool, em
@@ -1735,6 +1845,44 @@ mod tests {
         s.set_playhead(140);
         s.add_dissolve();
         assert_eq!(s.project().video_tracks[0].clips[1].dissolve_in, 30);
+    }
+
+    #[test]
+    fn speed_ramp_splits_the_clip_and_the_rest_follows() {
+        let mut s = state();
+        let m = add_video(&mut s, 600, true);
+        s.drop_media(m, TrackKind::Video, 0, 0);
+        // um clipe depois do primeiro, para ver o resto andar
+        let m2 = add_video(&mut s, 300, true);
+        s.drop_media(m2, TrackKind::Video, 0, 400);
+        let first = s.project().video_tracks[0].clips[0].id;
+        s.selection = vec![first];
+        // de 1× a 3× em 6 pedaços: 600 frames de fonte
+        s.speed_ramp(1.0, 3.0, 6);
+        let v = &s.project().video_tracks[0].clips;
+        assert_eq!(v.len(), 7, "6 pedaços + o clipe de depois");
+        // velocidades crescentes, fontes contínuas, nada de buracos
+        for w in v[..6].windows(2) {
+            assert!(w[1].speed > w[0].speed);
+            assert_eq!(w[1].start, w[0].end(), "encostados");
+            let src_end = w[0].source_start + w[0].duration as f64 * w[0].speed;
+            assert!((src_end - w[1].source_start).abs() < 1.0, "fonte contínua");
+        }
+        let used: f64 = v[..6].iter().map(|c| c.duration as f64 * c.speed).sum();
+        assert!((used - 400.0).abs() < 8.0, "usa o trecho da fonte: {used}");
+        // o áudio ligado acompanha, com os mesmos tempos
+        let a = &s.project().audio_tracks[0].clips;
+        assert_eq!(a.len(), 7);
+        assert_eq!(a[0].duration, v[0].duration);
+        assert!(a[..6].iter().zip(&v[..6]).all(|(x, y)| x.start == y.start));
+        // o último clipe andou exatamente o que a rampa encurtou/alongou
+        let new_total: i64 = v[..6].iter().map(|c| c.duration).sum();
+        assert_eq!(v[6].start, 400 + (new_total - 400));
+        // um desfazer volta tudo
+        s.undo();
+        let v = &s.project().video_tracks[0].clips;
+        assert_eq!(v.len(), 2);
+        assert_eq!((v[0].start, v[0].duration, v[1].start), (0, 400, 400));
     }
 
     #[test]
