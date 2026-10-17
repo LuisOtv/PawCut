@@ -442,6 +442,7 @@ impl TabViewer for Viewer<'_> {
                     Panel::Overview => docks::overview(st, ui),
                     Panel::History => docks::history(st, ui),
                     Panel::Reference => docks::reference(st, ui),
+                    Panel::Histogram => docks::histogram(st, ui),
                 }
             });
     }
@@ -3026,6 +3027,53 @@ mod tests {
             modifiers: Modifiers::NONE,
         }]);
         assert_eq!(h.app.st.tool, Tool::Clone);
+    }
+
+    #[test]
+    fn histogram_docker_computes_once_per_change_and_not_while_painting() {
+        let mut h = Harness::new();
+        let ctx = egui::Context::default();
+        let run = |st: &mut State| {
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))),
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| docks::histogram(st, ui));
+            })
+            .drop_without_applying_deltas();
+        };
+        let mut st = std::mem::replace(&mut h.app.st, PaintApp::empty().st);
+        run(&mut st);
+        let (rev, _, hist) = st.docs[0].histogram.clone().expect("calculou");
+        assert_eq!(hist.counted, 300 * 200);
+        assert_eq!(hist.r[255], 300 * 200, "branco puro");
+        // sem mudar nada, o resultado em cache vale
+        run(&mut st);
+        assert_eq!(st.docs[0].histogram.as_ref().unwrap().0, rev);
+        // pintando: não recalcula no meio do traço
+        let d = &mut st.docs[0];
+        let id = d.active;
+        d.ed.fill_selection(id, [0, 0, 0]).ok();
+        st.interaction = Some(crate::state::Interaction::Stroke);
+        st.docs[0].histogram.as_mut().unwrap().1 -= std::time::Duration::from_secs(5);
+        run(&mut st);
+        assert_eq!(
+            st.docs[0].histogram.as_ref().unwrap().2.r[255],
+            300 * 200,
+            "ainda o antigo"
+        );
+        // solto o mouse: atualiza
+        st.interaction = None;
+        st.docs[0].ed.select_all();
+        let id = st.docs[0].active;
+        st.docs[0].ed.fill_selection(id, [0, 0, 0]).unwrap();
+        st.docs[0].histogram.as_mut().unwrap().1 -= std::time::Duration::from_secs(5);
+        run(&mut st);
+        assert_eq!(st.docs[0].histogram.as_ref().unwrap().2.r[0], 300 * 200);
+        // sem documento: não quebra
+        st.docs.clear();
+        run(&mut st);
     }
 
     #[test]

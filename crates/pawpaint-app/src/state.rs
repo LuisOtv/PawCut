@@ -28,10 +28,12 @@ pub enum Panel {
     History,
     /// Imagem de referência para olhar (e pegar cores), fora do documento.
     Reference,
+    /// Histograma da imagem final.
+    Histogram,
 }
 
 impl Panel {
-    pub const ALL: [Panel; 11] = [
+    pub const ALL: [Panel; 12] = [
         Panel::Canvas,
         Panel::Toolbox,
         Panel::Layers,
@@ -43,6 +45,7 @@ impl Panel {
         Panel::Overview,
         Panel::History,
         Panel::Reference,
+        Panel::Histogram,
     ];
 
     pub fn title(self) -> &'static str {
@@ -58,6 +61,7 @@ impl Panel {
             Panel::Overview => "Visão geral",
             Panel::History => "Histórico",
             Panel::Reference => "Referência",
+            Panel::Histogram => "Histograma",
         }
     }
 }
@@ -297,6 +301,8 @@ pub struct DocView {
     pub view_center: egui::Pos2,
     /// Visão espelhada na horizontal.
     pub view_flip: bool,
+    /// Histograma em cache: revisão dos pixels em que foi calculado, quando, e o resultado.
+    pub histogram: Option<(u64, std::time::Instant, pawpaint_core::composite::Histogram)>,
     /// Onde o último traço de pincel terminou: Shift+clique traça uma reta a partir daqui.
     pub last_stroke_end: Option<(f32, f32)>,
     /// Tamanho da área do canvas na janela (último quadro): a Visão geral desenha com ele o
@@ -330,6 +336,7 @@ impl DocView {
             view_rot: 0.0,
             view_center: egui::Pos2::ZERO,
             view_flip: false,
+            histogram: None,
             last_stroke_end: None,
             canvas_size: Vec2::ZERO,
             name: "Sem título".to_string(),

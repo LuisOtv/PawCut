@@ -1424,3 +1424,95 @@ pub fn reference(st: &mut State, ui: &mut egui::Ui) {
         st.reference = None;
     }
 }
+
+// ---------------------------------------------------------------- histograma
+
+/// Histograma da imagem final: vermelho, verde e azul sobrepostos (ou a luminosidade). Recalcula
+/// quando a imagem muda, no máximo a cada 400 ms e nunca no meio de um traço.
+pub fn histogram(st: &mut State, ui: &mut egui::Ui) {
+    let painting = st.interaction.is_some();
+    let Some(d) = st.doc_mut() else {
+        ui.label(RichText::new("Nenhum documento aberto").color(theme::TEXT_DIM));
+        return;
+    };
+    let rev = d.ed.pixel_rev();
+    let stale = d
+        .histogram
+        .as_ref()
+        .is_none_or(|(r, at, _)| *r != rev && at.elapsed().as_millis() > 400);
+    if stale && !painting {
+        // 1 pixel a cada N: fotos grandes ficam em ~1 milhão de amostras
+        let doc = d.ed.doc();
+        let step = ((doc.width * doc.height) as f32 / 1.0e6)
+            .sqrt()
+            .ceil()
+            .max(1.0) as usize;
+        let h = pawpaint_core::composite::histogram(doc, step);
+        d.histogram = Some((rev, std::time::Instant::now(), h));
+    } else if d.histogram.as_ref().is_some_and(|(r, ..)| *r != rev) {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(450));
+    }
+    let Some((_, _, h)) = &d.histogram else {
+        return;
+    };
+    let mode = ui
+        .ctx()
+        .memory_mut(|m| *m.data.get_temp_mut_or(egui::Id::new("hist-mode"), 0u8));
+    let mut new_mode = mode;
+    ui.horizontal(|ui| {
+        for (i, name) in ["RGB", "Luz"].into_iter().enumerate() {
+            if ui.selectable_label(mode == i as u8, name).clicked() {
+                new_mode = i as u8;
+            }
+        }
+    });
+    if new_mode != mode {
+        ui.ctx()
+            .memory_mut(|m| m.data.insert_temp(egui::Id::new("hist-mode"), new_mode));
+    }
+    let (rect, _) = ui.allocate_exact_size(
+        vec2(
+            ui.available_width(),
+            (ui.available_height() - 4.0).clamp(60.0, 160.0),
+        ),
+        Sense::hover(),
+    );
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 3.0, theme::BG_DARK);
+    // O 0 e o 255 costumam ter montanhas enormes (preto e branco puros): escala pelo 99º centil.
+    let series: Vec<([u32; 256], Color32)> = if mode == 0 {
+        vec![
+            (h.r, Color32::from_rgba_unmultiplied(235, 70, 70, 150)),
+            (h.g, Color32::from_rgba_unmultiplied(80, 210, 90, 150)),
+            (h.b, Color32::from_rgba_unmultiplied(80, 120, 245, 150)),
+        ]
+    } else {
+        vec![(h.luma, Color32::from_rgba_unmultiplied(220, 220, 225, 190))]
+    };
+    let mut all: Vec<u32> = series.iter().flat_map(|(s, _)| s.iter().copied()).collect();
+    all.sort_unstable();
+    let top = all[all.len() * 99 / 100].max(1) as f32;
+    for (data, color) in &series {
+        for (i, v) in data.iter().enumerate() {
+            let hgt = (*v as f32 / top).min(1.0) * (rect.height() - 4.0);
+            if hgt < 0.5 {
+                continue;
+            }
+            let x = rect.left() + rect.width() * i as f32 / 256.0;
+            p.rect_filled(
+                Rect::from_min_max(
+                    pos2(x, rect.bottom() - 2.0 - hgt),
+                    pos2(x + (rect.width() / 256.0).max(1.0), rect.bottom() - 2.0),
+                ),
+                0.0,
+                *color,
+            );
+        }
+    }
+    ui.label(
+        RichText::new(format!("{} pixels amostrados", h.counted))
+            .small()
+            .color(theme::TEXT_DIM),
+    );
+}
