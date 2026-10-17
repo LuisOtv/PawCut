@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use paw_media::{MediaLibrary, RgbaImage, default_cache_dir, load_audio, peaks};
 use pawcut_core::{Frame, MediaKind, Project};
-use pawcut_export::{ExportError, ExportSettings, export};
+use pawcut_export::{ExportError, ExportSettings, Stage, export};
 use pawcut_render::Renderer;
 
 /// O que mostrar num viewer.
@@ -219,13 +219,13 @@ impl AudioPlayer {
         self.playing.store(true, Ordering::SeqCst);
     }
 
-    /// Troca o projeto sem reiniciar (edição durante a reprodução).
+    /// Troca o projeto sem reiniciar (edição durante a reprodução). Não mexe na geração: o laço
+    /// de áudio continua do mesmo ponto, sem esvaziar o buffer da placa (isso repetia trechos e
+    /// picotava o som a cada ajuste de volume) e faz um crossfade curto entre os dois projetos.
     pub fn update_project(&self, project: Arc<Project>) {
         if let Ok(mut s) = self.state.lock() {
-            let resume = self.position.load(Ordering::SeqCst);
+            s.warm = Some(project.clone());
             s.project = Some(project);
-            s.start_sample = resume;
-            s.generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         }
     }
 
@@ -260,6 +260,75 @@ impl AudioPlayer {
     }
 }
 
+/// Decodifica o áudio dos clipes numa thread à parte. O laço de áudio nunca decodifica nada:
+/// um clipe novo (colado, trocado de velocidade) fica mudo por um instante até chegar, em vez
+/// de travar o som de todos os outros.
+struct AudioLoader {
+    tx: Sender<(PathBuf, f64)>,
+    rx: Receiver<(PathBuf, f64, Option<Arc<paw_media::Pcm>>)>,
+    /// Pedidos em andamento ou que falharam (esses só voltam a ser tentados depois de `forget`).
+    asked: std::collections::HashSet<(PathBuf, u64)>,
+}
+
+impl AudioLoader {
+    fn spawn(sample_rate: u32) -> Self {
+        let (tx, jobs) = channel::<(PathBuf, f64)>();
+        let (out, rx) = channel();
+        thread::Builder::new()
+            .name("pawcut-audio-load".into())
+            .spawn(move || {
+                let cache = default_cache_dir();
+                while let Ok((path, speed)) = jobs.recv() {
+                    let pcm = load_audio(&path, sample_rate, speed, cache.as_deref())
+                        .ok()
+                        .map(Arc::new);
+                    if out.send((path, speed, pcm)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("não foi possível criar a thread de decodificação de áudio");
+        Self {
+            tx,
+            rx,
+            asked: Default::default(),
+        }
+    }
+
+    /// Pede o áudio de tudo que o projeto usa e ainda não está na memória.
+    fn request_missing(&mut self, project: &Project, media: &mut MediaLibrary) {
+        for clip in project.audio_tracks.iter().flat_map(|t| t.clips.iter()) {
+            let pawcut_core::ClipSource::Media(id) = &clip.source else {
+                continue;
+            };
+            let Some(m) = project.media(*id) else {
+                continue;
+            };
+            let key = (m.info.path.clone(), clip.speed.to_bits());
+            if !self.asked.contains(&key)
+                && media.resident_audio(&m.info.path, clip.speed).is_none()
+            {
+                self.asked.insert(key);
+                let _ = self.tx.send((m.info.path.clone(), clip.speed));
+            }
+        }
+    }
+
+    /// Entrega ao player o que ficou pronto.
+    fn deliver(&mut self, media: &mut MediaLibrary) {
+        while let Ok((path, speed, pcm)) = self.rx.try_recv() {
+            if let Some(pcm) = pcm {
+                media.insert_audio(&path, speed, pcm);
+                self.asked.remove(&(path, speed.to_bits()));
+            }
+        }
+    }
+
+    fn forget(&mut self, path: &Path) {
+        self.asked.retain(|(p, _)| p != path);
+    }
+}
+
 fn audio_loop(
     sample_rate: u32,
     state: Arc<Mutex<AudioState>>,
@@ -269,6 +338,7 @@ fn audio_loop(
     levels: Arc<[AtomicU32; 2]>,
     stop_at: Arc<AtomicI64>,
 ) {
+    use libpulse_binding::def::BufferAttr;
     use libpulse_binding::sample::{Format, Spec};
     use libpulse_binding::stream::Direction;
     use libpulse_simple_binding::Simple;
@@ -278,6 +348,15 @@ fn audio_loop(
         channels: 2,
         rate: sample_rate,
     };
+    // Buffer curto (~100 ms): uma edição feita durante o play é ouvida quase na hora, sem
+    // precisar esvaziar a fila da placa. O padrão do PulseAudio guarda ~250 ms.
+    let attr = BufferAttr {
+        maxlength: u32::MAX,
+        tlength: (sample_rate as u64 * 100 / 1000) as u32 * 2 * 4,
+        prebuf: u32::MAX,
+        minreq: u32::MAX,
+        fragsize: u32::MAX,
+    };
     let device = Simple::new(
         None,
         "PawCut",
@@ -286,36 +365,31 @@ fn audio_loop(
         "Reprodução",
         &spec,
         None,
-        None,
+        Some(&attr),
     )
     .ok();
     has_device.store(device.is_some(), Ordering::SeqCst);
     let mut renderer = Renderer::new(MediaLibrary::new((2, 2), sample_rate, default_cache_dir()));
+    let mut loader = AudioLoader::spawn(sample_rate);
+    let mut last_check = std::time::Instant::now();
     let mut current_gen = u64::MAX;
+    // Projeto que gerou o último trecho: se mudou sem reinício, o trecho novo entra em crossfade.
+    let mut previous: Option<Arc<Project>> = None;
     let mut pos = 0i64;
     let chunk_time = Duration::from_secs_f64(AUDIO_CHUNK as f64 / sample_rate as f64);
     loop {
         let (forget, warm) = {
             let mut s = state.lock().expect("estado de áudio");
-            let warm = if playing.load(Ordering::SeqCst) {
-                None
-            } else {
-                s.warm.take()
-            };
-            (std::mem::take(&mut s.forget), warm)
+            (std::mem::take(&mut s.forget), s.warm.take())
         };
         for path in forget {
             renderer.media().forget(&path);
+            loader.forget(&path);
         }
         if let Some(project) = warm {
-            for clip in project.audio_tracks.iter().flat_map(|t| t.clips.iter()) {
-                if let pawcut_core::ClipSource::Media(id) = &clip.source
-                    && let Some(m) = project.media(*id)
-                {
-                    let _ = renderer.media().audio(&m.info.path, clip.speed);
-                }
-            }
+            loader.request_missing(&project, renderer.media());
         }
+        loader.deliver(renderer.media());
         if !playing.load(Ordering::SeqCst) {
             for l in levels.iter() {
                 l.store(0f32.to_bits(), Ordering::Relaxed);
@@ -326,6 +400,7 @@ fn audio_loop(
                 }
                 current_gen = u64::MAX;
             }
+            previous = None;
             thread::sleep(Duration::from_millis(5));
             continue;
         }
@@ -337,14 +412,29 @@ fn audio_loop(
             thread::sleep(Duration::from_millis(5));
             continue;
         };
-        if generation != current_gen {
+        let restarted = generation != current_gen;
+        if restarted {
             if let Some(d) = &device {
                 let _ = d.flush();
             }
             current_gen = generation;
             pos = start;
+            // Play sem preparo (o projeto mudou e o play veio logo em seguida): pede já o que falta.
+            loader.request_missing(&project, renderer.media());
         }
-        let samples = renderer.mix_audio(&project, pos, AUDIO_CHUNK);
+        // De vez em quando confere se algo saiu da memória (orçamento de áudio) e pede de novo.
+        if last_check.elapsed() > Duration::from_secs(1) {
+            last_check = std::time::Instant::now();
+            loader.request_missing(&project, renderer.media());
+        }
+        let mut samples = renderer.mix_audio_resident(&project, pos, AUDIO_CHUNK);
+        if !restarted && let Some(old) = previous.as_ref().filter(|p| !Arc::ptr_eq(p, &project)) {
+            // Edição durante o play (volume, corte, mudo...): passa do som antigo para o novo
+            // ao longo do trecho, em vez de dar um degrau (estalo).
+            let before = renderer.mix_audio_resident(old, pos, AUDIO_CHUNK);
+            paw_audio::mix::crossfade(&before, &mut samples, 2);
+        }
+        previous = Some(project);
         for (ch, l) in levels.iter().enumerate() {
             let peak = samples
                 .iter()
@@ -496,6 +586,8 @@ pub struct ExportJob {
     pub done: Arc<AtomicI64>,
     pub total: Frame,
     pub cancel: Arc<AtomicBool>,
+    /// Ligado enquanto o áudio está sendo mixado (antes dos frames).
+    pub mixing_audio: Arc<AtomicBool>,
     pub result: Arc<Mutex<Option<Result<(), String>>>>,
 }
 
@@ -509,7 +601,13 @@ impl ExportJob {
         let cancel = Arc::new(AtomicBool::new(false));
         let result = Arc::new(Mutex::new(None));
         let total = pawcut_export::frame_count(&project, &settings);
-        let (d, c, r) = (done.clone(), cancel.clone(), result.clone());
+        let mixing_audio = Arc::new(AtomicBool::new(false));
+        let (d, c, r, m) = (
+            done.clone(),
+            cancel.clone(),
+            result.clone(),
+            mixing_audio.clone(),
+        );
         thread::Builder::new()
             .name("pawcut-export".into())
             .spawn(move || {
@@ -520,6 +618,7 @@ impl ExportJob {
                     default_cache_dir(),
                 ));
                 let out = export(&project, &mut renderer, &settings, &c, |p| {
+                    m.store(p.stage == Stage::Audio, Ordering::Relaxed);
                     d.store(p.done, Ordering::Relaxed);
                     if p.done % 15 == 0 {
                         repaint();
@@ -540,11 +639,66 @@ impl ExportJob {
             done,
             total,
             cancel,
+            mixing_audio,
             result,
         }
     }
 
     pub fn finished(&self) -> Option<Result<(), String>> {
         self.result.lock().ok()?.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pawcut_core::ProjectSettings;
+
+    #[test]
+    fn a_new_clip_is_silent_until_the_loader_delivers_it_and_never_blocks_the_mix() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = paw_testkit::dc_audio(dir.path(), "a.wav", 0.5, 1.0);
+        let settings = ProjectSettings::default();
+        let mut st = crate::state::AppState::new(Project::new(settings));
+        let info = paw_media::probe(&wav, ProjectSettings::default().fps).unwrap();
+        let m = st
+            .apply(pawcut_core::Edit::AddMedia(info))
+            .unwrap()
+            .media
+            .unwrap();
+        st.drop_media(m, pawcut_core::TrackKind::Audio, 0, 0);
+        let project = st.project().clone();
+        assert!(!project.audio_tracks[0].clips.is_empty());
+        let mut renderer = Renderer::new(MediaLibrary::new((2, 2), 48_000, None));
+        let mut loader = AudioLoader::spawn(48_000);
+        loader.request_missing(&project, renderer.media());
+        let silent = renderer.mix_audio_resident(&project, 1000, 64);
+        assert!(silent.iter().all(|v| *v == 0.0), "ainda não chegou");
+        let start = std::time::Instant::now();
+        loop {
+            loader.deliver(renderer.media());
+            let out = renderer.mix_audio_resident(&project, 1000, 64);
+            if out.iter().any(|v| *v != 0.0) {
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(10), "nunca chegou");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn editing_during_play_does_not_restart_the_audio() {
+        let p = Arc::new(Project::new(ProjectSettings::default()));
+        let player = AudioPlayer::spawn(48_000);
+        player.play(p.clone(), 4_800);
+        let g = player.generation.load(Ordering::SeqCst);
+        // Arrastar o volume manda um projeto novo por frame; nenhum pode reiniciar a reprodução.
+        for _ in 0..10 {
+            player.update_project(Arc::new(Project::new(ProjectSettings::default())));
+        }
+        assert_eq!(player.generation.load(Ordering::SeqCst), g);
+        let s = player.state.lock().unwrap();
+        assert_eq!(s.generation, g);
+        assert_eq!(s.start_sample, 4_800);
     }
 }

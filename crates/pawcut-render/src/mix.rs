@@ -1,6 +1,9 @@
 //! Mixagem das faixas de áudio da timeline.
 
-use paw_media::MediaLibrary;
+use std::path::Path;
+use std::sync::Arc;
+
+use paw_media::Pcm;
 use pawcut_core::{Clip, ClipSource, Frame, Param, Project};
 
 /// Janela `[início, fim)` em frames.
@@ -23,9 +26,10 @@ fn audible(clips: &[Clip], i: usize) -> (Frame, Frame, Window, Window) {
 }
 
 /// `frames` frames estéreo a partir da amostra `start` (na taxa do projeto), intercalados L/R.
+/// `audio(caminho, velocidade)` entrega o PCM de um arquivo, ou `None` para pular o clipe.
 pub(crate) fn mix(
     project: &Project,
-    media: &mut MediaLibrary,
+    audio: &mut dyn FnMut(&Path, f64) -> Option<Arc<Pcm>>,
     start: i64,
     frames: usize,
 ) -> Vec<f32> {
@@ -61,7 +65,7 @@ pub(crate) fn mix(
             let Some(m) = project.media(*id) else {
                 continue;
             };
-            let Ok(pcm) = media.audio(&m.info.path, clip.speed) else {
+            let Some(pcm) = audio(&m.info.path, clip.speed) else {
                 continue;
             };
             let s0 = to_sample(clip.start);

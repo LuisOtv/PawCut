@@ -3,7 +3,6 @@
 mod app;
 mod canvas;
 mod docks;
-mod icons;
 mod state;
 
 use std::path::PathBuf;

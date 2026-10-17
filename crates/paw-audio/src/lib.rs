@@ -4,3 +4,4 @@
 pub mod devices;
 pub mod dsp;
 pub mod io;
+pub mod mix;

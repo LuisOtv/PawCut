@@ -125,10 +125,19 @@ fn source_frame(project: &Project, settings: &ExportSettings, i: Frame) -> Frame
     }
 }
 
+/// Em que etapa a exportação está: primeiro o áudio é mixado, depois os frames saem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Audio,
+    Video,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Progress {
+    /// Frames já feitos; na etapa de áudio, a fração do áudio mixado em frames equivalentes.
     pub done: Frame,
     pub total: Frame,
+    pub stage: Stage,
 }
 
 #[derive(Debug, Error)]
@@ -170,10 +179,17 @@ pub fn export(
         return Err(ExportError::Offline { frame, path });
     }
     let work = tempfile::tempdir()?;
-    let audio = work.path().join("audio.f32");
+    let audio = work.path().join("audio.s16");
     let with_audio = settings.audio_only.is_some() || settings.audio_kbps.is_some();
+    let frames = frame_count(project, settings);
     if with_audio {
-        write_audio(project, renderer, from, total, &audio, cancel)?;
+        write_audio(project, renderer, from, total, &audio, cancel, |fraction| {
+            on_progress(Progress {
+                done: (frames as f64 * fraction) as Frame,
+                total: frames,
+                stage: Stage::Audio,
+            })
+        })?;
     }
 
     if let Some(format) = settings.audio_only {
@@ -187,7 +203,11 @@ pub fn export(
         drop(child.stdin.take());
         let result = finish(child, Ok(()), log, &settings.output);
         if result.is_ok() {
-            on_progress(Progress { done: total, total });
+            on_progress(Progress {
+                done: total,
+                total,
+                stage: Stage::Video,
+            });
         }
         return result;
     }
@@ -255,6 +275,7 @@ fn write_audio(
     total: Frame,
     path: &Path,
     cancel: &AtomicBool,
+    mut on_fraction: impl FnMut(f64),
 ) -> Result<(), ExportError> {
     let s = &project.settings;
     let first = s.fps.frame_to_sample(from, s.sample_rate);
@@ -266,10 +287,14 @@ fn write_audio(
             return Err(ExportError::Cancelled);
         }
         let n = AUDIO_CHUNK.min((samples - pos) as usize);
+        // 16 bits bastam (o destino é AAC, MP3 ou WAV de 16 bits) e o arquivo temporário
+        // ocupa a metade do disco que ocuparia em float.
         for v in renderer.mix_audio(project, first + pos, n) {
-            out.write_all(&v.to_le_bytes())?;
+            let s = (v.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+            out.write_all(&s.to_le_bytes())?;
         }
         pos += n as i64;
+        on_fraction(pos as f64 / samples as f64);
     }
     out.flush()?;
     Ok(())
@@ -373,7 +398,7 @@ fn spawn_ffmpeg(
         (Some(audio), Some(kbps)) => {
             cmd.args([
                 "-f",
-                "f32le",
+                "s16le",
                 "-ar",
                 &s.sample_rate.to_string(),
                 "-ac",
@@ -428,7 +453,7 @@ fn spawn_audio_ffmpeg(
     cmd.args(["-v", "error", "-y"])
         .args([
             "-f",
-            "f32le",
+            "s16le",
             "-ar",
             &s.sample_rate.to_string(),
             "-ac",
@@ -491,6 +516,7 @@ fn feed_frames(
         on_progress(Progress {
             done: i + 1,
             total: count,
+            stage: Stage::Video,
         });
     }
     Ok(())
@@ -526,6 +552,8 @@ fn first_missing_media(project: &Project) -> Option<(Frame, PathBuf)> {
     project
         .all_tracks()
         .flat_map(|t| t.clips.iter())
+        // Clipe desligado não aparece nem soa: o arquivo dele sumir não deve travar a exportação.
+        .filter(|c| c.enabled)
         .filter_map(|c| match &c.source {
             ClipSource::Media(id) => project
                 .media(*id)

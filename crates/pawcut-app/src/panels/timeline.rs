@@ -332,6 +332,16 @@ fn ruler_step(ppf: f32, fps: i64, min_px: f32) -> Frame {
         .unwrap_or(600 * fps)
 }
 
+/// `clamp` que não entra em pânico quando o intervalo se inverte (clipe mais estreito que as
+/// margens, ex.: 1 frame com a timeline afastada): nesse caso fica no meio.
+fn clamp_in(v: f32, lo: f32, hi: f32) -> f32 {
+    if lo > hi {
+        (lo + hi) / 2.0
+    } else {
+        v.clamp(lo, hi)
+    }
+}
+
 /// Altura da linha de volume `db` dentro da área do clipe.
 fn vol_y(content: Rect, db: f32) -> f32 {
     let frac = ((db - VOL_MIN) / (VOL_MAX - VOL_MIN)).clamp(0.0, 1.0);
@@ -574,7 +584,7 @@ impl Workspace {
         }
 
         // O drag só começa depois que o ponteiro anda alguns pixels: a pegada é onde o botão desceu.
-        if lanes_resp.drag_started()
+        if lanes_resp.drag_started_by(egui::PointerButton::Primary)
             && let Some(pos) = ui
                 .input(|i| i.pointer.press_origin())
                 .or(lanes_resp.interact_pointer_pos())
@@ -672,7 +682,7 @@ impl Workspace {
             }
         }
 
-        if lanes_resp.drag_started() {
+        if lanes_resp.drag_started_by(egui::PointerButton::Primary) {
             self.selected_gap = None;
         }
         let mut snap_line: Option<Frame> = None;
@@ -685,7 +695,7 @@ impl Workspace {
         let alt_held = ui.input(|i| i.modifiers.alt);
         if let Some(pos) = lanes_resp
             .interact_pointer_pos()
-            .filter(|_| lanes_resp.dragged())
+            .filter(|_| lanes_resp.dragged_by(egui::PointerButton::Primary))
         {
             let now = self.frame_at(pos.x, layout.left).round() as Frame;
             match self.tl.drag.clone() {
@@ -886,7 +896,7 @@ impl Workspace {
             }
         }
 
-        if lanes_resp.drag_stopped() {
+        if lanes_resp.drag_stopped_by(egui::PointerButton::Primary) {
             let pos = lanes_resp
                 .interact_pointer_pos()
                 .or(ui.input(|i| i.pointer.latest_pos()));
@@ -1264,18 +1274,20 @@ impl Workspace {
                 self.editing_marker = Some(m.frame);
             }
         }
-        if (ruler_resp.clicked() || ruler_resp.dragged())
+        if (ruler_resp.clicked() || ruler_resp.dragged_by(egui::PointerButton::Primary))
             && let Some(pos) = ruler_resp.interact_pointer_pos()
         {
             self.stop();
             self.st.active_monitor = Monitor::Timeline;
             let f = self.frame_at(pos.x, layout.left).round().max(0.0) as Frame;
             self.st.set_playhead(f);
-            if ruler_resp.dragged() {
+            if ruler_resp.dragged_by(egui::PointerButton::Primary) {
                 self.scrub_audio(f);
             }
         }
-        if !ruler_resp.dragged() && !matches!(self.tl.drag, Some(TlDrag::Scrub)) {
+        if !ruler_resp.dragged_by(egui::PointerButton::Primary)
+            && !matches!(self.tl.drag, Some(TlDrag::Scrub))
+        {
             self.tl.last_scrub = None;
         }
 
@@ -1473,7 +1485,7 @@ impl Workspace {
                 r.right() - clip.fade_out as f32 * self.tl.ppf,
             ] {
                 let hdl = Rect::from_center_size(
-                    pos2(x.clamp(r.left() + 4.0, r.right() - 4.0), r.top() + 4.0),
+                    pos2(clamp_in(x, r.left() + 4.0, r.right() - 4.0), r.top() + 4.0),
                     vec2(8.0, 8.0),
                 );
                 painter.rect_filled(hdl, 1.0, Color32::WHITE);
@@ -1830,41 +1842,50 @@ impl Workspace {
                     Rect::from_min_size(pos2(badge.right() + 8.0, y - 9.0), vec2(62.0, 18.0));
                 let pan_r =
                     Rect::from_min_size(pos2(vol_r.right() + 4.0, y - 9.0), vec2(44.0, 18.0));
-                let v = ui
-                    .put(
-                        vol_r,
-                        egui::DragValue::new(&mut vol)
-                            .range(-60.0..=12.0)
-                            .speed(0.2)
-                            .fixed_decimals(1)
-                            .suffix(" dB"),
-                    )
-                    .on_hover_text("Volume da faixa inteira");
-                let pn = ui
-                    .put(
-                        pan_r,
-                        egui::DragValue::new(&mut pan)
-                            .range(-1.0..=1.0)
-                            .speed(0.01)
-                            .custom_formatter(|v, _| match (v * 100.0).round() as i64 {
-                                0 => "C".into(),
-                                n if n < 0 => format!("E{}", -n),
-                                n => format!("D{n}"),
-                            })
-                            .custom_parser(|t| {
-                                let t = t.trim().to_uppercase();
-                                if t == "C" {
-                                    return Some(0.0);
-                                }
-                                let (sign, num) = match t.chars().next()? {
-                                    'E' | 'L' => (-1.0, &t[1..]),
-                                    'D' | 'R' => (1.0, &t[1..]),
-                                    _ => (1.0, t.as_str()),
-                                };
-                                num.parse::<f64>().ok().map(|n| sign * n / 100.0)
-                            }),
-                    )
-                    .on_hover_text("Pan (E = esquerda, D = direita, C = centro)");
+                // Campos do tamanho exato do retângulo: o padrão do DragValue (22 px de altura,
+                // largura que varia com os dígitos) vazava para fora da linha da faixa.
+                let mixer_field = |ui: &mut egui::Ui, r: Rect, add: egui::DragValue<'_>| {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
+                        ui.spacing_mut().interact_size = r.size();
+                        ui.add_sized(r.size(), add)
+                    })
+                    .inner
+                };
+                let v = mixer_field(
+                    ui,
+                    vol_r,
+                    egui::DragValue::new(&mut vol)
+                        .range(-60.0..=12.0)
+                        .speed(0.2)
+                        .fixed_decimals(1)
+                        .suffix(" dB"),
+                )
+                .on_hover_text("Volume da faixa inteira");
+                let pn = mixer_field(
+                    ui,
+                    pan_r,
+                    egui::DragValue::new(&mut pan)
+                        .range(-1.0..=1.0)
+                        .speed(0.01)
+                        .custom_formatter(|v, _| match (v * 100.0).round() as i64 {
+                            0 => "C".into(),
+                            n if n < 0 => format!("E{}", -n),
+                            n => format!("D{n}"),
+                        })
+                        .custom_parser(|t| {
+                            let t = t.trim().to_uppercase();
+                            if t == "C" {
+                                return Some(0.0);
+                            }
+                            let (sign, num) = match t.chars().next()? {
+                                'E' | 'L' => (-1.0, &t[1..]),
+                                'D' | 'R' => (1.0, &t[1..]),
+                                _ => (1.0, t.as_str()),
+                            };
+                            num.parse::<f64>().ok().map(|n| sign * n / 100.0)
+                        }),
+                )
+                .on_hover_text("Pan (E = esquerda, D = direita, C = centro)");
                 if v.changed() || pn.changed() {
                     self.st.apply_coalescing(
                         Edit::SetTrackMix {
@@ -1985,13 +2006,13 @@ impl Workspace {
                         Sense::drag(),
                     )
                     .on_hover_cursor(CursorIcon::ResizeVertical);
-                if gresp.hovered() || gresp.dragged() {
+                if gresp.hovered() || gresp.dragged_by(egui::PointerButton::Primary) {
                     painter.line_segment(
                         [pos2(h.left(), h.bottom()), pos2(h.right(), h.bottom())],
                         Stroke::new(2.0, theme::ACCENT),
                     );
                 }
-                if gresp.dragged() {
+                if gresp.dragged_by(egui::PointerButton::Primary) {
                     let v = self.track_views.entry(track.id).or_default();
                     v.height = (v.height + gresp.drag_delta().y).clamp(MIN_TRACK_H, MAX_TRACK_H);
                 }
@@ -2085,8 +2106,11 @@ impl Workspace {
                     self.zoom(1.4);
                 }
                 let mut z = self.tl.ppf.ln();
-                let slider = egui::Slider::new(&mut z, 0.02f32.ln()..=40f32.ln()).show_value(false);
-                if ui.add_sized([110.0, 16.0], slider).changed() {
+                let slider = paw_ui::Slider::new(&mut z, 0.02f32.ln()..=40f32.ln())
+                    .show_value(false)
+                    .fill_from_zero(false)
+                    .width(110.0);
+                if ui.add(slider).changed() {
                     let factor = z.exp() / self.tl.ppf;
                     self.zoom(factor);
                 }
@@ -2364,8 +2388,8 @@ impl Workspace {
         let c = p.clip(clip)?;
         let x0 = self.x_of(c.start as f32, layout.left);
         let x1 = self.x_of(c.end() as f32, layout.left);
-        let xin = (x0 + c.fade_in as f32 * self.tl.ppf).clamp(x0 + 4.0, x1 - 4.0);
-        let xout = (x1 - c.fade_out as f32 * self.tl.ppf).clamp(x0 + 4.0, x1 - 4.0);
+        let xin = clamp_in(x0 + c.fade_in as f32 * self.tl.ppf, x0 + 4.0, x1 - 4.0);
+        let xout = clamp_in(x1 - c.fade_out as f32 * self.tl.ppf, x0 + 4.0, x1 - 4.0);
         if (pos.x - xin).abs() <= 6.0 {
             Some((clip, Edge::Start))
         } else if (pos.x - xout).abs() <= 6.0 {

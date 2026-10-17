@@ -5,7 +5,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat};
-use egui::{Align, Align2, Color32, FontId, Key, Modifiers, RichText, Sense, vec2};
+use egui::{Align, Align2, Color32, FontId, Key, Modifiers, RichText, Sense, pos2, vec2};
 use paw_ui::backups;
 use paw_ui::theme;
 use paw_ui::toasts::Toasts;
@@ -83,6 +83,8 @@ enum Then {
 enum Dialog {
     /// Mudanças não salvas antes de `Then`.
     Unsaved(Then),
+    /// Arquivo solto na janela com mudanças não salvas: abrir descartaria o texto atual.
+    UnsavedDrop(PathBuf),
     Recover {
         text: String,
         path: Option<PathBuf>,
@@ -129,6 +131,8 @@ pub struct WriteApp {
     reading: Option<Reading>,
     /// Seleção (em caracteres) a aplicar no editor no próximo quadro.
     jump: Option<(usize, usize)>,
+    /// O que fazer assim que o "Salvar como" em andamento terminar (sair, novo, abrir).
+    after_save: Option<Then>,
     /// Cursor atual do editor, em bytes.
     cursor: usize,
     analysis: core::Analysis,
@@ -139,6 +143,35 @@ pub struct WriteApp {
     last_title: String,
     screenshot: Option<PathBuf>,
     frames: u64,
+    /// Roda de atalhos (botão do meio).
+    radial: paw_ui::radial::Radial,
+}
+
+/// Roda de atalhos padrão (de cima, no sentido horário).
+const RADIAL_DEFAULTS: &[&str] = &[
+    "heading", "note", "find", "bigger", "reading", "smaller", "outline", "save",
+];
+
+/// Tudo que pode ir para a roda de atalhos.
+fn radial_catalog() -> Vec<paw_ui::radial::RadialAction> {
+    use paw_ui::icons::Icon;
+    use paw_ui::radial::RadialAction as A;
+    vec![
+        A::new("heading", "Nova seção (#)", Icon::Text),
+        A::new("note", "Nota de edição", Icon::Keyframe),
+        A::new("comment", "Comentário (//)", Icon::Document),
+        A::new("find", "Localizar", Icon::Search),
+        A::new("replace", "Substituir", Icon::Swap),
+        A::new("reading", "Modo leitura", Icon::Book),
+        A::new("outline", "Estrutura", Icon::Outline),
+        A::new("bigger", "Letra maior", Icon::ZoomIn),
+        A::new("smaller", "Letra menor", Icon::ZoomOut),
+        A::new("save", "Salvar", Icon::Save),
+        A::new("open", "Abrir", Icon::FolderOpen),
+        A::new("new", "Novo", Icon::Plus),
+        A::new("voice", "Abrir no PawVoice", Icon::Mic),
+        A::new("copy_speech", "Copiar só a fala", Icon::Copy),
+    ]
 }
 
 fn char_of_byte(text: &str, byte: usize) -> usize {
@@ -215,6 +248,7 @@ impl WriteApp {
             find: None,
             reading: None,
             jump: None,
+            after_save: None,
             cursor: 0,
             analysis: core::Analysis::default(),
             analyzed: String::new(),
@@ -224,7 +258,142 @@ impl WriteApp {
             last_title: String::new(),
             screenshot: None,
             frames: 0,
+            radial: paw_ui::radial::Radial::load(
+                if cfg!(test) {
+                    None
+                } else {
+                    Some(config_dir().join("radial.json"))
+                },
+                RADIAL_DEFAULTS,
+            ),
         }
+    }
+
+    /// Põe `text` no começo da linha do cursor (marcadores de seção, nota e comentário).
+    fn insert_line(&mut self, text: &str) {
+        let at = self.cursor.min(self.text.len());
+        let line_start = self.text[..at].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = self.text[at..]
+            .find('\n')
+            .map_or(self.text.len(), |i| at + i);
+        let empty = self.text[line_start..line_end].trim().is_empty();
+        // Linha vazia: escreve ali; senão abre uma linha nova embaixo.
+        let (pos, insert) = if empty {
+            (line_start, text.to_string())
+        } else {
+            (line_end, format!("\n{text}"))
+        };
+        self.text.insert_str(pos, &insert);
+        let end = char_of_byte(&self.text, pos + insert.len());
+        self.cursor = pos + insert.len();
+        self.jump = Some((end, end));
+    }
+
+    /// Executa uma ação escolhida na roda de atalhos.
+    fn run_radial(&mut self, ctx: &egui::Context, id: &str) {
+        let font = |s: &mut Settings, d: f32| s.font_size = (s.font_size + d).clamp(10.0, 40.0);
+        match id {
+            "heading" => self.insert_line("# "),
+            "note" => self.insert_line("[B-roll: ]"),
+            "comment" => self.insert_line("// "),
+            "find" => self.open_find(false),
+            "replace" => self.open_find(true),
+            "reading" => self.toggle_reading(),
+            "outline" => {
+                self.settings.outline = !self.settings.outline;
+                self.save_settings();
+            }
+            "bigger" => {
+                font(&mut self.settings, 1.0);
+                self.save_settings();
+            }
+            "smaller" => {
+                font(&mut self.settings, -1.0);
+                self.save_settings();
+            }
+            "save" => self.save(),
+            "open" => self.guard(Then::Open),
+            "new" => self.guard(Then::New),
+            "voice" => self.open_in_voice(),
+            "copy_speech" => {
+                ctx.copy_text(core::spoken(&self.text));
+                self.say("Fala copiada");
+            }
+            _ => {}
+        }
+    }
+
+    /// Barra de ferramentas com os ícones da suíte (a mesma altura das barras dos outros apps).
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        use paw_ui::icons::{self, Icon};
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let b = |ui: &mut egui::Ui, icon, on, tip: &str| {
+                icons::button(ui, icon, 16.0, on, tip).clicked()
+            };
+            if b(ui, Icon::Plus, false, "Novo (Ctrl+N)") {
+                self.guard(Then::New);
+            }
+            if b(ui, Icon::FolderOpen, false, "Abrir (Ctrl+O)") {
+                self.guard(Then::Open);
+            }
+            if b(ui, Icon::Save, false, "Salvar (Ctrl+S)") {
+                self.save();
+            }
+            ui.separator();
+            if b(ui, Icon::Search, self.find.is_some(), "Localizar (Ctrl+F)") {
+                self.open_find(false);
+            }
+            if b(
+                ui,
+                Icon::Text,
+                false,
+                "Nova seção: começa a linha com # (aparece na Estrutura)",
+            ) {
+                self.insert_line("# ");
+            }
+            if b(
+                ui,
+                Icon::Keyframe,
+                false,
+                "Nota de edição [B-roll: …] (não conta no tempo)",
+            ) {
+                self.insert_line("[B-roll: ]");
+            }
+            ui.separator();
+            if b(
+                ui,
+                Icon::Outline,
+                self.settings.outline,
+                "Estrutura e tempo (Ctrl+\\)",
+            ) {
+                self.settings.outline = !self.settings.outline;
+                self.save_settings();
+            }
+            if b(
+                ui,
+                Icon::Book,
+                self.reading.is_some(),
+                "Modo leitura / teleprompter (F5)",
+            ) {
+                self.toggle_reading();
+            }
+            if b(ui, Icon::ZoomOut, false, "Letra menor (Ctrl+-)") {
+                self.settings.font_size = (self.settings.font_size - 1.0).max(10.0);
+                self.save_settings();
+            }
+            if b(ui, Icon::ZoomIn, false, "Letra maior (Ctrl++)") {
+                self.settings.font_size = (self.settings.font_size + 1.0).min(40.0);
+                self.save_settings();
+            }
+            ui.separator();
+            let has = !core::spoken(&self.text).is_empty();
+            ui.add_enabled_ui(has, |ui| {
+                if b(ui, Icon::Mic, false, "Abrir no PawVoice (teleprompter)") {
+                    self.open_in_voice();
+                }
+            });
+        });
     }
 
     fn dirty(&self) -> bool {
@@ -328,6 +497,8 @@ impl WriteApp {
         };
         let (purpose, _) = self.file.take().expect("janela aberta");
         let Some(mut path) = result else {
+            // Cancelou o "Salvar como": a ação que dependia dele (sair, novo, abrir) também cai.
+            self.after_save = None;
             return;
         };
         match purpose {
@@ -337,6 +508,13 @@ impl WriteApp {
                     path.set_extension("md");
                 }
                 self.save_to(path);
+                // "Salvar" no diálogo de mudanças pendentes de um roteiro sem nome: agora que
+                // salvou, segue com o que o usuário queria (sair, novo, abrir).
+                if let Some(then) = self.after_save.take()
+                    && !self.dirty()
+                {
+                    self.run(then);
+                }
             }
             Purpose::ExportSrt => {
                 if path.extension().is_none() {
@@ -484,8 +662,10 @@ impl WriteApp {
         let offset = r.offset;
         let exit = ui.input(|i| i.key_pressed(Key::Escape) || i.key_pressed(Key::F5));
         ui.painter().rect_filled(ui.max_rect(), 0.0, Color32::BLACK);
-        let w = ui.available_width().min(980.0);
-        let margin = (ui.available_width() - w) / 2.0;
+        // Sempre com uma margem: em janela estreita o texto não encosta na borda.
+        let w = (ui.available_width() - 48.0).clamp(100.0, 980.0);
+        let margin = ((ui.available_width() - w) / 2.0).max(24.0);
+        let area = ui.max_rect();
         egui::ScrollArea::vertical()
             .vertical_scroll_offset(offset)
             .auto_shrink(false)
@@ -501,16 +681,26 @@ impl WriteApp {
                 });
                 ui.add_space(ui.available_height() + 600.0);
             });
-        egui::Area::new(egui::Id::new("reading-hint")).anchor(Align2::CENTER_BOTTOM, vec2(0.0, -10.0)).show(ui.ctx(), |ui| {
-            ui.label(
-                RichText::new(format!(
-                    "Espaço {} · ↑↓ velocidade ({speed:.0} px/s) · roda do mouse volta/avança · Esc sai",
-                    if playing { "pausa" } else { "começa" }
-                ))
-                .small()
-                .color(theme::TEXT_DIM),
-            );
-        });
+        // A dica fica dentro da área de leitura (ancorada na janela, ela cobria a barra de baixo).
+        egui::Area::new(egui::Id::new("reading-hint"))
+            .pivot(Align2::CENTER_BOTTOM)
+            .fixed_pos(pos2(area.center().x, area.bottom() - 10.0))
+            .show(ui.ctx(), |ui| {
+                // Fundo preto: o texto rola por baixo da dica e não pode aparecer através dela.
+                egui::Frame::new()
+                    .fill(Color32::from_black_alpha(235))
+                    .inner_margin(egui::Margin::symmetric(8, 3))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "Espaço {} · ↑↓ velocidade ({speed:.0} px/s) · roda do mouse volta/avança · Esc sai",
+                                if playing { "pausa" } else { "começa" }
+                            ))
+                            .small()
+                            .color(theme::TEXT_DIM),
+                        );
+                    });
+            });
         if exit {
             self.reading = None;
         }
@@ -688,6 +878,16 @@ impl WriteApp {
                     self.save_settings();
                 }
             });
+            ui.menu_button("Configurações", |ui| {
+                if ui
+                    .button("Roda de atalhos…")
+                    .on_hover_text("Botão do meio do mouse: segure, arraste até a ação e solte")
+                    .clicked()
+                {
+                    ui.close();
+                    self.radial.editing = true;
+                }
+            });
             ui.menu_button("Ajuda", |ui| {
                 if item(ui, "Como escrever o roteiro", "", true) {
                     ui.close();
@@ -801,9 +1001,13 @@ impl WriteApp {
         let mut replace_all = false;
         let mut close = false;
         if let Some(f) = &mut self.find {
-            ui.horizontal(|ui| {
+            // Quebra de linha em janela estreita: os botões não saem da tela.
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Localizar");
-                let r = ui.add(egui::TextEdit::singleline(&mut f.needle).desired_width(200.0));
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut f.needle)
+                        .desired_width(theme::fit_width(ui, 200.0)),
+                );
                 if f.focus {
                     r.request_focus();
                     f.focus = false;
@@ -817,7 +1021,10 @@ impl WriteApp {
                 }
                 if f.replace {
                     ui.label("por");
-                    ui.add(egui::TextEdit::singleline(&mut f.with).desired_width(160.0));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut f.with)
+                            .desired_width(theme::fit_width(ui, 160.0)),
+                    );
                     if ui.button("Trocar todos").clicked() {
                         replace_all = true;
                     }
@@ -843,7 +1050,11 @@ impl WriteApp {
             egui::Frame::new()
                 .fill(theme::BAR)
                 .inner_margin(egui::Margin::symmetric(10, 6))
-                .show(ui, |ui| self.find_bar(ui));
+                .show(ui, |ui| {
+                    // A barra ocupa a largura toda (a moldura só cobria o conteúdo).
+                    ui.set_width(ui.available_width());
+                    self.find_bar(ui)
+                });
         }
         let size = self.settings.font_size;
         let id = egui::Id::new("editor");
@@ -913,7 +1124,8 @@ impl WriteApp {
                 .small()
                 .strong(),
             );
-            if cue_words > 0 {
+            // Em janela estreita a nota não cabe junto de Meta e Ritmo: some em vez de encostar neles.
+            if cue_words > 0 && ui.available_width() > 640.0 {
                 ui.label(
                     RichText::new(format!("{cue_words} palavras em [notas] fora do tempo"))
                         .small()
@@ -946,8 +1158,9 @@ impl WriteApp {
                     ui.label(RichText::new("não salvo").small().color(theme::TEXT_DIM));
                 }
                 let mut w = self.settings.wpm;
-                if ui
-                    .add(
+                // Largura fixa: o campo não encolhe e cresce com os dígitos (60 a 300).
+                if theme::fixed_width(ui, 118.0, |ui| {
+                    ui.add(
                         egui::DragValue::new(&mut w)
                             .range(60.0..=300.0)
                             .speed(1.0)
@@ -955,15 +1168,15 @@ impl WriteApp {
                     )
                     .on_hover_text("Seu ritmo de fala: 130 devagar · 150 normal · 180 rápido")
                     .changed()
-                {
+                }) {
                     self.settings.wpm = w;
                     self.save_settings();
                 }
                 ui.label(RichText::new("Ritmo").small().color(theme::TEXT_DIM));
                 ui.add_space(14.0);
                 let mut t = self.settings.target_min;
-                if ui
-                    .add(
+                if theme::fixed_width(ui, 72.0, |ui| {
+                    ui.add(
                         egui::DragValue::new(&mut t)
                             .range(0.0..=180.0)
                             .speed(0.1)
@@ -972,7 +1185,7 @@ impl WriteApp {
                     )
                     .on_hover_text("Duração que o vídeo deve ter (0 desliga a meta)")
                     .changed()
-                {
+                }) {
                     self.settings.target_min = t;
                     self.save_settings();
                 }
@@ -986,7 +1199,7 @@ impl WriteApp {
             return;
         };
         let title = match &dialog {
-            Dialog::Unsaved(_) => "Mudanças não salvas",
+            Dialog::Unsaved(_) | Dialog::UnsavedDrop(_) => "Mudanças não salvas",
             Dialog::Recover { .. } => "Recuperação automática",
             Dialog::Syntax => "Como escrever o roteiro",
         };
@@ -1000,15 +1213,15 @@ impl WriteApp {
                 Dialog::Unsaved(then) => {
                     let then = *then;
                     ui.label("O roteiro tem mudanças que não foram salvas.");
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Salvar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Salvar").clicked() {
                             keep = false;
                             action = Some(Box::new(move |me| {
                                 if me.path.is_some() {
                                     me.save();
                                     me.run(then);
                                 } else {
+                                    me.after_save = Some(then);
                                     me.save();
                                 }
                             }));
@@ -1022,12 +1235,31 @@ impl WriteApp {
                         }
                     });
                 }
+                Dialog::UnsavedDrop(path) => {
+                    ui.label("O roteiro tem mudanças que não foram salvas.");
+                    ui.label(
+                        RichText::new(format!(
+                            "Abrir {} descarta o que está na tela.",
+                            path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())
+                        ))
+                        .weak(),
+                    );
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Descartar e abrir").clicked() {
+                            keep = false;
+                            let path = path.clone();
+                            action = Some(Box::new(move |me| me.open_path(&path)));
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
                 Dialog::Recover { text, path } => {
                     ui.label("Da última vez o app fechou antes de você salvar.");
                     ui.label(RichText::new(format!("{} palavras de texto", core::count_words(text))).weak());
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Recuperar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Recuperar").clicked() {
                             keep = false;
                             let (text, path) = (text.clone(), path.clone());
                             action = Some(Box::new(move |me| {
@@ -1060,6 +1292,12 @@ impl WriteApp {
                     }
                 }
             });
+        // Esc cancela. Na recuperação não: ali a saída é Recuperar ou Descartar (que apaga o texto).
+        if !matches!(dialog, Dialog::Recover { .. })
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            keep = false;
+        }
         if keep {
             self.dialog = Some(dialog);
         }
@@ -1080,9 +1318,13 @@ impl WriteApp {
                 .collect()
         });
         if let Some(p) = dropped.first() {
-            self.open_path(p);
+            if self.dirty() {
+                self.dialog = Some(Dialog::UnsavedDrop(p.clone()));
+            } else {
+                self.open_path(p);
+            }
         }
-        if self.dialog.is_none() {
+        if self.dialog.is_none() && !self.radial.is_open() {
             self.shortcuts(&ctx);
         }
         if self.analyzed != self.text {
@@ -1119,6 +1361,12 @@ impl WriteApp {
         egui::Panel::top("menu")
             .frame(bar(theme::BG_DARK))
             .show(ui, |ui| self.menu_bar(ui));
+        if self.reading.is_none() {
+            egui::Panel::top("toolbar")
+                .exact_size(34.0)
+                .frame(bar(theme::BAR))
+                .show(ui, |ui| self.toolbar(ui));
+        }
         egui::Panel::bottom("status")
             .exact_size(24.0)
             .frame(bar(theme::BG_DARK))
@@ -1144,6 +1392,10 @@ impl WriteApp {
                 }
             });
         self.dialogs(&ctx);
+        let catalog = radial_catalog();
+        if let Some(id) = self.radial.show(&ctx, &catalog) {
+            self.run_radial(&ctx, &id);
+        }
         self.toasts.tick(&ctx);
         self.toasts.ui(&ctx);
     }
@@ -1187,6 +1439,7 @@ impl eframe::App for WriteApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn char_and_byte_positions_round_trip_with_accents() {
@@ -1224,6 +1477,165 @@ mod tests {
         assert_eq!(app.jump, Some((0, 4)));
         app.replace_all();
         assert_eq!(app.text, "cão e cão");
+    }
+
+    /// Arquivo solto na janela, para os testes.
+    #[derive(Debug)]
+    struct Dropped(PathBuf);
+
+    impl egui::DroppedFile for Dropped {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+
+    #[test]
+    fn wheel_inserts_markers_on_the_cursor_line_and_every_action_is_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = WriteApp::empty(Settings::default());
+        app.data = dir.path().join("dados");
+        app.text = "Primeira linha\n\nTerceira".into();
+        // Cursor na linha vazia: o marcador entra ali.
+        app.cursor = "Primeira linha\n".len();
+        app.insert_line("# ");
+        assert_eq!(app.text, "Primeira linha\n# \nTerceira");
+        // Cursor no meio de uma linha com texto: abre uma linha nova embaixo.
+        app.cursor = 3;
+        app.insert_line("[B-roll: ]");
+        assert_eq!(app.text, "Primeira linha\n[B-roll: ]\n# \nTerceira");
+        // Botão do meio + arrastar para cima: "Nova seção" (roda padrão) no fim do texto.
+        app.cursor = app.text.len();
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut t = 0.0;
+        let mut frame = |app: &mut WriteApp, events: Vec<egui::Event>| {
+            t += 0.05;
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    pos2(0.0, 0.0),
+                    vec2(1100.0, 700.0),
+                )),
+                time: Some(t),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |ui| app.frame(ui))
+                .drop_without_applying_deltas();
+        };
+        let c = pos2(600.0, 350.0);
+        let mid = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Middle,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        frame(&mut app, vec![egui::Event::PointerMoved(c)]);
+        frame(&mut app, vec![mid(c, true)]);
+        let up = c + vec2(0.0, -90.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(up)]);
+        frame(&mut app, vec![mid(up, false)]);
+        assert!(app.text.ends_with("Terceira\n# "), "{:?}", app.text);
+        for a in radial_catalog() {
+            if matches!(a.id.as_str(), "save" | "open" | "new" | "voice") {
+                continue;
+            }
+            app.run_radial(&ctx, &a.id);
+        }
+    }
+
+    #[test]
+    fn a_dropped_file_over_unsaved_text_asks_before_replacing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("outro.md");
+        std::fs::write(&other, "# Outro\ntexto").unwrap();
+        let mut app = WriteApp::empty(Settings::default());
+        app.data = dir.path().join("dados");
+        app.text = "meu texto que ainda não foi salvo".into();
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let input = egui::RawInput {
+            dropped_files: vec![Arc::new(Dropped(other.clone()))],
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| app.frame(ui));
+        out.drop_without_applying_deltas();
+        assert!(matches!(app.dialog, Some(Dialog::UnsavedDrop(_))));
+        assert_eq!(app.text, "meu texto que ainda não foi salvo");
+        // Sem mudanças pendentes, abre direto.
+        app.dialog = None;
+        app.saved = app.text.clone();
+        let input = egui::RawInput {
+            dropped_files: vec![Arc::new(Dropped(other))],
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| app.frame(ui));
+        out.drop_without_applying_deltas();
+        assert!(app.dialog.is_none());
+        assert!(app.text.starts_with("# Outro"));
+    }
+
+    #[test]
+    fn saving_a_nameless_script_from_the_unsaved_dialog_goes_on_with_quit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = WriteApp::empty(Settings::default());
+        app.data = dir.path().join("dados");
+        app.text = "roteiro novo".into();
+        // O usuário escolheu "Salvar" ao sair; sem nome, abriu o "Salvar como".
+        app.after_save = Some(Then::Quit);
+        let (tx, rx) = channel();
+        app.file = Some((Purpose::SaveAs, rx));
+        tx.send(Some(dir.path().join("novo.md"))).unwrap();
+        app.poll_file();
+        assert!(!app.dirty(), "salvou");
+        assert!(app.allow_close, "e seguiu com o que queria (sair)");
+        // Se cancelar o "Salvar como", a saída também é cancelada.
+        let mut app = WriteApp::empty(Settings::default());
+        app.data = dir.path().join("dados2");
+        app.text = "outro".into();
+        app.after_save = Some(Then::Quit);
+        let (tx, rx) = channel();
+        app.file = Some((Purpose::SaveAs, rx));
+        tx.send(None).unwrap();
+        app.poll_file();
+        assert!(!app.allow_close && app.after_save.is_none());
+    }
+
+    /// Largura que o editor ocupa numa janela de `width` x 480, depois de alguns quadros.
+    fn editor_width_in(width: f32) -> f32 {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = WriteApp::empty(Settings::default());
+        app.data = dir.path().to_path_buf();
+        app.text = "# Intro\n".to_string() + &"palavra ".repeat(300);
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, 480.0),
+            )),
+            ..Default::default()
+        };
+        for _ in 0..4 {
+            let out = ctx.run_ui(input.clone(), |ui| app.frame(ui));
+            out.drop_without_applying_deltas();
+        }
+        ctx.read_response(egui::Id::new("editor"))
+            .expect("editor desenhado")
+            .rect
+            .width()
+    }
+
+    #[test]
+    fn the_editor_column_fits_a_narrow_window() {
+        // Janela mínima (720 px): a estrutura ocupa 270 e o texto precisa caber no resto.
+        let w = editor_width_in(720.0);
+        assert!(w <= 720.0 - 270.0, "editor com {w} px numa janela de 720");
+        // E em janela larga a coluna fica limitada.
+        assert!(editor_width_in(1600.0) <= COLUMN_W + 1.0);
     }
 
     /// Desenha a janela inteira (estrutura, editor, busca, ajuda) sem travar.

@@ -33,7 +33,13 @@ pub const ICON: f32 = 16.0;
 pub const ROW_H: f32 = 24.0;
 /// Colunas do Inspector.
 pub const LABEL_W: f32 = 104.0;
+/// Menor largura da coluna de rótulos quando o painel fica estreito.
+pub const LABEL_MIN_W: f32 = 60.0;
+/// Largura mínima que um painel de propriedades aguenta sem cortar campos.
+pub const PROPS_MIN_W: f32 = 260.0;
 pub const VALUE_W: f32 = 84.0;
+/// Largura de um campo numérico solto (fora do Inspector), com ou sem sufixo.
+pub const NUM_W: f32 = 64.0;
 
 pub fn mono(size: f32) -> FontId {
     FontId::monospace(size)
@@ -80,6 +86,7 @@ pub fn apply(ctx: &egui::Context) {
         style.spacing.item_spacing = egui::vec2(8.0, 4.0);
         style.spacing.button_padding = egui::vec2(8.0, 3.0);
         style.spacing.interact_size = egui::vec2(40.0, 22.0);
+        style.spacing.slider_width = crate::slider::RAIL_W;
         style.spacing.window_margin = Margin::same(12);
         style.spacing.menu_margin = Margin::same(6);
         let v = &mut style.visuals;
@@ -235,7 +242,10 @@ pub fn row(
     extras: impl FnOnce(&mut egui::Ui),
 ) {
     let full = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), ROW_H));
-    let label_rect = egui::Rect::from_min_size(full.min, egui::vec2(LABEL_W, ROW_H));
+    // Painel estreito: quem cede primeiro é a coluna do rótulo, nunca o campo de valor.
+    let extras_w = 48.0;
+    let label_w = (full.width() - PAD - VALUE_W - extras_w - 4.0).clamp(LABEL_MIN_W, LABEL_W);
+    let label_rect = egui::Rect::from_min_size(full.min, egui::vec2(label_w, ROW_H));
     // Rótulo desenhado à mão; o widget invisível deixa ele acessível (leitor de tela, testes).
     if !label.is_empty() {
         ui.interact(
@@ -245,17 +255,20 @@ pub fn row(
         )
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label));
     }
-    ui.painter().text(
+    // Recortado na própria coluna: rótulo comprido não invade o painel vizinho.
+    ui.painter_at(label_rect).text(
         label_rect.right_center() - egui::vec2(4.0, 0.0),
         egui::Align2::RIGHT_CENTER,
         label,
         text(12.0),
         TEXT_DIM,
     );
-    let extras_w = 48.0;
     let value_rect = egui::Rect::from_min_max(
         egui::pos2(label_rect.right() + PAD, full.top()),
-        egui::pos2(full.right() - extras_w - 4.0, full.bottom()),
+        egui::pos2(
+            (full.right() - extras_w - 4.0).max(label_rect.right() + PAD),
+            full.bottom(),
+        ),
     );
     ui.scope_builder(
         egui::UiBuilder::new()
@@ -279,4 +292,59 @@ pub fn row(
     );
     ui.advance_cursor_after_rect(full);
     ui.add_space(2.0);
+}
+
+/// Roda `add` com largura mínima fixa para campos (`DragValue`, `TextEdit`, `ComboBox`).
+/// Sem isso o `DragValue` cresce e encolhe conforme os dígitos e o sufixo, e o layout pula
+/// enquanto o valor é arrastado ou digitado.
+pub fn fixed_width<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.x = width;
+        add(ui)
+    })
+    .inner
+}
+
+/// Botão da ação principal de um diálogo (Aplicar, Criar, Exportar): laranja, como no Resolve.
+pub fn primary_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let enabled = ui.is_enabled();
+    ui.add(
+        egui::Button::new(egui::RichText::new(text).strong().color(if enabled {
+            Color32::WHITE
+        } else {
+            TEXT_DIM
+        }))
+        .fill(if enabled {
+            ACCENT.gamma_multiply(0.85)
+        } else {
+            BAR_LIGHT
+        })
+        .min_size(egui::vec2(84.0, 24.0)),
+    )
+}
+
+/// Linha de botões no pé de um diálogo: alinhados à direita, a ação principal na ponta (a
+/// primeira adicionada fica mais à direita) e uma linha fina separando do conteúdo.
+pub fn dialog_actions<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.add_space(6.0);
+    let w = ui.available_width().max(260.0);
+    let (line, _) = ui.allocate_exact_size(egui::vec2(w, 1.0), egui::Sense::hover());
+    ui.painter().rect_filled(line, 0.0, BORDER);
+    ui.add_space(6.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(w, 26.0),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().button_padding = egui::vec2(12.0, 3.0);
+            add(ui)
+        },
+    )
+    .inner
+}
+
+/// Largura para um campo de texto/combo: a desejada, mas nunca mais do que cabe no espaço
+/// que sobrou (em painéis estreitos o campo encolhe em vez de vazar para fora da linha).
+pub fn fit_width(ui: &egui::Ui, wanted: f32) -> f32 {
+    wanted.min(ui.available_width()).max(24.0)
 }

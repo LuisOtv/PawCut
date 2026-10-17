@@ -1,7 +1,8 @@
 //! Filtros de imagem aplicados numa camada (dentro da seleção, se houver).
 
+use crate::par;
 use crate::selection::Selection;
-use crate::tile::{TiledImage, premultiply, unpremultiply};
+use crate::tile::{TILE, TiledImage, premultiply, unpremultiply};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Filter {
@@ -159,58 +160,121 @@ fn from_hsl(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
     (f(hh + 1.0 / 3.0), f(hh), f(hh - 1.0 / 3.0))
 }
 
-/// Desfoque de caixa em três passadas por canal (parece gaussiano), em alfa pré-multiplicado.
+/// Roda `f(índice, pixel)` em todos os pixels, dividido entre os núcleos.
+fn map_pixels(buf: &mut Buf, f: impl Fn(usize, &mut [f32; 4]) + Sync) {
+    par::rows(buf, 1, |first, chunk| {
+        for (i, p) in chunk.iter_mut().enumerate() {
+            f(first + i, p);
+        }
+    });
+}
+
+/// Passada horizontal do desfoque de caixa: média móvel de `2r+1` pixels em cada linha (fora da
+/// imagem conta como transparente).
+fn blur_rows(src: &[[f32; 4]], dst: &mut [[f32; 4]], w: usize, r: usize) {
+    let inv = 1.0 / (2 * r + 1) as f32;
+    par::rows(dst, w, |row0, chunk| {
+        for (i, out) in chunk.chunks_mut(w).enumerate() {
+            let row = &src[(row0 + i) * w..(row0 + i + 1) * w];
+            let mut sum = [0.0f32; 4];
+            for p in &row[..=r.min(w - 1)] {
+                for c in 0..4 {
+                    sum[c] += p[c];
+                }
+            }
+            for x in 0..w {
+                for c in 0..4 {
+                    out[x][c] = sum[c] * inv;
+                }
+                if x + r + 1 < w {
+                    for c in 0..4 {
+                        sum[c] += row[x + r + 1][c];
+                    }
+                }
+                if x >= r {
+                    for c in 0..4 {
+                        sum[c] -= row[x - r][c];
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Passada vertical, linha a linha (somas de uma linha inteira de cada vez: anda na memória em
+/// ordem, em vez de pular de linha em linha por coluna, que era o que deixava o desfoque lento).
+/// Cada thread começa a média do seu primeiro pixel do zero, então os pedaços não dependem entre si.
+fn blur_cols(src: &[[f32; 4]], dst: &mut [[f32; 4]], w: usize, h: usize, r: usize) {
+    let inv = 1.0 / (2 * r + 1) as f32;
+    par::rows(dst, w, |row0, chunk| {
+        let mut sum = vec![[0.0f32; 4]; w];
+        for y in row0.saturating_sub(r)..=(row0 + r).min(h - 1) {
+            for (s, p) in sum.iter_mut().zip(&src[y * w..(y + 1) * w]) {
+                for c in 0..4 {
+                    s[c] += p[c];
+                }
+            }
+        }
+        for (i, out) in chunk.chunks_mut(w).enumerate() {
+            let y = row0 + i;
+            for (o, s) in out.iter_mut().zip(&sum) {
+                for c in 0..4 {
+                    o[c] = s[c] * inv;
+                }
+            }
+            if y + r + 1 < h {
+                for (s, p) in sum.iter_mut().zip(&src[(y + r + 1) * w..(y + r + 2) * w]) {
+                    for c in 0..4 {
+                        s[c] += p[c];
+                    }
+                }
+            }
+            if y >= r {
+                for (s, p) in sum.iter_mut().zip(&src[(y - r) * w..(y - r + 1) * w]) {
+                    for c in 0..4 {
+                        s[c] -= p[c];
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Desfoque de caixa em três passadas (parece gaussiano), em alfa pré-multiplicado, no próprio
+/// `buf` (só mais um buffer temporário).
 fn blur(buf: &mut Buf, w: usize, h: usize, sigma: f32) {
     let r = (sigma * 1.2).round().max(1.0) as usize;
-    let mut premult: Buf = buf
-        .iter()
-        .map(|p| [p[0] * p[3], p[1] * p[3], p[2] * p[3], p[3]])
-        .collect();
-    let mut tmp = premult.clone();
-    for _ in 0..3 {
-        for y in 0..h {
-            for c in 0..4 {
-                let mut sum = 0.0;
-                for x in 0..=r.min(w - 1) {
-                    sum += premult[y * w + x][c];
-                }
-                for x in 0..w {
-                    tmp[y * w + x][c] = sum / (2 * r + 1) as f32;
-                    if x + r + 1 < w {
-                        sum += premult[y * w + x + r + 1][c];
-                    }
-                    if x >= r {
-                        sum -= premult[y * w + x - r][c];
-                    }
-                }
-            }
-        }
-        for x in 0..w {
-            for c in 0..4 {
-                let mut sum = 0.0;
-                for y in 0..=r.min(h - 1) {
-                    sum += tmp[y * w + x][c];
-                }
-                for y in 0..h {
-                    premult[y * w + x][c] = sum / (2 * r + 1) as f32;
-                    if y + r + 1 < h {
-                        sum += tmp[(y + r + 1) * w + x][c];
-                    }
-                    if y >= r {
-                        sum -= tmp[(y - r) * w + x][c];
-                    }
-                }
-            }
-        }
-    }
-    for (o, p) in buf.iter_mut().zip(&premult) {
+    map_pixels(buf, |_, p| {
         let a = p[3];
-        *o = if a > 1e-4 {
+        p[0] *= a;
+        p[1] *= a;
+        p[2] *= a;
+    });
+    let mut tmp: Buf = vec![[0.0; 4]; buf.len()];
+    for _ in 0..3 {
+        blur_rows(buf, &mut tmp, w, r);
+        blur_cols(&tmp, buf, w, h, r);
+    }
+    map_pixels(buf, |_, p| {
+        let a = p[3];
+        *p = if a > 1e-4 {
             [p[0] / a, p[1] / a, p[2] / a, a]
         } else {
             [0.0; 4]
         };
-    }
+    });
+}
+
+/// Número pseudo-aleatório de 0 a 1 que só depende da posição (assim o ruído é igual não importa
+/// como o trabalho foi dividido entre as threads).
+fn hash01(i: usize) -> f32 {
+    let mut x = (i as u32).wrapping_mul(0x9E37_79B9) ^ 0x85EB_CA6B;
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x2C1B_3C6D);
+    x ^= x >> 12;
+    x = x.wrapping_mul(0x297A_2D39);
+    x ^= x >> 15;
+    (x >> 8) as f32 / 16_777_216.0
 }
 
 fn run(f: &Filter, buf: &mut Buf, w: usize, h: usize) {
@@ -221,18 +285,18 @@ fn run(f: &Filter, buf: &mut Buf, w: usize, h: usize) {
         } => {
             let c = contrast.clamp(-0.99, 0.99);
             let k = (1.0 + c) / (1.0 - c);
-            for p in buf.iter_mut() {
+            map_pixels(buf, |_, p| {
                 for v in &mut p[..3] {
                     *v = ((*v - 0.5) * k + 0.5 + brightness * 0.5).clamp(0.0, 1.0);
                 }
-            }
+            });
         }
         Filter::HueSaturation {
             hue,
             saturation,
             lightness,
         } => {
-            for p in buf.iter_mut() {
+            map_pixels(buf, |_, p| {
                 let (hh, s, l) = to_hsl(p[0], p[1], p[2]);
                 let s2 = if *saturation >= 0.0 {
                     s + (1.0 - s) * saturation
@@ -250,35 +314,29 @@ fn run(f: &Filter, buf: &mut Buf, w: usize, h: usize) {
                     l2.clamp(0.0, 1.0),
                 );
                 p[..3].copy_from_slice(&[r, g, b]);
-            }
+            });
         }
-        Filter::Invert => {
-            for p in buf.iter_mut() {
-                for v in &mut p[..3] {
-                    *v = 1.0 - *v;
-                }
+        Filter::Invert => map_pixels(buf, |_, p| {
+            for v in &mut p[..3] {
+                *v = 1.0 - *v;
             }
-        }
-        Filter::Desaturate => {
-            for p in buf.iter_mut() {
-                let l = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
-                p[..3].copy_from_slice(&[l, l, l]);
-            }
-        }
-        Filter::Threshold(t) => {
-            for p in buf.iter_mut() {
-                let l = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
-                let v = if l >= *t { 1.0 } else { 0.0 };
-                p[..3].copy_from_slice(&[v, v, v]);
-            }
-        }
+        }),
+        Filter::Desaturate => map_pixels(buf, |_, p| {
+            let l = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+            p[..3].copy_from_slice(&[l, l, l]);
+        }),
+        Filter::Threshold(t) => map_pixels(buf, |_, p| {
+            let l = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+            let v = if l >= *t { 1.0 } else { 0.0 };
+            p[..3].copy_from_slice(&[v, v, v]);
+        }),
         Filter::Posterize(n) => {
             let n = (*n).clamp(2, 64) as f32 - 1.0;
-            for p in buf.iter_mut() {
+            map_pixels(buf, |_, p| {
                 for v in &mut p[..3] {
                     *v = (*v * n).round() / n;
                 }
-            }
+            });
         }
         Filter::Levels {
             black,
@@ -286,99 +344,114 @@ fn run(f: &Filter, buf: &mut Buf, w: usize, h: usize) {
             gamma,
         } => {
             let span = (white - black).max(1e-3);
-            for p in buf.iter_mut() {
+            let inv_gamma = 1.0 / gamma.clamp(0.1, 4.0);
+            map_pixels(buf, |_, p| {
                 for v in &mut p[..3] {
-                    *v = ((*v - black) / span)
-                        .clamp(0.0, 1.0)
-                        .powf(1.0 / gamma.clamp(0.1, 4.0));
+                    *v = ((*v - black) / span).clamp(0.0, 1.0).powf(inv_gamma);
                 }
-            }
+            });
         }
         Filter::Curves(points) => {
             let lut = curve_lut(points);
-            for p in buf.iter_mut() {
+            map_pixels(buf, |_, p| {
                 for v in &mut p[..3] {
                     *v = lut[(*v * 255.0).round().clamp(0.0, 255.0) as usize];
                 }
-            }
+            });
         }
         Filter::GaussianBlur(r) => blur(buf, w, h, r.max(0.1)),
         Filter::Sharpen { amount, radius } => {
             let mut soft = buf.clone();
             blur(&mut soft, w, h, radius.max(0.3));
-            for (p, s) in buf.iter_mut().zip(&soft) {
-                for c in 0..3 {
-                    p[c] = (p[c] + (p[c] - s[c]) * amount).clamp(0.0, 1.0);
+            par::rows(buf, 1, |first, chunk| {
+                for (p, s) in chunk.iter_mut().zip(&soft[first..]) {
+                    for c in 0..3 {
+                        p[c] = (p[c] + (p[c] - s[c]) * amount).clamp(0.0, 1.0);
+                    }
                 }
-            }
+            });
         }
         Filter::Pixelate(size) => {
             let s = (*size).max(2) as usize;
-            for by in (0..h).step_by(s) {
-                for bx in (0..w).step_by(s) {
-                    let mut acc = [0.0f32; 4];
-                    let mut n = 0.0;
-                    let (ye, xe) = ((by + s).min(h), (bx + s).min(w));
-                    for y in by..ye {
-                        for x in bx..xe {
-                            let p = buf[y * w + x];
-                            acc[0] += p[0] * p[3];
-                            acc[1] += p[1] * p[3];
-                            acc[2] += p[2] * p[3];
-                            acc[3] += p[3];
-                            n += 1.0;
+            // Faixas de blocos inteiros: cada thread cuida de uma sequência de linhas de blocos.
+            par::rows(buf, w * s, |_, chunk| {
+                let rows = chunk.len() / w;
+                for by in (0..rows).step_by(s) {
+                    for bx in (0..w).step_by(s) {
+                        let mut acc = [0.0f32; 4];
+                        let mut n = 0.0;
+                        let (ye, xe) = ((by + s).min(rows), (bx + s).min(w));
+                        for y in by..ye {
+                            for p in &chunk[y * w + bx..y * w + xe] {
+                                acc[0] += p[0] * p[3];
+                                acc[1] += p[1] * p[3];
+                                acc[2] += p[2] * p[3];
+                                acc[3] += p[3];
+                                n += 1.0;
+                            }
                         }
-                    }
-                    let a = acc[3];
-                    let px = if a > 0.0 {
-                        [acc[0] / a, acc[1] / a, acc[2] / a, a / n]
-                    } else {
-                        [0.0; 4]
-                    };
-                    for y in by..ye {
-                        for x in bx..xe {
-                            buf[y * w + x] = px;
+                        let a = acc[3];
+                        let px = if a > 0.0 {
+                            [acc[0] / a, acc[1] / a, acc[2] / a, a / n]
+                        } else {
+                            [0.0; 4]
+                        };
+                        for y in by..ye {
+                            chunk[y * w + bx..y * w + xe].fill(px);
                         }
                     }
                 }
-            }
+            });
         }
-        Filter::Noise(amount) => {
-            let mut seed = 12345u32;
-            for p in buf.iter_mut() {
-                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                let n = ((seed >> 8) as f32 / 16_777_216.0 - 0.5) * amount;
-                for v in &mut p[..3] {
-                    *v = (*v + n).clamp(0.0, 1.0);
-                }
+        Filter::Noise(amount) => map_pixels(buf, |i, p| {
+            let n = (hash01(i) - 0.5) * amount;
+            for v in &mut p[..3] {
+                *v = (*v + n).clamp(0.0, 1.0);
             }
-        }
+        }),
         Filter::EdgeDetect => {
             let src = buf.clone();
             let lum = |x: usize, y: usize| {
                 let p = src[y.min(h - 1) * w + x.min(w - 1)];
                 (0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2]) * p[3]
             };
-            for y in 0..h {
-                for x in 0..w {
-                    let (xm, xp, ym, yp) = (x.saturating_sub(1), x + 1, y.saturating_sub(1), y + 1);
-                    let gx = -lum(xm, ym) - 2.0 * lum(xm, y) - lum(xm, yp)
-                        + lum(xp, ym)
-                        + 2.0 * lum(xp, y)
-                        + lum(xp, yp);
-                    let gy = -lum(xm, ym) - 2.0 * lum(x, ym) - lum(xp, ym)
-                        + lum(xm, yp)
-                        + 2.0 * lum(x, yp)
-                        + lum(xp, yp);
-                    let g = (gx * gx + gy * gy).sqrt().clamp(0.0, 1.0);
-                    buf[y * w + x] = [g, g, g, src[y * w + x][3].max(g)];
+            par::rows(buf, w, |row0, chunk| {
+                for (i, row) in chunk.chunks_mut(w).enumerate() {
+                    let y = row0 + i;
+                    for (x, out) in row.iter_mut().enumerate() {
+                        let (xm, xp, ym, yp) =
+                            (x.saturating_sub(1), x + 1, y.saturating_sub(1), y + 1);
+                        let gx = -lum(xm, ym) - 2.0 * lum(xm, y) - lum(xm, yp)
+                            + lum(xp, ym)
+                            + 2.0 * lum(xp, y)
+                            + lum(xp, yp);
+                        let gy = -lum(xm, ym) - 2.0 * lum(x, ym) - lum(xp, ym)
+                            + lum(xm, yp)
+                            + 2.0 * lum(x, yp)
+                            + lum(xp, yp);
+                        let g = (gx * gx + gy * gy).sqrt().clamp(0.0, 1.0);
+                        *out = [g, g, g, src[y * w + x][3].max(g)];
+                    }
                 }
-            }
+            });
         }
     }
 }
 
+fn to_f32(p: [u8; 4]) -> [f32; 4] {
+    [
+        p[0] as f32 / 255.0,
+        p[1] as f32 / 255.0,
+        p[2] as f32 / 255.0,
+        p[3] as f32 / 255.0,
+    ]
+}
+
 /// Aplica `filter` em `pixels`. Só muda o que a seleção deixa; com `alpha_lock` o alfa não muda.
+///
+/// Numa foto grande é a operação mais pesada do app, então: lê e calcula em faixas de linhas
+/// dividas entre os núcleos, não guarda uma cópia do original (relê dos blocos) e só escreve os
+/// blocos que de fato mudaram (assim o desfazer continua compartilhando os que ficaram iguais).
 pub fn apply(pixels: &mut TiledImage, filter: &Filter, sel: Option<&Selection>, alpha_lock: bool) {
     let (cw, ch) = (pixels.width(), pixels.height());
     let base = match sel {
@@ -393,41 +466,76 @@ pub fn apply(pixels: &mut TiledImage, filter: &Filter, sel: Option<&Selection>, 
     if w == 0 || h == 0 {
         return;
     }
-    let mut buf: Buf = Vec::with_capacity(w * h);
-    for y in 0..h {
-        for x in 0..w {
-            let p = unpremultiply(pixels.pixel(x0 + x, y0 + y));
-            buf.push([
-                p[0] as f32 / 255.0,
-                p[1] as f32 / 255.0,
-                p[2] as f32 / 255.0,
-                p[3] as f32 / 255.0,
-            ]);
+    let src: &TiledImage = pixels;
+    let mut buf: Buf = vec![[0.0; 4]; w * h];
+    par::rows(&mut buf, w, |row0, chunk| {
+        for (i, row) in chunk.chunks_mut(w).enumerate() {
+            let y = y0 + row0 + i;
+            for (x, out) in row.iter_mut().enumerate() {
+                *out = to_f32(unpremultiply(src.pixel(x0 + x, y)));
+            }
         }
-    }
-    let original = buf.clone();
+    });
     run(filter, &mut buf, w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let m = sel.map_or(1.0, |s| s.value(x0 + x, y0 + y) as f32 / 255.0);
-            let (o, n) = (original[y * w + x], buf[y * w + x]);
-            if alpha_lock && o[3] == 0.0 {
+    let mut out: Vec<[u8; 4]> = vec![[0; 4]; w * h];
+    let whole = sel.is_none() && !alpha_lock;
+    par::rows(&mut out, w, |row0, chunk| {
+        for (i, row) in chunk.chunks_mut(w).enumerate() {
+            let y = row0 + i;
+            for (x, px_out) in row.iter_mut().enumerate() {
+                let q = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                if whole {
+                    // Sem seleção nem trava de alfa o resultado é o do filtro, sem reler o original.
+                    let n = buf[y * w + x];
+                    *px_out = premultiply([q(n[0]), q(n[1]), q(n[2]), q(n[3])]);
+                    continue;
+                }
+                let stored = src.pixel(x0 + x, y0 + y);
+                let o = to_f32(unpremultiply(stored));
+                if alpha_lock && o[3] == 0.0 {
+                    *px_out = stored;
+                    continue;
+                }
+                let n = buf[y * w + x];
+                let m = sel.map_or(1.0, |s| s.value(x0 + x, y0 + y) as f32 / 255.0);
+                let mut mixed = [0.0f32; 4];
+                for c in 0..4 {
+                    mixed[c] = o[c] + (n[c] - o[c]) * m;
+                }
+                if alpha_lock {
+                    mixed[3] = o[3];
+                }
+                *px_out = premultiply([q(mixed[0]), q(mixed[1]), q(mixed[2]), q(mixed[3])]);
+            }
+        }
+    });
+    // Escreve bloco a bloco, só onde mudou.
+    for ty in y0 / TILE..=(y1 - 1) / TILE {
+        for tx in x0 / TILE..=(x1 - 1) / TILE {
+            let (cx0, cx1) = (x0.max(tx * TILE), x1.min((tx + 1) * TILE));
+            let (cy0, cy1) = (y0.max(ty * TILE), y1.min((ty + 1) * TILE));
+            let slot = |x: usize, y: usize| ((y % TILE) * TILE + x % TILE) * 4;
+            let changed = {
+                let old = pixels.tile(tx, ty);
+                (cy0..cy1).any(|y| {
+                    (cx0..cx1).any(|x| {
+                        let n = out[(y - y0) * w + (x - x0)];
+                        match old {
+                            Some(t) => t[slot(x, y)..slot(x, y) + 4] != n,
+                            None => n != [0; 4],
+                        }
+                    })
+                })
+            };
+            if !changed {
                 continue;
             }
-            let mut out = [0.0f32; 4];
-            for c in 0..4 {
-                out[c] = o[c] + (n[c] - o[c]) * m;
+            let t = pixels.tile_mut(tx, ty);
+            for y in cy0..cy1 {
+                for x in cx0..cx1 {
+                    t[slot(x, y)..slot(x, y) + 4].copy_from_slice(&out[(y - y0) * w + (x - x0)]);
+                }
             }
-            if alpha_lock {
-                out[3] = o[3];
-            }
-            let px = [
-                (out[0] * 255.0).round().clamp(0.0, 255.0) as u8,
-                (out[1] * 255.0).round().clamp(0.0, 255.0) as u8,
-                (out[2] * 255.0).round().clamp(0.0, 255.0) as u8,
-                (out[3] * 255.0).round().clamp(0.0, 255.0) as u8,
-            ];
-            pixels.set_pixel(x0 + x, y0 + y, premultiply(px));
         }
     }
 }
@@ -560,5 +668,188 @@ mod tests {
         }
         apply(&mut t, &Filter::EdgeDetect, None, false);
         assert!(t.pixel(15, 15)[0] > t.pixel(5, 15)[0]);
+    }
+
+    /// O desfoque original, canal por canal e uma linha por vez: serve de referência.
+    fn blur_reference(buf: &mut Buf, w: usize, h: usize, sigma: f32) {
+        let r = (sigma * 1.2).round().max(1.0) as usize;
+        let mut premult: Buf = buf
+            .iter()
+            .map(|p| [p[0] * p[3], p[1] * p[3], p[2] * p[3], p[3]])
+            .collect();
+        let mut tmp = premult.clone();
+        for _ in 0..3 {
+            for y in 0..h {
+                for c in 0..4 {
+                    let mut sum = 0.0;
+                    for x in 0..=r.min(w - 1) {
+                        sum += premult[y * w + x][c];
+                    }
+                    for x in 0..w {
+                        tmp[y * w + x][c] = sum / (2 * r + 1) as f32;
+                        if x + r + 1 < w {
+                            sum += premult[y * w + x + r + 1][c];
+                        }
+                        if x >= r {
+                            sum -= premult[y * w + x - r][c];
+                        }
+                    }
+                }
+            }
+            for x in 0..w {
+                for c in 0..4 {
+                    let mut sum = 0.0;
+                    for y in 0..=r.min(h - 1) {
+                        sum += tmp[y * w + x][c];
+                    }
+                    for y in 0..h {
+                        premult[y * w + x][c] = sum / (2 * r + 1) as f32;
+                        if y + r + 1 < h {
+                            sum += tmp[(y + r + 1) * w + x][c];
+                        }
+                        if y >= r {
+                            sum -= tmp[(y - r) * w + x][c];
+                        }
+                    }
+                }
+            }
+        }
+        for (o, p) in buf.iter_mut().zip(&premult) {
+            let a = p[3];
+            *o = if a > 1e-4 {
+                [p[0] / a, p[1] / a, p[2] / a, a]
+            } else {
+                [0.0; 4]
+            };
+        }
+    }
+
+    fn noisy(w: usize, h: usize) -> Buf {
+        (0..w * h)
+            .map(|i| {
+                [
+                    hash01(i),
+                    hash01(i + 7),
+                    hash01(i + 13),
+                    if i % 5 == 0 { 0.4 } else { 1.0 },
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn row_wise_blur_matches_the_old_column_by_column_one_single_and_multi_thread() {
+        // 90x70 roda numa thread; 700x400 (280 mil pixels) passa do limite e divide em threads.
+        for (w, h, sigma) in [
+            (90, 70, 3.0),
+            (90, 70, 40.0),
+            (700, 400, 5.0),
+            (3, 100_000, 2.0),
+        ] {
+            let mut a = noisy(w, h);
+            let mut b = a.clone();
+            blur(&mut a, w, h, sigma);
+            blur_reference(&mut b, w, h, sigma);
+            let worst = a
+                .iter()
+                .zip(&b)
+                .flat_map(|(p, q)| (0..4).map(move |c| (p[c] - q[c]).abs()))
+                .fold(0.0f32, f32::max);
+            assert!(worst < 1e-3, "{w}x{h} sigma {sigma}: diferença {worst}");
+        }
+    }
+
+    #[test]
+    fn pixelate_is_the_same_when_the_work_is_split_across_threads() {
+        // 700x400 com bloco 24: as faixas das threads têm que cair em fronteiras de bloco.
+        let (w, h, s) = (700usize, 400usize, 24usize);
+        let mut a = noisy(w, h);
+        let src = a.clone();
+        run(&Filter::Pixelate(s as u32), &mut a, w, h);
+        for (x, y) in [
+            (0, 0),
+            (23, 23),
+            (24, 24),
+            (699, 399),
+            (350, 200),
+            (100, 399),
+        ] {
+            let (bx, by) = (x / s * s, y / s * s);
+            let (mut acc, mut n) = ([0.0f32; 4], 0.0);
+            for yy in by..(by + s).min(h) {
+                for xx in bx..(bx + s).min(w) {
+                    let p = src[yy * w + xx];
+                    acc[0] += p[0] * p[3];
+                    acc[1] += p[1] * p[3];
+                    acc[2] += p[2] * p[3];
+                    acc[3] += p[3];
+                    n += 1.0;
+                }
+            }
+            let want = [
+                acc[0] / acc[3],
+                acc[1] / acc[3],
+                acc[2] / acc[3],
+                acc[3] / n,
+            ];
+            let got = a[y * w + x];
+            assert!(
+                (0..4).all(|c| (got[c] - want[c]).abs() < 1e-4),
+                "{x},{y}: {got:?} {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn noise_depends_only_on_position_and_stays_in_range() {
+        let (w, h) = (700, 400);
+        let mut a = vec![[0.5, 0.5, 0.5, 1.0]; w * h];
+        let mut b = a.clone();
+        run(&Filter::Noise(0.4), &mut a, w, h);
+        run(&Filter::Noise(0.4), &mut b, w, h);
+        assert_eq!(a, b, "mesmo ruído nas duas vezes");
+        assert!(
+            a.iter()
+                .all(|p| p[0] >= 0.3 - 1e-6 && p[0] <= 0.7 + 1e-6 && p[3] == 1.0)
+        );
+        let mean = a.iter().map(|p| p[0]).sum::<f32>() / a.len() as f32;
+        assert!((mean - 0.5).abs() < 0.01, "ruído sem viés: {mean}");
+    }
+
+    #[test]
+    fn a_filter_with_a_small_selection_leaves_the_other_blocks_shared_with_the_undo_copy() {
+        let mut t = TiledImage::new(300, 300);
+        for y in 0..300 {
+            for x in 0..300 {
+                t.set_pixel(x, y, [200, 100, 50, 255]);
+            }
+        }
+        let before = t.clone();
+        let sel = Selection::rect(300, 300, 10, 10, 70, 70);
+        apply(&mut t, &Filter::Invert, Some(&sel), false);
+        assert_eq!(t.pixel(30, 30), [55, 155, 205, 255]);
+        assert_eq!(t.pixel(200, 200), [200, 100, 50, 255]);
+        let shared =
+            |tx, ty| t.tile(tx, ty).unwrap().as_ptr() == before.tile(tx, ty).unwrap().as_ptr();
+        assert!(!shared(0, 0), "o bloco filtrado foi copiado");
+        assert!(
+            shared(4, 4) && shared(2, 3),
+            "blocos fora da seleção continuam compartilhados"
+        );
+        // Um filtro que não muda nada também não copia nada.
+        let again = t.clone();
+        apply(
+            &mut t,
+            &Filter::BrightnessContrast {
+                brightness: 0.0,
+                contrast: 0.0,
+            },
+            None,
+            false,
+        );
+        assert!(
+            (0..5).all(|k| t.tile(k, k).unwrap().as_ptr() == again.tile(k, k).unwrap().as_ptr()),
+            "filtro neutro não deve copiar blocos"
+        );
     }
 }

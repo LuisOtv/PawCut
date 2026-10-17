@@ -73,6 +73,28 @@ impl TiledImage {
         Arc::make_mut(t).as_mut_slice()
     }
 
+    /// Chama `f(identidade, bytes)` para cada bloco que existe. Blocos compartilhados entre cópias
+    /// (o desfazer) têm a mesma identidade: serve para somar a memória sem contar duas vezes.
+    pub fn visit_tiles(&self, mut f: impl FnMut(usize, usize)) {
+        for t in self.tiles.iter().flatten() {
+            f(Arc::as_ptr(t) as usize, t.len());
+        }
+    }
+
+    /// Roda `f(tx, ty, bloco)` em todos os blocos, dividindo as linhas de blocos entre os núcleos.
+    /// Cada bloco só é criado ou copiado (se compartilhado com o desfazer) quando `f` pede.
+    pub fn par_tiles_mut(&mut self, f: impl Fn(usize, usize, TileMut<'_>) + Sync) {
+        let tx = self.tx.max(1);
+        let workers = crate::par::workers_for(self.w * self.h);
+        crate::par::rows_with(workers, &mut self.tiles, tx, |first_row, chunk| {
+            for (r, row) in chunk.chunks_mut(tx).enumerate() {
+                for (c, slot) in row.iter_mut().enumerate() {
+                    f(c, first_row + r, TileMut(slot));
+                }
+            }
+        });
+    }
+
     /// Enche a imagem toda com um pixel (pré-multiplicado), bloco por bloco: bem mais rápido
     /// que pixel a pixel (usado no fundo de documentos novos).
     pub fn fill_solid(&mut self, px: [u8; 4]) {
@@ -229,6 +251,21 @@ impl TiledImage {
             }
         }
         out
+    }
+}
+
+/// Um bloco visto por `par_tiles_mut`: dá para ler sem criar nada e só escrever quando preciso.
+pub struct TileMut<'a>(&'a mut Option<Arc<Vec<u8>>>);
+
+impl TileMut<'_> {
+    pub fn get(&self) -> Option<&[u8]> {
+        self.0.as_deref().map(Vec::as_slice)
+    }
+
+    /// Para escrever (cria se estiver vazio e copia se estiver compartilhado).
+    pub fn make(&mut self) -> &mut [u8] {
+        let t = self.0.get_or_insert_with(|| Arc::new(vec![0; TILE_BYTES]));
+        Arc::make_mut(t).as_mut_slice()
     }
 }
 

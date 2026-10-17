@@ -16,6 +16,12 @@ scripts/install.sh            # compila e instala todos (menu de aplicativos + ~
 scripts/install.sh pawvoice   # só um (pawcut, pawvoice, pawwrite, pawpaint)
 ```
 
+Como os apps se parecem e se comportam está em [`docs/DESIGN.md`](docs/DESIGN.md).
+
+**Roda de atalhos (nos 4 apps):** segure o botão do meio do mouse, arraste até a ação e solte
+(como a roda de comunicação dos jogos). Um toque rápido deixa a roda aberta para clicar; o centro
+dela abre a personalização das oito posições (também no menu: "Roda de atalhos…").
+
 Bibliotecas compartilhadas em `crates/`:
 - `paw-ui`: tema, ícones, avisos e backups;
 - `paw-audio`: loudness, filtros, gate, compressor, tocar e gravar;
@@ -40,7 +46,8 @@ Gravador e editor de voz com a interface e o jeito de usar do Audacity.
   - arrastar seleciona (na vertical pega várias faixas); Z ajusta a seleção ao cruzamento por zero;
   - clique no cabeçalho do clipe seleciona e Ctrl+clique soma outros; arrastar move todos juntos
     (Time Shift), e um clipe sozinho pode ir para outra faixa;
-  - mexer em Ganho/Pan/Mudo/Solo de uma faixa selecionada vale para todas as selecionadas;
+  - mexer em Ganho/Pan/Mudo/Solo de uma faixa selecionada vale para todas as selecionadas, e tudo (inclusive o
+    envelope) vale **na hora, enquanto toca**;
   - Ctrl+X, Ctrl+C e Ctrl+V; Delete; Ctrl+D duplica; Ctrl+L silencia; Ctrl+T apara;
     Ctrl+Alt+I separa em nova faixa;
   - Ctrl+1 e Ctrl+3 dão zoom, Ctrl+F cabe tudo, Ctrl+E dá zoom na seleção;
@@ -55,6 +62,8 @@ Gravador e editor de voz com a interface e o jeito de usar do Audacity.
   - normalizar loudness (LUFS) ou pico, amplificar, compressor, limitador, fades;
   - noise gate, passa-altas, graves e agudos, **de-esser** (tira o chiado do S), truncar silêncio e inverter;
   - Arquivo → *Exportar para vídeo* já ajusta o loudness para o alvo (−14 LUFS no YouTube).
+  - efeitos em trechos longos rodam em segundo plano (aparece "Aplicando…"), a janela não congela;
+  - nos diálogos de efeito, Esc cancela e Enter aplica.
 - **Roteiro e teleprompter** (Ver → Roteiro): a letra grande rola sozinha enquanto você grava.
 - **Arquivos:**
   - o projeto fica em `nome.pawvoice`, com os áudios em `nome.pawvoice-audio/` (WAV, mono ou estéreo);
@@ -79,6 +88,9 @@ Editor de roteiros para vídeo: texto limpo e o tempo de fala sempre à vista.
   no PawCut e ajustar. Rótulos do PawVoice viram capítulos do YouTube.
 - **Mais:** mover seções pela estrutura (botão direito), meta de duração do vídeo na barra de baixo e modo leitura
   (F5) com a fala em letra grande rolando sozinha.
+- **Seguro com o seu texto:** arrastar um arquivo para a janela, abrir outro ou criar um novo pergunta antes de
+  descartar mudanças (e "Salvar" continua a ação depois de salvar); Esc fecha diálogos e a barra de busca.
+  Substituir tudo é uma passada só, mesmo em roteiros enormes.
 
 ## PawPaint
 
@@ -102,10 +114,20 @@ Editor de imagens no estilo do Krita: pintura, camadas, seleções, filtros e do
 - **Imagem:** tamanho da tela, escalar, cortar, girar e espelhar, achatar.
 - **Arquivos:** abre PNG, JPG, WebP e BMP; salva `.pawpaint` (um zip com uma camada por PNG); exporta PNG, JPG, WebP
   ou BMP, e *JPG com até 2 MB* para thumbnails do YouTube.
-- **Desfazer:** guarda o documento inteiro a cada passo sem gastar memória (os blocos de pixels são compartilhados).
+- **Desfazer:** guarda o documento inteiro a cada passo sem gastar memória (os blocos de pixels são compartilhados),
+  até 60 passos ou 1,5 GB de pixels retidos, o que vier primeiro.
 
 - **Mais:** pastas de camadas, máscaras de camada (preto esconde, branco revela), pintura com espelho, borrão, curvas, colar prints da
   área de transferência do sistema, recuperação automática se o app fechar de repente.
+- **Fotos grandes sem travar:** filtros, preenchimento e exportação usam todos os núcleos (um desfoque numa foto de
+  12 megapixels leva ~0,5 s); a prévia de um filtro lento só é refeita ao soltar o slider; o autosave e o salvamento
+  rodam em segundo plano com uma cópia barata do documento; o carimbo do pincel ficou ~2x mais rápido, o que pesa
+  nos pincéis grandes.
+- **Caixa de ferramentas como a do Photoshop:** diminua o painel e ela vira uma coluna só (ou fixe
+  uma coluna no botão de setinhas no topo). Arrastar a tela é Espaço + arrastar (o botão do meio
+  abre a roda de atalhos).
+- **Janelas pequenas:** a barra do pincel recolhe o excesso num menu "⋯", os dockers rolam e os diálogos mantêm a
+  largura. Nos diálogos, Esc cancela e Enter confirma.
 
 Ainda não tem: mesa digitalizadora com pressão, camadas vetoriais e histograma.
 
@@ -206,6 +228,15 @@ e libclang. Se faltar o `libclang-dev`, o `.cargo/config.toml` aponta o bindgen 
 ```bash
 cargo test --workspace        # 140+ testes, incluindo cliques e arrastos simulados na interface
 cargo clippy --workspace --all-targets -- -D warnings
+scripts/ui-fuzz.sh pawcut 300 1 -- video.mp4   # cliques e atalhos aleatórios num display virtual; avisa se cair
+scripts/ui-fuzz.sh pawpaint 400 1 -- foto.png  # o mesmo para qualquer app (pawvoice, pawwrite, pawpaint)
+
+# Medidas de desempenho (sempre com --release e a máquina quieta)
+cargo run --release -p pawpaint-core --example bench_ops    # filtros, preencher, achatar, pincel
+cargo run --release -p pawpaint-core --example bench_save   # salvar e autosave de foto grande
+cargo run --release -p pawwrite-core --example bench_text   # buscar e substituir em texto grande
+cargo run --release -p pawvoice-core --example bench_mix    # mixagem ao vivo
+cargo run --release -p paw-audio --example bench_dsp        # efeitos de áudio
 ```
 
 Os crates são:

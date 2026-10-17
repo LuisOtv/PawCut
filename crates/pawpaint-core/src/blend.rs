@@ -115,11 +115,17 @@ pub fn blend_over(dst: &mut [u8], src: &[u8], opacity: f32, mode: BlendMode) {
     if sa <= 0.0 {
         return;
     }
+    // Pixel opaco e opacidade total: o resultado é o próprio pixel (o caso mais comum, e o que
+    // mais pesa numa foto grande).
+    if opacity >= 1.0 && src[3] == 255 && mode == BlendMode::Normal {
+        dst[..4].copy_from_slice(&src[..4]);
+        return;
+    }
+    // Sobre o transparente todo modo dá no mesmo que Normal.
+    let mode = if dst[3] == 0 { BlendMode::Normal } else { mode };
     let da = dst[3] as f32 / 255.0;
     if mode == BlendMode::Normal {
         let k = 1.0 - sa;
-        let s = src[3] as f32; // só para evitar divisão; abaixo usamos opacity no rgb
-        let _ = s;
         for c in 0..3 {
             dst[c] = (src[c] as f32 * opacity + dst[c] as f32 * k)
                 .round()
@@ -181,6 +187,20 @@ mod tests {
             let mut d = [0u8; 4];
             blend_over(&mut d, &[90, 60, 30, 255], 1.0, m);
             assert_eq!(d, [90, 60, 30, 255], "{m:?}");
+        }
+    }
+
+    #[test]
+    fn opaque_fast_path_and_transparent_backdrop_give_the_general_result() {
+        // Opaco com opacidade total: o pixel de cima, sem conta.
+        let mut d = [10, 20, 30, 128];
+        blend_over(&mut d, &[200, 100, 50, 255], 1.0, BlendMode::Normal);
+        assert_eq!(d, [200, 100, 50, 255]);
+        // Sobre o transparente, qualquer modo vira "só o pixel" (escalado pela opacidade).
+        for m in BlendMode::ALL {
+            let mut d = [0u8; 4];
+            blend_over(&mut d, &[80, 40, 20, 160], 0.5, m);
+            assert_eq!(d, [40, 20, 10, 80], "{m:?}");
         }
     }
 }

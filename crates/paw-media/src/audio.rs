@@ -49,6 +49,15 @@ pub(crate) fn atempo_chain(speed: f64) -> String {
     parts.join(",")
 }
 
+/// Canais do stream. Alguns decoders (WAV de 16 bits no ffmpeg 6/7) deixam o layout vazio e só
+/// informam a contagem; sem este reserva o filtro recebia `channel_layout=0c` e falhava.
+fn channel_count(decoder: &ff::codec::decoder::Audio) -> u16 {
+    match decoder.channel_layout().channels() {
+        n if n > 0 => n as u16,
+        _ => decoder.channels().max(1),
+    }
+}
+
 fn layout_name(channels: u16) -> String {
     match channels {
         1 => "mono".into(),
@@ -83,7 +92,7 @@ pub fn decode_audio(path: &Path, sample_rate: u32, speed: f64) -> Result<Pcm, Me
         tb.denominator(),
         decoder.rate(),
         decoder.format().name(),
-        layout_name(decoder.channel_layout().channels() as u16),
+        layout_name(channel_count(&decoder)),
     );
     let mut chain =
         format!("aresample={sample_rate},aformat=sample_fmts=flt:channel_layouts=stereo");

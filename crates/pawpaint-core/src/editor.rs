@@ -15,6 +15,11 @@ use crate::tile::{TILE, TiledImage, premultiply, unpremultiply};
 use crate::transform::{self, Affine};
 
 const HISTORY: usize = 60;
+/// Memória (bytes de pixels) que o desfazer e o refazer podem reter além do documento atual.
+/// Sem isso, 60 filtros numa foto de 12 megapixels guardariam gigabytes.
+const HISTORY_BUDGET: usize = 1_500_000_000;
+/// Passos de desfazer que sempre ficam, mesmo que um só passe do limite.
+const HISTORY_MIN: usize = 3;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum EditError {
@@ -101,6 +106,22 @@ pub struct Editor {
     mirror: (bool, bool),
     paint_mask: bool,
     pixel_rev: u64,
+    history_budget: usize,
+    checkpoints: u64,
+}
+
+/// Chama `f(identidade, bytes)` para cada bloco de pixel, de máscara e de seleção do documento.
+fn for_each_block(doc: &Doc, f: &mut dyn FnMut(usize, usize)) {
+    for l in &doc.layers {
+        l.pixels.visit_tiles(&mut *f);
+        if let Some(m) = &l.mask {
+            m.visit_tiles(&mut *f);
+        }
+    }
+    if let Some(s) = &doc.selection {
+        let (id, n) = s.mask_identity();
+        f(id, n);
+    }
 }
 
 impl Editor {
@@ -136,6 +157,8 @@ impl Editor {
             mirror: (false, false),
             paint_mask: false,
             pixel_rev: 0,
+            history_budget: HISTORY_BUDGET,
+            checkpoints: 0,
         }
     }
 
@@ -224,6 +247,73 @@ impl Editor {
         self.redo.clear();
         self.coalesce = None;
         self.revision += 1;
+        // Somar a memória é uma passada por todos os blocos: só de quatro em quatro passos.
+        self.checkpoints += 1;
+        if self.checkpoints.is_multiple_of(4) {
+            self.trim_history();
+        }
+    }
+
+    /// Limite de memória do histórico (para testes e para quem quiser mudar).
+    pub fn set_history_budget(&mut self, bytes: usize) {
+        self.history_budget = bytes;
+        self.trim_history();
+    }
+
+    /// Memória que o histórico retém além do documento atual (blocos compartilhados contam uma
+    /// vez, e os que o documento atual também usa não contam).
+    pub fn history_bytes(&self) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        for_each_block(&self.doc, &mut |id, _| {
+            seen.insert(id);
+        });
+        let mut total = 0;
+        for (doc, _) in self.undo.iter().chain(&self.redo) {
+            for_each_block(doc, &mut |id, n| {
+                if seen.insert(id) {
+                    total += n;
+                }
+            });
+        }
+        total
+    }
+
+    /// Esquece os passos mais antigos até a memória caber no limite. Os mais novos têm
+    /// prioridade (e o refazer também entra na conta).
+    fn trim_history(&mut self) {
+        if self.undo.len() <= HISTORY_MIN {
+            return;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for_each_block(&self.doc, &mut |id, _| {
+            seen.insert(id);
+        });
+        let mut total = 0usize;
+        for (doc, _) in &self.redo {
+            for_each_block(doc, &mut |id, n| {
+                if seen.insert(id) {
+                    total += n;
+                }
+            });
+        }
+        // Do passo mais novo para o mais velho: o primeiro que estoura o limite e tudo antes dele
+        // vão embora, mas sempre sobram `HISTORY_MIN` passos.
+        let mut cut = 0;
+        for i in (0..self.undo.len()).rev() {
+            for_each_block(&self.undo[i].0, &mut |id, n| {
+                if seen.insert(id) {
+                    total += n;
+                }
+            });
+            if total > self.history_budget {
+                cut = i + 1;
+                break;
+            }
+        }
+        let cut = cut.min(self.undo.len() - HISTORY_MIN);
+        if cut > 0 {
+            self.undo.drain(..cut);
+        }
     }
 
     pub fn end_change(&mut self) {
@@ -1777,5 +1867,275 @@ mod perf_probe {
         let t = Instant::now();
         e.apply_filter(id, &Filter::GaussianBlur(8.0), "b").unwrap();
         println!("blur: {:?}", t.elapsed());
+    }
+
+    /// Valores absurdos (NaN, infinito, enormes, negativos, vazios) em tudo que recebe números do
+    /// usuário: nenhum pode derrubar o app (o fuzz já achou um desses na seleção).
+    #[test]
+    fn extreme_inputs_never_panic() {
+        use crate::fill::GradientKind;
+        use crate::filters::Filter;
+        use crate::transform::Affine;
+        let weird_f = [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            1e30,
+            -1e30,
+            0.0,
+            -0.0,
+            -5.0,
+            1e-30,
+            12345.678,
+        ];
+        let weird_i = [
+            i64::MIN / 4,
+            -1_000_000_000,
+            -1,
+            0,
+            1,
+            99,
+            100_000,
+            1_000_000_000,
+            i64::MAX / 4,
+        ];
+        let weird_u = [0usize, 1, 2, 99, 100, 101, 100_000, 1 << 40];
+        let mut e = Editor::new(100, 80, Background::White);
+        let id = e.doc().layers[0].id;
+        let top = e.add_layer(None, None);
+
+        // Seleções.
+        for &a in &weird_i {
+            for &b in &weird_i {
+                let s = Selection::rect(100, 80, a, b, b, a);
+                assert_eq!((s.width(), s.height()), (100, 80));
+            }
+        }
+        for &a in &weird_f {
+            for &b in &weird_f {
+                let _ = Selection::ellipse(100, 80, a, b, b, a).bounds();
+                let _ =
+                    Selection::polygon(100, 80, &[(a, b), (b, a), (a, a), (50.0, 10.0)]).bounds();
+            }
+        }
+        let _ = Selection::polygon(100, 80, &[]).bounds();
+        let _ = Selection::polygon(100, 80, &[(1.0, 1.0)]).bounds();
+        e.select_all();
+        for &r in &weird_u[..6] {
+            e.feather_selection(r.min(500));
+        }
+        for g in [i32::MIN / 100, -100, -1, 0, 1, 100, i32::MAX / 100] {
+            e.select_all();
+            e.grow_selection(g.clamp(-300, 300));
+        }
+        e.deselect();
+
+        // Pincel com pontos absurdos.
+        for &x in &weird_f {
+            for &y in &weird_f[..5] {
+                e.begin_stroke(top, Brush::basic(), [1, 2, 3], false, BlendMode::Normal)
+                    .unwrap();
+                e.stroke_point(10.0, 10.0);
+                e.stroke_point(x, y);
+                e.stroke_line((x, y), (50.0, 50.0));
+                e.end_stroke(y, x);
+            }
+        }
+        for size in [0.0, 0.5, 1.0, 1000.0, f32::NAN] {
+            let mut b = Brush::basic();
+            b.size = size;
+            b.spacing = 0.0;
+            b.roundness = size;
+            e.begin_stroke(top, b, [1, 2, 3], true, BlendMode::Multiply)
+                .unwrap();
+            e.stroke_point(30.0, 30.0);
+            e.stroke_point(40.0, 35.0);
+            e.end_stroke(45.0, 35.0);
+        }
+
+        // Borrão com pontos e tamanhos absurdos.
+        for &x in &weird_f {
+            for size in [0.0, 30.0, 1e9, f32::NAN] {
+                let mut b = Brush::basic();
+                b.size = size;
+                e.begin_smudge(top, b, x, 5.0).unwrap();
+                e.smudge_point(20.0, 20.0);
+                e.smudge_point(x, x);
+                e.smudge_point(25.0, 25.0);
+                e.end_smudge();
+            }
+        }
+
+        // Balde, varinha, degradê, formas.
+        for &x in &weird_u {
+            for &y in &weird_u {
+                let _ = e.bucket_fill(top, (x, y), [9, 9, 9], 0.5, true, 1.0, false);
+                e.magic_wand(top, (x, y), 0.3, false, crate::selection::SelOp::Add, true);
+            }
+        }
+        for &t in &weird_f {
+            let _ = e.bucket_fill(top, (1, 1), [9, 9, 9], t, true, t, true);
+            e.magic_wand(
+                top,
+                (1, 1),
+                t,
+                true,
+                crate::selection::SelOp::Replace,
+                false,
+            );
+        }
+        e.deselect();
+        for &a in &weird_f {
+            for &b in &weird_f[..6] {
+                let _ = e.gradient(
+                    top,
+                    (a, b),
+                    (b, a),
+                    GradientKind::Linear,
+                    [1, 2, 3, 255],
+                    [4, 5, 6, 0],
+                    a,
+                );
+                let _ = e.gradient(
+                    top,
+                    (a, b),
+                    (a, b),
+                    GradientKind::Radial,
+                    [1, 2, 3, 255],
+                    [4, 5, 6, 0],
+                    0.5,
+                );
+            }
+        }
+
+        // Transformações e geometria da tela.
+        for &a in &weird_f {
+            for &t in &weird_f {
+                let m = Affine {
+                    a,
+                    b: t,
+                    c: 0.0,
+                    d: a,
+                    tx: t,
+                    ty: a,
+                };
+                let _ = e.transform(top, &m);
+                let m2 = Affine::around((t, a), a, t, a, t, a);
+                let _ = e.transform(top, &m2);
+                if let Ok(f) = e.begin_float(top) {
+                    e.finish_float(&f, &m2);
+                }
+            }
+        }
+        for &x0 in &weird_u {
+            for &y0 in &weird_u[..6] {
+                e.crop(x0, y0, y0, x0);
+                e.crop(x0, y0, 1 << 40, 1 << 40);
+            }
+        }
+        for &w in &weird_u {
+            e.resize_canvas(w.min(300), w.min(300), weird_i[w % 9], weird_i[(w + 3) % 9]);
+            e.resize_canvas(100, 80, 0, 0);
+            e.scale_image(w.min(300), (w + 1).min(300));
+            e.scale_image(100, 80);
+        }
+        for &dx in &weird_i {
+            e.resize_canvas(120, 90, dx, -dx);
+            e.resize_canvas(100, 80, 0, 0);
+        }
+
+        // Colar e carimbar longe da tela.
+        let clip = Clip {
+            image: image::RgbaImage::from_pixel(7, 5, image::Rgba([1, 2, 3, 255])),
+            x: 0,
+            y: 0,
+        };
+        for &x in &weird_i {
+            for &y in &weird_i {
+                e.paste(&clip, Some((x, y)));
+                let _ = e.stamp(top, &clip.image, x, y, "Texto");
+            }
+        }
+
+        // Filtros com parâmetros absurdos.
+        let mut filters = vec![
+            Filter::Invert,
+            Filter::Desaturate,
+            Filter::EdgeDetect,
+            Filter::Curves(vec![]),
+        ];
+        for &v in &weird_f {
+            filters.push(Filter::GaussianBlur(v.clamp(-1e3, 1e3)));
+            filters.push(Filter::BrightnessContrast {
+                brightness: v,
+                contrast: v,
+            });
+            filters.push(Filter::HueSaturation {
+                hue: v,
+                saturation: v,
+                lightness: v,
+            });
+            filters.push(Filter::Threshold(v));
+            filters.push(Filter::Noise(v));
+            filters.push(Filter::Levels {
+                black: v,
+                white: -v,
+                gamma: v,
+            });
+            filters.push(Filter::Sharpen {
+                amount: v,
+                radius: v.clamp(-1e3, 1e3),
+            });
+            filters.push(Filter::Curves(vec![(v, v), (v, 0.5), (0.2, v)]));
+        }
+        for &u in &[0u32, 1, 2, 3, 1000, u32::MAX] {
+            filters.push(Filter::Posterize(u));
+            filters.push(Filter::Pixelate(u.min(100_000)));
+        }
+        for f in &filters {
+            let _ = e.apply_filter(top, f, "Filtro");
+        }
+        // Histórico e arquivo continuam coerentes depois de tudo isso.
+        while e.undo() {}
+        while e.redo() {}
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.pawpaint");
+        crate::file::save_project(&e, &p).unwrap();
+        let back = crate::file::load_project(&p).unwrap();
+        assert_eq!(back.doc().layers.len(), e.doc().layers.len());
+        let _ = id;
+    }
+
+    #[test]
+    fn history_is_trimmed_by_memory_not_only_by_count() {
+        // Cada preenchimento de tela cheia cria blocos novos: 640x480 = 480 blocos de 16 KB.
+        let mut e = Editor::new(640, 480, Background::White);
+        let id = e.doc().layers[0].id;
+        e.set_history_budget(30_000_000);
+        for k in 0..40u8 {
+            e.fill_selection(id, [k * 6, 10, 10]).unwrap();
+        }
+        let steps = e.history().0.len();
+        assert!(
+            (HISTORY_MIN..40).contains(&steps),
+            "passos guardados: {steps}"
+        );
+        // O corte só roda de quatro em quatro passos: no máximo o limite mais quatro passos.
+        let step_bytes = 480 * 64 * 64 * 4;
+        assert!(
+            e.history_bytes() <= 30_000_000 + 4 * step_bytes,
+            "histórico retém {} bytes",
+            e.history_bytes()
+        );
+        // Os passos que sobraram continuam desfazendo de verdade.
+        assert!(e.undo());
+        assert_eq!(e.doc().layers[0].pixels.pixel(5, 5), [38 * 6, 10, 10, 255]);
+        // Com o limite padrão, um documento pequeno mantém todos os 60 passos.
+        let mut small = Editor::new(100, 80, Background::White);
+        let sid = small.doc().layers[0].id;
+        for k in 0..70u8 {
+            small.fill_selection(sid, [k, 0, 0]).unwrap();
+        }
+        assert_eq!(small.history().0.len(), HISTORY);
     }
 }

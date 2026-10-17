@@ -9,7 +9,7 @@ mod editor;
 mod file;
 mod wav;
 
-pub use editor::{Audio, EditError, Editor, MoveTo, Planar};
+pub use editor::{Audio, EditError, Editor, Mixer, MoveTo, Planar, ProcessJob};
 pub use file::{FileError, export_audio, load_session, save_session};
 pub use wav::{read_wav_f32, write_wav_f32};
 

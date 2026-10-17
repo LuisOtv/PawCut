@@ -21,6 +21,8 @@ pub enum EditError {
     NotStereo,
     #[error("escolha duas faixas mono")]
     NeedTwoMono,
+    #[error("a sessão mudou enquanto o efeito rodava; aplique de novo")]
+    Stale,
 }
 
 /// Para onde mover uma faixa na lista.
@@ -911,8 +913,21 @@ impl Editor {
         a: usize,
         b: usize,
         label: &'static str,
-        mut f: impl FnMut(&mut [Vec<f32>]),
+        f: impl FnMut(&mut [Vec<f32>]),
     ) -> Result<(), EditError> {
+        let mut job = self.begin_process(tracks, a, b)?;
+        job.run(f);
+        self.finish_process(job, label)
+    }
+
+    /// Primeira metade de um efeito: renderiza os trechos. Quem chama processa o `ProcessJob`
+    /// (pode ser em outra thread, é `Send`) e devolve com `finish_process`.
+    pub fn begin_process(
+        &self,
+        tracks: &[u64],
+        a: usize,
+        b: usize,
+    ) -> Result<ProcessJob, EditError> {
         self.check(tracks, a, b)?;
         let mut pieces = Vec::new();
         for id in tracks {
@@ -921,18 +936,36 @@ impl Editor {
             if a >= end {
                 continue;
             }
-            let mut planar = self.render_segments(&slice(&t.segments, a, end), t.channels);
-            f(&mut planar);
-            for ch in &mut planar {
-                ch.resize(end - a, 0.0);
-            }
+            let planar = self.render_segments(&slice(&t.segments, a, end), t.channels);
             pieces.push((*id, planar));
         }
         if pieces.is_empty() {
             return Err(EditError::EmptyRange);
         }
+        Ok(ProcessJob {
+            a,
+            revision: self.revision,
+            pieces,
+        })
+    }
+
+    /// Segunda metade: grava o resultado como fontes novas. Falha com `Stale` se a sessão
+    /// mudou desde o `begin_process` (o resultado seria sobre áudio velho).
+    pub fn finish_process(
+        &mut self,
+        job: ProcessJob,
+        label: &'static str,
+    ) -> Result<(), EditError> {
+        if job.revision != self.revision {
+            return Err(EditError::Stale);
+        }
         self.checkpoint(label);
-        for (id, planar) in pieces {
+        let a = job.a;
+        for (id, mut planar) in job.pieces {
+            let len = planar.iter().map(Vec::len).max().unwrap_or(0);
+            for ch in &mut planar {
+                ch.resize(len, 0.0);
+            }
             let seg = self.add_source(&planar);
             let t = self.track_mut(id)?;
             t.segments = overwrite(&t.segments, a, &[seg]);
@@ -941,38 +974,8 @@ impl Editor {
         Ok(())
     }
 
-    /// Renderiza os trechos com `channels` canais (fonte mono vai para os dois lados;
-    /// estéreo numa faixa mono vira a média).
     fn render_segments(&self, segs: &[Segment], channels: u8) -> Planar {
-        let channels = channels.max(1) as usize;
-        let n = total(segs);
-        let mut out = vec![Vec::with_capacity(n); channels];
-        for s in segs {
-            match self.sources.get(&s.source) {
-                Some(src) if s.source != SILENCE => {
-                    let sc = src.channels.max(1) as usize;
-                    let frames = src.frames();
-                    for i in s.start..s.end {
-                        for (c, ch) in out.iter_mut().enumerate() {
-                            let v = if i >= frames {
-                                0.0
-                            } else if channels == 1 && sc > 1 {
-                                (src.data[i * sc] + src.data[i * sc + 1]) * 0.5
-                            } else {
-                                src.data[i * sc + c.min(sc - 1)]
-                            };
-                            ch.push(v);
-                        }
-                    }
-                }
-                _ => {
-                    for ch in &mut out {
-                        ch.resize(ch.len() + s.len(), 0.0);
-                    }
-                }
-            }
-        }
-        out
+        render_segments(&self.sources, segs, channels)
     }
 
     /// Áudio de uma faixa (sem ganho/pan/envelope), um vetor por canal.
@@ -984,39 +987,159 @@ impl Editor {
     }
 
     pub fn render_range(&self, id: u64, a: usize, b: usize) -> Planar {
-        match self.session.track(id) {
-            Some(t) if a < b => self.render_segments(&slice(&t.segments, a, b), t.channels),
-            _ => Vec::new(),
-        }
+        render_range(&self.session, &self.sources, id, a, b)
     }
 
     /// Mixagem estéreo intercalada de `[a, b)`: respeita mudo, solo, ganho, pan e envelope
     /// (pan por balanço: o lado oposto abaixa, o centro fica igual).
     pub fn mix(&self, a: usize, b: usize) -> Vec<f32> {
-        let n = b.saturating_sub(a);
-        let mut out = vec![0.0f32; n * 2];
-        let any_solo = self.session.tracks.iter().any(|t| t.solo);
-        for t in &self.session.tracks {
-            if t.mute || (any_solo && !t.solo) {
-                continue;
-            }
-            let g = 10f32.powf(t.gain_db / 20.0);
-            let (gl, gr) = (g * (1.0 - t.pan).min(1.0), g * (1.0 + t.pan).min(1.0));
-            let planar = self.render_range(t.id, a, b);
-            let Some(left) = planar.first() else { continue };
-            let right = planar.get(1).unwrap_or(left);
-            let has_env = !t.envelope.is_empty();
-            for i in 0..left.len() {
-                let e = if has_env { t.env_at(a + i) } else { 1.0 };
-                out[2 * i] += left[i] * gl * e;
-                out[2 * i + 1] += right[i] * gr * e;
-            }
-        }
-        for v in &mut out {
-            *v = v.clamp(-1.0, 1.0);
-        }
-        out
+        mix_range(&self.session, &self.sources, a, b)
     }
+
+    /// Uma foto barata da sessão para mixar em outra thread (a thread de áudio): só as listas
+    /// de trechos, o mixer das faixas e `Arc`s do áudio, nada de cópia das amostras.
+    pub fn mixer(&self) -> Mixer {
+        Mixer {
+            session: self.session.clone(),
+            sources: self.sources.clone(),
+        }
+    }
+}
+
+/// Trechos renderizados esperando um efeito (ver `Editor::begin_process`).
+pub struct ProcessJob {
+    a: usize,
+    revision: u64,
+    pieces: Vec<(u64, Planar)>,
+}
+
+impl ProcessJob {
+    /// Aplica `f` a cada trecho (um por faixa), em canais separados. O tamanho de cada trecho
+    /// é mantido: o que sobrar ou faltar é cortado ou completado com silêncio.
+    pub fn run(&mut self, mut f: impl FnMut(&mut [Vec<f32>])) {
+        for (_, planar) in &mut self.pieces {
+            let len = planar.iter().map(Vec::len).max().unwrap_or(0);
+            f(planar);
+            for ch in planar.iter_mut() {
+                ch.resize(len, 0.0);
+            }
+        }
+    }
+
+    /// Total de amostras (todos os canais de todos os trechos): mede o tamanho do trabalho.
+    pub fn samples(&self) -> usize {
+        self.pieces
+            .iter()
+            .flat_map(|(_, p)| p.iter())
+            .map(Vec::len)
+            .sum()
+    }
+}
+
+/// Foto da sessão que sabe mixar (ver `Editor::mixer`). Imutável: depois de uma edição, tire
+/// outra foto e troque.
+#[derive(Clone)]
+pub struct Mixer {
+    session: Session,
+    sources: BTreeMap<SourceId, Arc<Audio>>,
+}
+
+impl Mixer {
+    /// Mesma mixagem de `Editor::mix`.
+    pub fn mix(&self, a: usize, b: usize) -> Vec<f32> {
+        mix_range(&self.session, &self.sources, a, b)
+    }
+
+    /// Duração da sessão, em amostras.
+    pub fn len(&self) -> usize {
+        self.session.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Renderiza os trechos com `channels` canais (fonte mono vai para os dois lados; estéreo numa
+/// faixa mono vira a média).
+fn render_segments(
+    sources: &BTreeMap<SourceId, Arc<Audio>>,
+    segs: &[Segment],
+    channels: u8,
+) -> Planar {
+    let channels = channels.max(1) as usize;
+    let n = total(segs);
+    let mut out = vec![Vec::with_capacity(n); channels];
+    for s in segs {
+        match sources.get(&s.source) {
+            Some(src) if s.source != SILENCE => {
+                let sc = src.channels.max(1) as usize;
+                let frames = src.frames();
+                for i in s.start..s.end {
+                    for (c, ch) in out.iter_mut().enumerate() {
+                        let v = if i >= frames {
+                            0.0
+                        } else if channels == 1 && sc > 1 {
+                            (src.data[i * sc] + src.data[i * sc + 1]) * 0.5
+                        } else {
+                            src.data[i * sc + c.min(sc - 1)]
+                        };
+                        ch.push(v);
+                    }
+                }
+            }
+            _ => {
+                for ch in &mut out {
+                    ch.resize(ch.len() + s.len(), 0.0);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn render_range(
+    session: &Session,
+    sources: &BTreeMap<SourceId, Arc<Audio>>,
+    id: u64,
+    a: usize,
+    b: usize,
+) -> Planar {
+    match session.track(id) {
+        Some(t) if a < b => render_segments(sources, &slice(&t.segments, a, b), t.channels),
+        _ => Vec::new(),
+    }
+}
+
+fn mix_range(
+    session: &Session,
+    sources: &BTreeMap<SourceId, Arc<Audio>>,
+    a: usize,
+    b: usize,
+) -> Vec<f32> {
+    let n = b.saturating_sub(a);
+    let mut out = vec![0.0f32; n * 2];
+    let any_solo = session.tracks.iter().any(|t| t.solo);
+    for t in &session.tracks {
+        if t.mute || (any_solo && !t.solo) {
+            continue;
+        }
+        let g = 10f32.powf(t.gain_db / 20.0);
+        let (gl, gr) = (g * (1.0 - t.pan).min(1.0), g * (1.0 + t.pan).min(1.0));
+        let planar = render_range(session, sources, t.id, a, b);
+        let Some(left) = planar.first() else { continue };
+        let right = planar.get(1).unwrap_or(left);
+        let has_env = !t.envelope.is_empty();
+        for i in 0..left.len() {
+            let e = if has_env { t.env_at(a + i) } else { 1.0 };
+            out[2 * i] += left[i] * gl * e;
+            out[2 * i + 1] += right[i] * gr * e;
+        }
+    }
+    for v in &mut out {
+        *v = v.clamp(-1.0, 1.0);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1029,6 +1152,69 @@ mod tests {
 
     fn mono(e: &Editor, id: u64) -> Vec<f32> {
         e.render(id).into_iter().next().unwrap_or_default()
+    }
+
+    #[test]
+    fn mixer_snapshot_mixes_like_the_editor_and_does_not_follow_later_edits() {
+        // Valores pequenos: a mixagem corta em ±1 e a rampa de `editor_with` estouraria.
+        let mut e = Editor::new(Session::new(48_000), BTreeMap::new());
+        let id = e.add_track(
+            vec![(0..1000).map(|i| i as f32 / 4000.0).collect()],
+            0,
+            None,
+        );
+        e.set_mix(id, -6.0, 0.5, false, false);
+        e.set_envelope(
+            id,
+            vec![
+                EnvPoint { at: 0, value: 1.0 },
+                EnvPoint {
+                    at: 999,
+                    value: 0.5,
+                },
+            ],
+        );
+        let snap = e.mixer();
+        assert_eq!(snap.mix(100, 400), e.mix(100, 400));
+        assert_eq!(snap.len(), e.session().len());
+        // Mudar o ganho depois da foto não muda a foto (a thread de áudio troca de foto).
+        let before = snap.mix(100, 200);
+        e.set_mix(id, 0.0, 0.0, false, false);
+        assert_eq!(snap.mix(100, 200), before);
+        assert_ne!(e.mix(100, 200), before);
+        assert_ne!(e.mixer().mix(100, 200), before);
+    }
+
+    #[test]
+    fn split_process_matches_process_and_refuses_a_stale_result() {
+        let (mut e, id) = editor_with(100);
+        let mut twin = Editor::new(Session::new(48_000), BTreeMap::new());
+        let tid = twin.add_track(ramp(100), 0, None);
+        twin.process(&[tid], 10, 60, "Dobro", |p| {
+            for ch in p.iter_mut() {
+                ch.iter_mut().for_each(|v| *v *= 2.0);
+            }
+        })
+        .unwrap();
+        let mut job = e.begin_process(&[id], 10, 60).unwrap();
+        assert_eq!(job.samples(), 50);
+        job.run(|p| {
+            for ch in p.iter_mut() {
+                ch.iter_mut().for_each(|v| *v *= 2.0);
+            }
+        });
+        e.finish_process(job, "Dobro").unwrap();
+        assert_eq!(mono(&e, id), mono(&twin, tid));
+        assert!(e.undo());
+        assert_eq!(mono(&e, id), ramp(100).remove(0));
+
+        // Se a sessão mudou no meio do caminho, o resultado velho não entra.
+        let job = e.begin_process(&[id], 0, 50).unwrap();
+        e.set_mix(id, -3.0, 0.0, false, false);
+        assert!(matches!(
+            e.finish_process(job, "Velho"),
+            Err(EditError::Stale)
+        ));
     }
 
     fn editor_with(n: usize) -> (Editor, u64) {

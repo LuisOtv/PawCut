@@ -9,6 +9,7 @@ pub mod editor;
 pub mod file;
 pub mod fill;
 pub mod filters;
+pub mod par;
 pub mod selection;
 pub mod text;
 pub mod tile;

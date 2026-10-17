@@ -1,7 +1,7 @@
 //! Testes da interface com mouse e teclado simulados (egui_kittest).
 
 use egui::{Event, Modifiers, PointerButton, Pos2};
-use egui_kittest::Harness;
+use egui_kittest::{Harness, kittest::Queryable};
 use pawcut_core::*;
 
 use crate::panels::DragPayload;
@@ -785,4 +785,121 @@ fn keyboard_markers_ripple_trim_and_paste() {
     h.key_press_modifiers(Modifiers::CTRL, egui::Key::V);
     h.run_steps(2);
     assert_eq!(v1_spans(&h), vec![(0, 110), (200, 310)]);
+}
+
+/// Larguras dos campos numéricos do diálogo "Novo projeto" para uma resolução e FPS.
+fn new_project_field_widths(width: u32, height: u32, fps: u32) -> Vec<f32> {
+    let st = AppState::new(Project::new(ProjectSettings::default()));
+    let ctx = egui::Context::default();
+    let mut ws = Workspace::new(&ctx, st);
+    ws.recovery.clear();
+    ws.new_project = Some(crate::panels::dialogs::NewProjectDialog {
+        width,
+        height,
+        fps,
+        ..Default::default()
+    });
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(800.0, 400.0))
+        .build_ui_state(
+            |ui, ws: &mut Workspace| {
+                let ctx = ui.ctx().clone();
+                ws.dialogs_ui(&ctx);
+            },
+            ws,
+        );
+    h.run_steps(3);
+    h.get_all_by_role(egui::accesskit::Role::SpinButton)
+        .map(|n| n.rect().width())
+        .collect()
+}
+
+#[test]
+fn numeric_fields_keep_their_width_whatever_the_value() {
+    let short = new_project_field_widths(16, 16, 1);
+    let long = new_project_field_widths(8192, 8192, 120);
+    assert_eq!(short.len(), 3, "largura, altura e FPS");
+    assert_eq!(short, long, "o campo não pode crescer com os dígitos");
+    assert!(
+        short.iter().all(|w| *w == crate::theme::NUM_W),
+        "largura fixa do tema: {short:?}"
+    );
+}
+
+#[test]
+fn a_one_frame_clip_can_be_selected_and_hovered_without_crashing() {
+    // Com a timeline afastada o clipe fica mais estreito que as margens das alças de fade, e o
+    // `clamp(min, max)` com min > max derrubava o app.
+    let mut h = harness(|st| {
+        st.drop_generator(Generator::SolidColor, 0, 0);
+        let id = st.project().video_tracks[0].clips[0].id;
+        st.apply(Edit::Trim {
+            clips: vec![id],
+            edge: Edge::End,
+            delta: -149,
+        });
+        st.select(id, false);
+    });
+    assert_eq!(v1_spans(&h), vec![(0, 1)]);
+    let at = h.state().tl_point(TrackKind::Video, 0, 0.5);
+    h.hover_at(at);
+    h.run_steps(3);
+    click(&mut h, at);
+    h.run_steps(2);
+}
+
+#[test]
+fn middle_button_wheel_runs_the_action_in_the_dragged_direction() {
+    let mut st = AppState::new(Project::new(ProjectSettings::default()));
+    with_solid(&mut st);
+    let ctx = egui::Context::default();
+    let mut ws = Workspace::new(&ctx, st);
+    ws.recovery.clear();
+    ws.radial.slots[0] = "BladeTool".into();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 520.0))
+        .build_ui_state(
+            |ui, ws: &mut Workspace| {
+                let ctx = ui.ctx().clone();
+                ws.begin_frame(&ctx);
+                ws.timeline_ui(ui);
+                let cat = crate::keymap::radial_catalog();
+                if let Some(id) = ws.radial.show(&ctx, &cat)
+                    && let Some(a) = crate::keymap::radial_action(&id)
+                {
+                    ws.run_action(a);
+                }
+            },
+            ws,
+        );
+    h.run_steps(3);
+    let before = v1_spans(&h);
+    let c = Pos2::new(600.0, 300.0);
+    let mid = |pressed| Event::PointerButton {
+        pos: c,
+        button: PointerButton::Middle,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    h.hover_at(c);
+    h.step();
+    h.event(mid(true));
+    h.step();
+    assert!(h.state().radial.is_open());
+    h.hover_at(c + egui::vec2(0.0, -90.0));
+    h.step();
+    h.event(Event::PointerButton {
+        pos: c + egui::vec2(0.0, -90.0),
+        button: PointerButton::Middle,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    });
+    h.run_steps(2);
+    assert!(!h.state().radial.is_open());
+    assert_eq!(h.state().st.tool, Tool::Blade);
+    assert_eq!(v1_spans(&h), before, "a roda não mexe na timeline");
+    // Todas as ações do catálogo existem.
+    for a in crate::keymap::radial_catalog() {
+        assert!(crate::keymap::radial_action(&a.id).is_some(), "{}", a.id);
+    }
 }

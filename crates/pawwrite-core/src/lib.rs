@@ -339,24 +339,40 @@ pub fn find_next(text: &str, needle: &str, from: usize) -> Option<Range<usize>> 
 }
 
 /// Troca todas as ocorrências (sem diferenciar maiúsculas). Devolve o texto novo e quantas trocas.
+///
+/// Uma passada só: o texto é posto em minúsculas uma vez e as ocorrências saem de `match_indices`.
+/// (Chamar `find_next` a cada troca refazia o texto inteiro em minúsculas por ocorrência: trocar
+/// uma palavra comum num roteiro grande travava a janela por vários segundos.)
 pub fn replace_all(text: &str, needle: &str, with: &str) -> (String, usize) {
     if needle.is_empty() {
         return (text.to_string(), 0);
     }
+    let (hay, pat) = (text.to_lowercase(), needle.to_lowercase());
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    // Se pôr em minúsculas mudou o tamanho de alguma letra, os índices não valem para o texto
+    // original: cai para a busca que diferencia maiúsculas (como `find_next`).
+    let aligned = hay.len() == text.len();
+    if aligned {
+        ranges.extend(hay.match_indices(&pat).map(|(i, m)| i..i + m.len()));
+        if ranges
+            .iter()
+            .any(|r| !text.is_char_boundary(r.start) || !text.is_char_boundary(r.end))
+        {
+            ranges.clear();
+            ranges.extend(text.match_indices(needle).map(|(i, m)| i..i + m.len()));
+        }
+    } else {
+        ranges.extend(text.match_indices(needle).map(|(i, m)| i..i + m.len()));
+    }
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
-    let mut n = 0;
-    while let Some(r) = find_next(text, needle, at) {
-        if r.start < at {
-            break; // deu a volta
-        }
+    for r in &ranges {
         out.push_str(&text[at..r.start]);
         out.push_str(with);
         at = r.end;
-        n += 1;
     }
     out.push_str(&text[at..]);
-    (out, n)
+    (out, ranges.len())
 }
 
 #[cfg(test)]
@@ -485,5 +501,27 @@ mod tests {
         let (out, n) = replace_all(t, "gato", "cão");
         assert_eq!((out.as_str(), n), ("cão, cão e cão.", 3));
         assert_eq!(replace_all("áé", "é", "e").0, "áe");
+    }
+
+    #[test]
+    fn replace_all_is_linear_and_matches_the_old_behaviour() {
+        assert_eq!(
+            replace_all("Cão e CÃO e cão", "cão", "gato"),
+            ("gato e gato e gato".into(), 3)
+        );
+        assert_eq!(replace_all("aaaa", "aa", "b"), ("bb".into(), 2));
+        assert_eq!(replace_all("sem nada", "xyz", "q"), ("sem nada".into(), 0));
+        assert_eq!(replace_all("abc", "", "q"), ("abc".into(), 0));
+        // 2 MB com centenas de milhares de ocorrências: tem de terminar na hora.
+        let big = "palavra e outra palavra e mais uma ".repeat(60_000);
+        let start = std::time::Instant::now();
+        let (out, n) = replace_all(&big, "E", "ee");
+        assert_eq!(n, 120_000);
+        assert_eq!(out.matches("ee").count(), 120_000);
+        assert!(
+            start.elapsed().as_secs() < 3,
+            "trocar ficou lento: {:?}",
+            start.elapsed()
+        );
     }
 }

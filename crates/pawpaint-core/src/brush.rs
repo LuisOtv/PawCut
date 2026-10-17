@@ -171,6 +171,9 @@ fn hash_noise(x: i32, y: i32) -> f32 {
     (h & 0xffff) as f32 / 65535.0
 }
 
+/// Coordenada mais distante da tela que ainda vale carimbar (a imagem tem no máximo 16384 px).
+const MAX_COORD: f32 = 1e7;
+
 /// Quem desenha um traço: guarda a posição suavizada e a distância desde o último carimbo.
 pub struct Stroker {
     pub brush: Brush,
@@ -216,6 +219,11 @@ impl Stroker {
 
     /// Próximo ponto do mouse. Põe os carimbos entre o ponto anterior e este.
     pub fn add_point(&mut self, x: f32, y: f32) {
+        // Ponto que não é número (ou longe demais para existir) é ignorado antes de entrar no
+        // suavizador: senão ele estragaria a posição de todos os pontos seguintes.
+        if !(x.abs() <= MAX_COORD && y.abs() <= MAX_COORD) {
+            return;
+        }
         let target = (x, y);
         let pos = match self.smoothed {
             None => target,
@@ -249,6 +257,13 @@ impl Stroker {
         let (dx, dy) = (pos.0 - last.0, pos.1 - last.1);
         let len = (dx * dx + dy * dy).sqrt();
         if len <= 0.0 {
+            return;
+        }
+        // Salto enorme (milhões de pixels de carimbos fora da imagem): vai direto ao destino.
+        if len > 1e5 {
+            self.stamp(pos.0, pos.1);
+            self.last = Some(pos);
+            self.carry = 0.0;
             return;
         }
         let (ux, uy) = (dx / len, dy / len);
@@ -285,9 +300,23 @@ impl Stroker {
     }
 
     fn stamp_one(&mut self, cx: f32, cy: f32) {
-        let b = self.brush.clone();
+        // Só os números que o carimbo usa (clonar o pincel inteiro, com o nome, a cada carimbo
+        // alocava memória milhares de vezes por segundo).
+        let (size, hardness, flow, roundness, angle, tip, grain, scatter) = {
+            let b = &self.brush;
+            (
+                b.size,
+                b.hardness,
+                b.flow,
+                b.roundness,
+                b.angle,
+                b.tip,
+                b.grain,
+                b.scatter,
+            )
+        };
         let (mut cx, mut cy) = (cx, cy);
-        if b.scatter > 0.0 {
+        if scatter > 0.0 {
             self.seed = self
                 .seed
                 .wrapping_mul(1_664_525)
@@ -297,72 +326,91 @@ impl Stroker {
                 .seed
                 .wrapping_mul(1_664_525)
                 .wrapping_add(1_013_904_223);
-            let r = (self.seed >> 8) as f32 / 16_777_216.0 * b.scatter * b.size;
+            let r = (self.seed >> 8) as f32 / 16_777_216.0 * scatter * size;
             cx += a.cos() * r;
             cy += a.sin() * r;
         }
-        let r = (b.size / 2.0).max(0.5);
-        let (rx, ry) = (r, (r * b.roundness.clamp(0.05, 1.0)).max(0.5));
-        let (sin, cos) = b.angle.to_radians().sin_cos();
+        let r = (size / 2.0).max(0.5);
+        let (rx, ry) = (r, (r * roundness.clamp(0.05, 1.0)).max(0.5));
+        let (sin, cos) = angle.to_radians().sin_cos();
         let reach = r + 1.5;
         let (x0, x1) = (
-            (cx - reach).floor().max(0.0) as i64,
-            ((cx + reach).ceil() as i64).min(self.w as i64),
+            (cx - reach).floor().max(0.0) as usize,
+            (((cx + reach).ceil() as i64).clamp(0, self.w as i64)) as usize,
         );
         let (y0, y1) = (
-            (cy - reach).floor().max(0.0) as i64,
-            ((cy + reach).ceil() as i64).min(self.h as i64),
+            (cy - reach).floor().max(0.0) as usize,
+            (((cy + reach).ceil() as i64).clamp(0, self.h as i64)) as usize,
         );
-        let hard = b.hardness.clamp(0.0, 0.999);
-        for py in y0..y1 {
-            for px in x0..x1 {
-                let (dx, dy) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
-                let (u, v) = ((dx * cos + dy * sin) / rx, (-dx * sin + dy * cos) / ry);
-                let d = match b.tip {
-                    Tip::Round => (u * u + v * v).sqrt(),
-                    Tip::Square => u.abs().max(v.abs()),
-                };
-                if d >= 1.0 + 1.5 / rx.min(ry) {
-                    continue;
-                }
-                let falloff = if d <= hard {
-                    1.0
-                } else {
-                    let t = ((1.0 - d) / (1.0 - hard)).clamp(0.0, 1.0);
-                    t * t * (3.0 - 2.0 * t)
-                };
-                // Borda de 1 pixel suave mesmo nos pincéis duros.
-                let aa = (((1.0 - d) * rx.min(ry)) + 0.5).clamp(0.0, 1.0);
-                let mut a = falloff * aa;
-                if b.grain > 0.0 {
-                    let n = hash_noise(px as i32, py as i32);
-                    a *= 1.0 - b.grain * (1.0 - n);
-                }
-                a *= b.flow;
-                if a <= 0.0 {
-                    continue;
-                }
-                self.deposit(px as usize, py as usize, a);
-            }
+        if x0 >= x1 || y0 >= y1 {
+            return;
         }
-    }
-
-    fn deposit(&mut self, x: usize, y: usize, a: f32) {
-        let color = self.color;
-        let erase = self.erase;
-        let t = self.buf.tile_mut(x / TILE, y / TILE);
-        let i = ((y % TILE) * TILE + x % TILE) * 4;
-        let da = t[i + 3] as f32 / 255.0;
-        let k = 1.0 - a;
-        if erase {
-            t[i + 3] = ((a + da * k) * 255.0).round().min(255.0) as u8;
-        } else {
-            for c in 0..3 {
-                t[i + c] = (color[c] as f32 * a + t[i + c] as f32 * k)
-                    .round()
-                    .min(255.0) as u8;
+        let hard = hardness.clamp(0.0, 0.999);
+        let cutoff = 1.0 + 1.5 / rx.min(ry);
+        let (color, erase) = (self.color, self.erase);
+        // Bloco a bloco: uma busca no mapa por bloco (antes eram duas por pixel), e blocos que o
+        // círculo não alcança nem são criados.
+        for ty in y0 / TILE..=(y1 - 1) / TILE {
+            for tx in x0 / TILE..=(x1 - 1) / TILE {
+                let (bx0, bx1) = ((tx * TILE).max(x0), ((tx + 1) * TILE).min(x1));
+                let (by0, by1) = ((ty * TILE).max(y0), ((ty + 1) * TILE).min(y1));
+                // Primeiro a cobertura de cada pixel do bloco; o bloco só entra no mapa (e só é
+                // criado) se o carimbo realmente cobre algum pixel dele.
+                let mut cover = [0.0f32; TILE * TILE];
+                let mut any = false;
+                for py in by0..by1 {
+                    for px in bx0..bx1 {
+                        let (dx, dy) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
+                        let (u, v) = ((dx * cos + dy * sin) / rx, (-dx * sin + dy * cos) / ry);
+                        let d = match tip {
+                            Tip::Round => (u * u + v * v).sqrt(),
+                            Tip::Square => u.abs().max(v.abs()),
+                        };
+                        if d >= cutoff {
+                            continue;
+                        }
+                        let falloff = if d <= hard {
+                            1.0
+                        } else {
+                            let t = ((1.0 - d) / (1.0 - hard)).clamp(0.0, 1.0);
+                            t * t * (3.0 - 2.0 * t)
+                        };
+                        // Borda de 1 pixel suave mesmo nos pincéis duros.
+                        let aa = (((1.0 - d) * rx.min(ry)) + 0.5).clamp(0.0, 1.0);
+                        let mut a = falloff * aa;
+                        if grain > 0.0 {
+                            let n = hash_noise(px as i32, py as i32);
+                            a *= 1.0 - grain * (1.0 - n);
+                        }
+                        a *= flow;
+                        if a > 0.0 {
+                            cover[(py % TILE) * TILE + px % TILE] = a;
+                            any = true;
+                        }
+                    }
+                }
+                if !any {
+                    continue;
+                }
+                let t = self.buf.tile_mut(tx, ty);
+                for (p, a) in cover.iter().enumerate() {
+                    let a = *a;
+                    if a <= 0.0 {
+                        continue;
+                    }
+                    let i = p * 4;
+                    let da = t[i + 3] as f32 / 255.0;
+                    let k = 1.0 - a;
+                    if !erase {
+                        for c in 0..3 {
+                            t[i + c] = (color[c] as f32 * a + t[i + c] as f32 * k)
+                                .round()
+                                .min(255.0) as u8;
+                        }
+                    }
+                    t[i + 3] = ((a + da * k) * 255.0).round().min(255.0) as u8;
+                }
             }
-            t[i + 3] = ((a + da * k) * 255.0).round().min(255.0) as u8;
         }
     }
 
@@ -483,6 +531,105 @@ pub fn commit_stroke(
 
 #[cfg(test)]
 mod tests {
+
+    /// Resumo (FNV) de tudo que o traço depositou, para provar que otimizar o carimbo não muda
+    /// o desenho.
+    fn stroke_digest(brush: Brush, erase: bool, mirror: (bool, bool)) -> u64 {
+        let mut s = Stroker::new(300, 200);
+        s.mirror = mirror;
+        s.begin(brush, [200, 40, 90], erase);
+        for (x, y) in [
+            (40.0, 40.0),
+            (90.0, 60.0),
+            (140.0, 150.0),
+            (290.0, 190.0),
+            (-20.0, 10.0),
+        ] {
+            s.add_point(x, y);
+        }
+        s.finish(120.0, 100.0);
+        let mut keys: Vec<_> = s.buf.tile_keys().collect();
+        keys.sort_unstable();
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for (tx, ty) in keys {
+            for b in [tx as u8, ty as u8]
+                .into_iter()
+                .chain(s.buf.tile(tx, ty).unwrap().iter().copied())
+            {
+                h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        h
+    }
+
+    #[test]
+    fn absurd_points_neither_hang_nor_poison_the_stroke() {
+        // Antes: um ponto em 1e30 fazia o laço de carimbos rodar para sempre (a subtração não
+        // muda um float desse tamanho) e um NaN contaminava o suavizador até o fim do traço.
+        let mut s = Stroker::new(100, 100);
+        s.begin(Brush::basic(), [0, 0, 0], false);
+        s.add_point(10.0, 10.0);
+        for (x, y) in [
+            (f32::NAN, 5.0),
+            (1e30, 1e30),
+            (f32::INFINITY, 0.0),
+            (-1e30, 3.0),
+        ] {
+            s.add_point(x, y);
+        }
+        s.add_point(30.0, 30.0);
+        s.finish(f32::NAN, f32::NAN);
+        let sample = |x, y| {
+            s.buf
+                .tile(x / TILE, y / TILE)
+                .map_or(0, |t| t[((y % TILE) * TILE + x % TILE) * 4 + 3])
+        };
+        assert!(sample(10, 10) > 200, "o primeiro ponto desenhou");
+        assert!(
+            sample(30, 30) > 200,
+            "o traço continuou depois dos pontos absurdos"
+        );
+        // Um salto enorme (mas finito) vai direto ao destino em vez de carimbar milhões de vezes.
+        let mut s = Stroker::new(100, 100);
+        s.begin(Brush::basic(), [0, 0, 0], false);
+        s.add_point(10.0, 10.0);
+        s.add_point(5_000_000.0, 5_000_000.0);
+        s.add_point(50.0, 50.0);
+        assert!(s.buf.tile(0, 0).is_some());
+    }
+
+    #[test]
+    fn stamp_output_digest_is_stable() {
+        let mut digests = Vec::new();
+        for (i, b) in Brush::presets().into_iter().enumerate() {
+            digests.push(stroke_digest(
+                b.clone(),
+                i % 2 == 1,
+                (i % 3 == 0, i % 4 == 0),
+            ));
+        }
+        let mut odd = Brush::basic();
+        odd.size = 70.0;
+        odd.roundness = 0.4;
+        odd.angle = 33.0;
+        odd.grain = 0.6;
+        odd.scatter = 0.5;
+        odd.tip = Tip::Square;
+        digests.push(stroke_digest(odd, false, (true, true)));
+        assert_eq!(
+            digests,
+            [
+                8249476363878655934,
+                2563027581617550316,
+                15369106445377999013,
+                13540469021327228302,
+                4187682486068578447,
+                13548342055724576395,
+                14168245826372103528,
+                4867819075218364718
+            ]
+        );
+    }
     use super::*;
 
     fn stroke(brush: Brush, pts: &[(f32, f32)]) -> (StrokeBuffer, TiledImage) {
@@ -662,7 +809,8 @@ pub struct Smudger {
 
 impl Smudger {
     pub fn new(brush: Brush) -> Self {
-        let side = (brush.size.ceil() as usize + 3).max(3);
+        // O quadrado do pincel guarda a cor carregada: um tamanho absurdo não pode pedir gigabytes.
+        let side = (brush.size.clamp(1.0, 2048.0).ceil() as usize + 3).max(3);
         Self {
             brush,
             carried: vec![[0.0; 4]; side * side],
@@ -697,6 +845,11 @@ impl Smudger {
 
     /// Começa o traço: pega a cor que está embaixo do pincel.
     pub fn begin(&mut self, pixels: &TiledImage, x: f32, y: f32) {
+        let (x, y) = if x.abs() <= MAX_COORD && y.abs() <= MAX_COORD {
+            (x, y)
+        } else {
+            (0.0, 0.0)
+        };
         let half = (self.side / 2) as i64;
         for j in 0..self.side {
             for i in 0..self.side {
@@ -720,6 +873,9 @@ impl Smudger {
         y: f32,
     ) -> HashSet<(usize, usize)> {
         let mut touched = HashSet::new();
+        if !(x.abs() <= MAX_COORD && y.abs() <= MAX_COORD) {
+            return touched;
+        }
         let Some(last) = self.last else {
             self.begin(pixels, x, y);
             return touched;
@@ -728,6 +884,11 @@ impl Smudger {
         let (dx, dy) = (x - last.0, y - last.1);
         let len = (dx * dx + dy * dy).sqrt();
         if len <= 0.0 {
+            return touched;
+        }
+        // Salto enorme: recomeça o borrão no destino em vez de arrastar por milhões de pixels.
+        if len > 1e5 {
+            self.begin(pixels, x, y);
             return touched;
         }
         let (ux, uy) = (dx / len, dy / len);

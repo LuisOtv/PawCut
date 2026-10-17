@@ -1,13 +1,13 @@
 //! Conteúdo de cada docker: ferramentas, camadas, pincéis, cor, paleta, visão geral, histórico.
 
 use egui::{Align2, Color32, Mesh, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, pos2, vec2};
+use paw_ui::icons::Icon;
 use paw_ui::theme;
 use pawpaint_core::brush::{Brush, Stroker, Tip, commit_stroke};
 use pawpaint_core::fill::GradientKind;
 use pawpaint_core::selection::SelOp;
 use pawpaint_core::{BlendMode, MoveTo, TiledImage};
 
-use crate::icons;
 use crate::state::{Dialog, State, Tool, hsv_to_rgb, rgb_to_hsv};
 
 fn label(ui: &mut egui::Ui, text: &str) {
@@ -20,67 +20,166 @@ fn rgb(c: [u8; 3]) -> Color32 {
 
 // ---------------------------------------------------------------- ferramentas
 
+/// Lado de um botão de ferramenta e o espaço entre eles.
+pub const TOOL_CELL: f32 = 32.0;
+const TOOL_GAP: f32 = 2.0;
+
+/// Quantas colunas cabem em `width` (respeitando a escolha do usuário: 1 coluna fixa ou auto).
+pub fn toolbox_columns(width: f32, pref: u8) -> usize {
+    let fit = (((width - 8.0 + TOOL_GAP) / (TOOL_CELL + TOOL_GAP)).floor() as usize).clamp(1, 8);
+    match pref {
+        0 => fit,
+        n => (n as usize).min(fit),
+    }
+}
+
+/// Caixa de ferramentas em grade: reflui conforme a largura do painel até virar uma coluna só
+/// (como a barra do Photoshop). O botão no topo alterna entre "uma coluna" e "quantas couberem".
 pub fn toolbox(st: &mut State, ui: &mut egui::Ui) {
-    ui.add_space(4.0);
-    let cell = 34.0;
-    let cols = ((ui.available_width() - 4.0) / (cell + 3.0))
-        .floor()
-        .max(1.0) as usize;
-    let mut clicked = None;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-        let _ = cols;
-        for tool in Tool::ALL {
-            let (rect, resp) = ui.allocate_exact_size(vec2(cell, cell), Sense::click());
-            let on = st.tool == tool;
-            let p = ui.painter();
-            if on {
-                p.rect_filled(rect, 4.0, theme::ACCENT.gamma_multiply(0.45));
-            } else if resp.hovered() {
-                p.rect_filled(rect, 4.0, theme::BAR_LIGHT);
-            }
-            icons::paint_tool(
-                p,
-                rect.shrink(7.0),
-                tool,
-                if on { Color32::WHITE } else { theme::TEXT },
+    let width = ui.available_width();
+    let cols = toolbox_columns(width, st.prefs.toolbox_cols);
+    let grid_w = cols as f32 * TOOL_CELL + (cols as f32 - 1.0) * TOOL_GAP;
+    let left = ui.cursor().min.x + ((width - grid_w) / 2.0).max(0.0);
+    let mut y = ui.cursor().min.y + 6.0;
+    // Alternar 1 coluna / várias (setinhas duplas, como no Photoshop).
+    {
+        let r = Rect::from_min_size(pos2(left, y), vec2(grid_w, 14.0));
+        let resp = ui
+            .interact(r, ui.id().with("toolbox-cols"), Sense::click())
+            .on_hover_text(if st.prefs.toolbox_cols == 1 {
+                "Mostrar em várias colunas"
+            } else {
+                "Mostrar numa coluna só"
+            });
+        let c = if resp.hovered() {
+            Color32::WHITE
+        } else {
+            theme::TEXT_DIM
+        };
+        let m = r.center();
+        let dir = if st.prefs.toolbox_cols == 1 {
+            1.0
+        } else {
+            -1.0
+        };
+        for dx in [-2.5f32, 2.5] {
+            let x = m.x + dx;
+            ui.painter().line_segment(
+                [pos2(x - 2.0 * dir, m.y - 3.5), pos2(x + 2.0 * dir, m.y)],
+                Stroke::new(1.3, c),
             );
-            if resp
-                .on_hover_text(format!("{} ({})", tool.label(), tool.key()))
-                .clicked()
-            {
-                clicked = Some(tool);
-            }
+            ui.painter().line_segment(
+                [pos2(x + 2.0 * dir, m.y), pos2(x - 2.0 * dir, m.y + 3.5)],
+                Stroke::new(1.3, c),
+            );
         }
-    });
+        if resp.clicked() {
+            st.prefs.toolbox_cols = if st.prefs.toolbox_cols == 1 { 0 } else { 1 };
+            crate::app::save_prefs(st);
+        }
+        y += 18.0;
+    }
+    let mut clicked = None;
+    let (mut col, mut group) = (0usize, None);
+    for tool in Tool::ALL {
+        // Cada grupo começa numa linha nova, com uma linha fina separando.
+        if group.is_some_and(|g| g != tool.group()) {
+            if col != 0 {
+                y += TOOL_CELL + TOOL_GAP;
+                col = 0;
+            }
+            y += 3.0;
+            ui.painter().line_segment(
+                [pos2(left + 4.0, y), pos2(left + grid_w - 4.0, y)],
+                Stroke::new(1.0, theme::BORDER),
+            );
+            y += 4.0;
+        }
+        group = Some(tool.group());
+        let rect = Rect::from_min_size(
+            pos2(left + col as f32 * (TOOL_CELL + TOOL_GAP), y),
+            vec2(TOOL_CELL, TOOL_CELL),
+        );
+        let resp = ui.interact(rect, ui.id().with(("tool", tool as u8)), Sense::click());
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tool.label())
+        });
+        let on = st.tool == tool;
+        let p = ui.painter();
+        if on {
+            p.rect_filled(rect, 4.0, theme::ACCENT.gamma_multiply(0.35));
+            p.rect_stroke(
+                rect,
+                4.0,
+                Stroke::new(1.0, theme::ACCENT),
+                egui::StrokeKind::Inside,
+            );
+        } else if resp.hovered() {
+            p.rect_filled(rect, 4.0, theme::BAR_LIGHT);
+        }
+        paw_ui::icons::paint(
+            p,
+            Rect::from_center_size(rect.center(), vec2(18.0, 18.0)),
+            tool.icon(),
+            if on { Color32::WHITE } else { theme::TEXT },
+        );
+        if resp
+            .on_hover_text(format!("{} ({})", tool.label(), tool.key()))
+            .clicked()
+        {
+            clicked = Some(tool);
+        }
+        col += 1;
+        if col == cols {
+            col = 0;
+            y += TOOL_CELL + TOOL_GAP;
+        }
+    }
+    if col != 0 {
+        y += TOOL_CELL + TOOL_GAP;
+    }
     if let Some(t) = clicked {
         crate::app::set_tool(st, t);
     }
-    ui.add_space(8.0);
-    // Cores da frente e do fundo.
-    let (rect, _) = ui.allocate_exact_size(vec2(cell * 2.0 + 3.0, 46.0), Sense::hover());
-    let bg = Rect::from_min_size(rect.min + vec2(18.0, 14.0), vec2(30.0, 30.0));
-    let fg = Rect::from_min_size(rect.min + vec2(0.0, 0.0), vec2(30.0, 30.0));
-    ui.painter().rect_filled(bg, 2.0, rgb(st.bg));
-    ui.painter().rect_stroke(
+    // Cores da frente e do fundo (sobrepostas, como em todo editor de imagem). Numa coluna só
+    // ficam menores, para caber na largura de um botão.
+    y += 8.0;
+    let sw = if cols >= 2 { 26.0 } else { 20.0 };
+    let off = if cols >= 2 { 14.0 } else { 10.0 };
+    let block = vec2(sw + off, sw + off);
+    let at = pos2(left + ((grid_w - block.x) / 2.0).max(0.0), y);
+    let fg = Rect::from_min_size(at, vec2(sw, sw));
+    let bg = Rect::from_min_size(at + vec2(off, off), vec2(sw, sw));
+    let p = ui.painter();
+    p.rect_filled(bg, 3.0, rgb(st.bg));
+    p.rect_stroke(
         bg,
-        2.0,
-        Stroke::new(1.0, Color32::BLACK),
+        3.0,
+        Stroke::new(1.0, theme::BORDER),
         egui::StrokeKind::Outside,
     );
-    ui.painter().rect_filled(fg, 2.0, rgb(st.fg));
-    ui.painter().rect_stroke(
+    p.rect_filled(fg, 3.0, rgb(st.fg));
+    p.rect_stroke(
         fg,
-        2.0,
-        Stroke::new(1.0, Color32::WHITE),
+        3.0,
+        Stroke::new(1.0, Color32::from_gray(0xd0)),
         egui::StrokeKind::Outside,
     );
     let swap = ui
-        .interact(rect, ui.id().with("swap"), Sense::click())
+        .interact(
+            Rect::from_min_size(at, block),
+            ui.id().with("swap"),
+            Sense::click(),
+        )
         .on_hover_text("Trocar frente e fundo (X)");
     if swap.clicked() {
         crate::app::swap_colors(st);
     }
+    let end = y + block.y + 8.0;
+    ui.advance_cursor_after_rect(Rect::from_min_max(
+        ui.cursor().min,
+        pos2(ui.cursor().min.x + width, end),
+    ));
 }
 
 // ---------------------------------------------------------------- camadas
@@ -116,7 +215,7 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
         let mut o = layer.opacity * 100.0;
         if ui
             .add(
-                egui::Slider::new(&mut o, 0.0..=100.0)
+                paw_ui::Slider::new(&mut o, 0.0..=100.0)
                     .suffix("%")
                     .trailing_fill(true),
             )
@@ -132,11 +231,16 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         let mut lock = layer.locked;
         let mut alock = layer.alpha_lock;
-        if ui
-            .toggle_value(&mut lock, "Trava")
-            .on_hover_text("Não aceita pintura nem filtros")
-            .changed()
+        if paw_ui::icons::button(
+            ui,
+            if lock { Icon::Lock } else { Icon::Unlock },
+            15.0,
+            lock,
+            "Travar camada: não aceita pintura nem filtros",
+        )
+        .clicked()
         {
+            lock = !lock;
             st.docs[st.cur]
                 .ed
                 .edit_layer(active, "lock", "Travar camada", |l| l.locked = lock);
@@ -190,6 +294,8 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
             layer_tree(st, ui, None, 0);
         });
     ui.add_space(2.0);
+    // Num docker estreito os sete botões encolhem juntos em vez de o último sair da linha.
+    let bw = ((ui.available_width() - 6.0 * ui.spacing().item_spacing.x) / 7.0).clamp(20.0, 28.0);
     ui.horizontal(|ui| {
         let cur = st.cur;
         let mut act: Option<&str> = None;
@@ -202,7 +308,7 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
             ("up", "Subir"),
             ("down", "Descer"),
         ] {
-            let (r, resp) = ui.allocate_exact_size(vec2(28.0, 24.0), Sense::click());
+            let (r, resp) = ui.allocate_exact_size(vec2(bw, 24.0), Sense::click());
             let p = ui.painter();
             p.rect_filled(
                 r,
@@ -213,57 +319,25 @@ pub fn layers(st: &mut State, ui: &mut egui::Ui) {
                     theme::BAR_LIGHT
                 },
             );
-            let c = r.center();
-            let st1 = Stroke::new(1.6, theme::TEXT);
-            match key {
-                "new" => {
-                    p.line_segment([c - vec2(5.0, 0.0), c + vec2(5.0, 0.0)], st1);
-                    p.line_segment([c - vec2(0.0, 5.0), c + vec2(0.0, 5.0)], st1);
-                }
-                "group" => {
-                    let f = Rect::from_center_size(c, vec2(14.0, 10.0));
-                    p.rect_stroke(f, 1.0, st1, egui::StrokeKind::Middle);
-                    p.line_segment(
-                        [
-                            f.left_top() - vec2(0.0, 2.0),
-                            f.left_top() + vec2(5.0, -2.0),
-                        ],
-                        st1,
-                    );
-                }
-                "dup" => {
-                    p.rect_stroke(
-                        Rect::from_center_size(c + vec2(-2.0, -2.0), vec2(9.0, 9.0)),
-                        1.0,
-                        st1,
-                        egui::StrokeKind::Middle,
-                    );
-                    p.rect_stroke(
-                        Rect::from_center_size(c + vec2(2.0, 2.0), vec2(9.0, 9.0)),
-                        1.0,
-                        st1,
-                        egui::StrokeKind::Middle,
-                    );
-                }
-                "del" => {
-                    p.line_segment([c - vec2(5.0, 5.0), c + vec2(5.0, 5.0)], st1);
-                    p.line_segment([c - vec2(5.0, -5.0), c + vec2(5.0, -5.0)], st1);
-                }
-                "merge" => {
-                    p.line_segment([c + vec2(0.0, -6.0), c + vec2(0.0, 4.0)], st1);
-                    p.line_segment([c + vec2(-4.0, 0.0), c + vec2(0.0, 4.0)], st1);
-                    p.line_segment([c + vec2(4.0, 0.0), c + vec2(0.0, 4.0)], st1);
-                    p.line_segment([c + vec2(-5.0, 7.0), c + vec2(5.0, 7.0)], st1);
-                }
-                "up" => {
-                    p.line_segment([c + vec2(-5.0, 3.0), c + vec2(0.0, -3.0)], st1);
-                    p.line_segment([c + vec2(5.0, 3.0), c + vec2(0.0, -3.0)], st1);
-                }
-                _ => {
-                    p.line_segment([c + vec2(-5.0, -3.0), c + vec2(0.0, 3.0)], st1);
-                    p.line_segment([c + vec2(5.0, -3.0), c + vec2(0.0, 3.0)], st1);
-                }
-            }
+            let icon = match key {
+                "new" => Icon::Plus,
+                "group" => Icon::Folder,
+                "dup" => Icon::Duplicate,
+                "del" => Icon::Trash,
+                "merge" => Icon::MergeDown,
+                "up" => Icon::ChevronUp,
+                _ => Icon::ChevronDown,
+            };
+            paw_ui::icons::paint(
+                p,
+                Rect::from_center_size(r.center(), vec2(16.0, 16.0)),
+                icon,
+                if resp.hovered() {
+                    Color32::WHITE
+                } else {
+                    theme::TEXT
+                },
+            );
             if resp.on_hover_text(tip).clicked() {
                 act = Some(key);
             }
@@ -403,11 +477,18 @@ fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64, depth: usize) {
     let eye = Rect::from_min_size(rect.min + vec2(2.0, 4.0), vec2(20.0, 20.0));
     let eye_resp = ui.interact(eye, ui.id().with(("eye", id)), Sense::click());
     let p = ui.painter();
-    if l.visible {
-        p.circle_filled(eye.center(), 5.0, theme::TEXT);
-    } else {
-        p.circle_stroke(eye.center(), 5.0, Stroke::new(1.5, theme::TEXT_DIM));
-    }
+    paw_ui::icons::paint(
+        p,
+        Rect::from_center_size(eye.center(), vec2(15.0, 15.0)),
+        if l.visible { Icon::Eye } else { Icon::EyeOff },
+        if eye_resp.hovered() {
+            Color32::WHITE
+        } else if l.visible {
+            theme::TEXT
+        } else {
+            theme::TEXT_DIM
+        },
+    );
     // Miniatura pequena: quadrado com a cor média não vale o custo; mostra o modo se não for Normal.
     let renaming = matches!(&st.renaming, Some((rid, _)) if *rid == id);
     if renaming {
@@ -431,12 +512,20 @@ fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64, depth: usize) {
         }
     } else {
         let tag = format!(
-            "{}{}{}{}",
+            "{}{}{}",
             if l.mask.is_some() { "[M] " } else { "" },
-            if l.locked { "🔒 " } else { "" },
             if l.alpha_lock { "α " } else { "" },
             l.name
         );
+        // Cadeado desenhado (emoji não existe em toda fonte) no fim da linha.
+        if l.locked {
+            paw_ui::icons::paint(
+                ui.painter(),
+                Rect::from_center_size(rect.right_center() - vec2(12.0, 0.0), vec2(13.0, 13.0)),
+                Icon::Lock,
+                theme::TEXT_DIM,
+            );
+        }
         ui.painter().with_clip_rect(rect).text(
             rect.min + vec2(68.0, 14.0),
             Align2::LEFT_CENTER,
@@ -450,7 +539,7 @@ fn layer_row(st: &mut State, ui: &mut egui::Ui, id: u64, depth: usize) {
         );
         if l.mode != BlendMode::Normal || l.opacity < 1.0 {
             ui.painter().text(
-                rect.right_center() - vec2(6.0, 0.0),
+                rect.right_center() - vec2(if l.locked { 24.0 } else { 6.0 }, 0.0),
                 Align2::RIGHT_CENTER,
                 format!(
                     "{}{}",
@@ -595,7 +684,10 @@ pub fn brush_presets(st: &mut State, ui: &mut egui::Ui) {
                 };
                 let w = ui.available_width() - 4.0;
                 let (rect, resp) = ui.allocate_exact_size(vec2(w, 46.0), Sense::click());
-                let p = ui.painter();
+                // Num docker estreito a miniatura encolhe (o nome não fica mais cortado) e o texto
+                // é recortado na própria linha.
+                let thumb_w = (w * 0.55).clamp(64.0, 150.0);
+                let p = ui.painter_at(rect);
                 if selected {
                     p.rect_filled(rect, 3.0, theme::ACCENT.gamma_multiply(0.35));
                 } else if resp.hovered() {
@@ -603,12 +695,12 @@ pub fn brush_presets(st: &mut State, ui: &mut egui::Ui) {
                 }
                 p.image(
                     tex.id(),
-                    Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(150.0, 38.0)),
+                    Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(thumb_w, 38.0)),
                     Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                     Color32::WHITE,
                 );
                 p.text(
-                    rect.min + vec2(162.0, 23.0),
+                    rect.min + vec2(thumb_w + 12.0, 23.0),
                     Align2::LEFT_CENTER,
                     &b.name,
                     theme::text(12.5),
@@ -653,8 +745,13 @@ pub fn brush_editor(st: &mut State, ui: &mut egui::Ui) {
                               v: &mut f32,
                               r: std::ops::RangeInclusive<f32>,
                               suffix: &str| {
-                    ui.label(name);
-                    ui.add(egui::Slider::new(v, r).suffix(suffix));
+                    ui.label(RichText::new(name).color(theme::TEXT_DIM));
+                    // Tamanho em escala logarítmica, como no Krita: 1 a 30 px ocupam meio trilho.
+                    ui.add(
+                        paw_ui::Slider::new(v, r)
+                            .suffix(suffix)
+                            .logarithmic(name == "Tamanho"),
+                    );
                     ui.end_row();
                 };
                 slider(ui, "Tamanho", &mut b.size, 1.0..=500.0, " px");
@@ -736,10 +833,10 @@ pub fn tool_options(st: &mut State, ui: &mut egui::Ui) {
             ui.label(RichText::new("Arraste sobre a pintura para borrar. O fluxo do pincel controla a força; dureza e tamanho valem como no pincel.").weak().small());
         }
         Tool::Fill => {
-            ui.add(egui::Slider::new(&mut o.fill_tolerance, 0.0..=1.0).text("Tolerância"));
+            ui.add(paw_ui::Slider::new(&mut o.fill_tolerance, 0.0..=1.0).text("Tolerância"));
             let mut op = o.fill_opacity * 100.0;
             ui.add(
-                egui::Slider::new(&mut op, 1.0..=100.0)
+                paw_ui::Slider::new(&mut op, 1.0..=100.0)
                     .suffix("%")
                     .text("Opacidade"),
             );
@@ -758,7 +855,7 @@ pub fn tool_options(st: &mut State, ui: &mut egui::Ui) {
             );
             let mut op = o.gradient_opacity * 100.0;
             ui.add(
-                egui::Slider::new(&mut op, 1.0..=100.0)
+                paw_ui::Slider::new(&mut op, 1.0..=100.0)
                     .suffix("%")
                     .text("Opacidade"),
             );
@@ -782,11 +879,11 @@ pub fn tool_options(st: &mut State, ui: &mut egui::Ui) {
                 }
             });
             if tool == Tool::Wand {
-                ui.add(egui::Slider::new(&mut o.wand_tolerance, 0.0..=1.0).text("Tolerância"));
+                ui.add(paw_ui::Slider::new(&mut o.wand_tolerance, 0.0..=1.0).text("Tolerância"));
                 ui.checkbox(&mut o.contiguous, "Só a região ligada");
                 ui.checkbox(&mut o.sample_merged, "Olhar todas as camadas");
             } else {
-                ui.add(egui::Slider::new(&mut o.feather, 0..=60).text("Suavizar borda"));
+                ui.add(paw_ui::Slider::new(&mut o.feather, 0..=60).text("Suavizar borda"));
             }
         }
         Tool::Line | Tool::Rect | Tool::Ellipse => {
@@ -820,7 +917,7 @@ pub fn tool_options(st: &mut State, ui: &mut egui::Ui) {
                         ui.selectable_value(&mut t.font, f.clone(), f);
                     }
                 });
-            ui.add(egui::Slider::new(&mut t.size, 6.0..=400.0).text("Tamanho"));
+            ui.add(paw_ui::Slider::new(&mut t.size, 6.0..=400.0).text("Tamanho"));
             ui.horizontal(|ui| {
                 ui.toggle_value(&mut t.bold, "Negrito");
                 ui.toggle_value(&mut t.italic, "Itálico");
@@ -883,7 +980,7 @@ pub fn color(st: &mut State, ui: &mut egui::Ui) {
     mesh.add_triangle(0, 2, 3);
     ui.painter().add(egui::Shape::mesh(mesh));
     let mut changed = false;
-    if (resp.dragged() || resp.clicked())
+    if (resp.dragged_by(egui::PointerButton::Primary) || resp.clicked())
         && let Some(p) = resp.interact_pointer_pos()
     {
         s = ((p.x - sq.left()) / sq.width()).clamp(0.0, 1.0);
@@ -914,7 +1011,7 @@ pub fn color(st: &mut State, ui: &mut egui::Ui) {
         }
     }
     ui.painter().add(egui::Shape::mesh(mesh));
-    if (resp.dragged() || resp.clicked())
+    if (resp.dragged_by(egui::PointerButton::Primary) || resp.clicked())
         && let Some(p) = resp.interact_pointer_pos()
     {
         h = ((p.x - bar.left()) / bar.width()).clamp(0.0, 1.0) * 359.99;
@@ -1088,7 +1185,7 @@ pub fn overview(st: &mut State, ui: &mut egui::Ui) {
         Color32::WHITE,
     );
     // A janela que o canvas mostra agora: o centro do canvas na imagem, com o pan atual.
-    if (resp.dragged() || resp.clicked())
+    if (resp.dragged_by(egui::PointerButton::Primary) || resp.clicked())
         && let Some(p) = resp.interact_pointer_pos()
     {
         let (fx, fy) = (
@@ -1104,9 +1201,10 @@ pub fn overview(st: &mut State, ui: &mut egui::Ui) {
             rect.left() + cx * rect.width(),
             rect.top() + cy * rect.height(),
         ),
+        // O que o canvas mostra, em pixels da imagem: tamanho da área dividido pelo zoom.
         vec2(
-            rect.width() / d.zoom.max(0.05) * 0.5,
-            rect.height() / d.zoom.max(0.05) * 0.5,
+            d.canvas_size.x / d.zoom.max(0.01) * k,
+            d.canvas_size.y / d.zoom.max(0.01) * k,
         ),
     )
     .intersect(rect);

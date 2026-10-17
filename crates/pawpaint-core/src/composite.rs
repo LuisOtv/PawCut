@@ -123,34 +123,33 @@ fn composite_level(
     out
 }
 
-/// A imagem final (alfa direto) com todas as camadas visíveis.
+/// A imagem final (alfa direto) com todas as camadas visíveis. As faixas de blocos são
+/// compostas em paralelo, cada thread escrevendo direto nas suas linhas.
 pub fn flatten(doc: &Doc) -> RgbaImage {
-    let mut img = RgbaImage::new(doc.width as u32, doc.height as u32);
-    let tx = doc.width.div_ceil(TILE);
-    let ty = doc.height.div_ceil(TILE);
-    for by in 0..ty {
-        for bx in 0..tx {
-            let t = composite_tile(doc, bx, by, None);
-            for y in 0..TILE {
-                let py = by * TILE + y;
-                if py >= doc.height {
-                    break;
-                }
-                for x in 0..TILE {
-                    let px = bx * TILE + x;
-                    if px >= doc.width {
-                        break;
+    let (w, h) = (doc.width, doc.height);
+    let mut img = RgbaImage::new(w as u32, h as u32);
+    let tx = w.div_ceil(TILE);
+    crate::par::rows(&mut img, w * 4 * TILE, |first_band, chunk| {
+        for (k, band) in chunk.chunks_mut(w * 4 * TILE).enumerate() {
+            let by = first_band + k;
+            for bx in 0..tx {
+                let t = composite_tile(doc, bx, by, None);
+                let (tw, th) = (TILE.min(w - bx * TILE), TILE.min(h - by * TILE));
+                for y in 0..th {
+                    for x in 0..tw {
+                        let i = (y * TILE + x) * 4;
+                        let o = (y * w + bx * TILE + x) * 4;
+                        band[o..o + 4].copy_from_slice(&unpremultiply([
+                            t[i],
+                            t[i + 1],
+                            t[i + 2],
+                            t[i + 3],
+                        ]));
                     }
-                    let i = (y * TILE + x) * 4;
-                    img.put_pixel(
-                        px as u32,
-                        py as u32,
-                        image::Rgba(unpremultiply([t[i], t[i + 1], t[i + 2], t[i + 3]])),
-                    );
                 }
             }
         }
-    }
+    });
     img
 }
 
@@ -217,5 +216,39 @@ mod tests {
         assert_eq!(&t[i..i + 4], &[0, 0, 255, 255]);
         let plain = composite_tile(&d, 0, 0, None);
         assert_eq!(&plain[i..i + 4], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn flatten_split_across_threads_matches_the_tile_by_tile_composite() {
+        // 1100x1000 passa do limite de pixels que divide o trabalho e termina em blocos parciais.
+        let mut d = Doc::new(1100, 1000);
+        let mut a = Layer::new(1, "fundo", 1100, 1000);
+        a.pixels.fill_solid([200, 150, 100, 255]);
+        let mut b = Layer::new(2, "topo", 1100, 1000);
+        b.opacity = 0.6;
+        b.mode = BlendMode::Multiply;
+        for y in (0..1000).step_by(3) {
+            for x in (0..1100).step_by(7) {
+                b.pixels
+                    .set_pixel(x, y, [(x % 200) as u8, (y % 200) as u8, 90, 200]);
+            }
+        }
+        d.layers = vec![a, b];
+        let img = flatten(&d);
+        assert_eq!((img.width(), img.height()), (1100, 1000));
+        for (x, y) in [
+            (0, 0),
+            (1099, 999),
+            (700, 3),
+            (693, 996),
+            (64, 64),
+            (63, 63),
+            (1050, 960),
+        ] {
+            let t = composite_tile(&d, x / TILE, y / TILE, None);
+            let i = ((y % TILE) * TILE + x % TILE) * 4;
+            let want = unpremultiply([t[i], t[i + 1], t[i + 2], t[i + 3]]);
+            assert_eq!(img.get_pixel(x as u32, y as u32).0, want, "pixel {x},{y}");
+        }
     }
 }

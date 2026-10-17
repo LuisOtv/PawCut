@@ -69,6 +69,18 @@ pub struct PawCutApp {
     frames: u64,
 }
 
+/// Menu da barra de cima. Numa janela baixa a lista é maior que a tela: rola em vez de cortar
+/// os últimos itens (Preferências, atalhos...).
+fn top_menu(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.menu_button(title, |ui| {
+        let max_h = (ui.ctx().content_rect().height() - 48.0).max(120.0);
+        egui::ScrollArea::vertical()
+            .max_height(max_h)
+            .auto_shrink([true, true])
+            .show(ui, add);
+    });
+}
+
 impl PawCutApp {
     pub fn new(cc: &eframe::CreationContext<'_>, args: Vec<PathBuf>) -> Self {
         let ctx = &cc.egui_ctx;
@@ -120,7 +132,7 @@ impl PawCutApp {
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("Arquivo", |ui| {
+            top_menu(ui, "Arquivo", |ui| {
                 self.item(ui, "Novo projeto…", Action::NewProject);
                 self.item(ui, "Abrir…", Action::Open);
                 self.item(ui, "Salvar", Action::Save);
@@ -213,7 +225,7 @@ impl PawCutApp {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
-            ui.menu_button("Editar", |ui| {
+            top_menu(ui, "Editar", |ui| {
                 // Mostra o que vai ser desfeito ("Desfazer: Mover clipe").
                 let undo = match self.ws.st.editor.undo_label() {
                     Some(l) => format!("Desfazer: {l}"),
@@ -259,7 +271,7 @@ impl PawCutApp {
                     self.ws.prefs_open = true;
                 }
             });
-            ui.menu_button("Timeline", |ui| {
+            top_menu(ui, "Timeline", |ui| {
                 self.item(ui, "Ferramenta de seleção", Action::SelectionTool);
                 self.item(ui, "Ferramenta lâmina", Action::BladeTool);
                 self.item(ui, "Ferramenta Trim", Action::TrimTool);
@@ -286,7 +298,7 @@ impl PawCutApp {
                 ui.separator();
                 self.item(ui, "Zoom para caber", Action::ZoomToFit);
             });
-            ui.menu_button("Reprodução", |ui| {
+            top_menu(ui, "Reprodução", |ui| {
                 self.item(ui, "Tocar / pausar", Action::PlayPause);
                 self.item(ui, "Para trás", Action::PlayReverse);
                 self.item(ui, "Parar", Action::Stop);
@@ -296,7 +308,7 @@ impl PawCutApp {
                 self.item(ui, "Marcar Out", Action::MarkOut);
                 self.item(ui, "Limpar In/Out", Action::ClearMarks);
             });
-            ui.menu_button("Workspace", |ui| {
+            top_menu(ui, "Workspace", |ui| {
                 for panel in Panel::ALL {
                     let mut shown = self.layout.is_visible(panel);
                     if ui.checkbox(&mut shown, panel.title()).changed() {
@@ -305,6 +317,14 @@ impl PawCutApp {
                 }
                 ui.separator();
                 self.item(ui, "Maximizar painel sob o mouse", Action::MaximizePanel);
+                if ui
+                    .button("Roda de atalhos…")
+                    .on_hover_text("Botão do meio do mouse: segure, arraste até a ação e solte")
+                    .clicked()
+                {
+                    ui.close();
+                    self.ws.radial.editing = true;
+                }
                 if ui.button("Reset UI Layout").clicked() {
                     ui.close();
                     self.layout.reset();
@@ -533,7 +553,9 @@ impl eframe::App for PawCutApp {
             .frame(bar(theme::BAR))
             .show(ui, |ui| self.interface_bar(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            let style = theme::dock_style(ui.style().as_ref());
+            let mut style = theme::dock_style(ui.style().as_ref());
+            // Nenhum painel encolhe a ponto de cortar os campos do Inspector.
+            style.separator.extra = theme::PROPS_MIN_W;
             DockArea::new(&mut self.layout.dock)
                 .style(style)
                 .show_leaf_collapse_buttons(false)
@@ -542,6 +564,12 @@ impl eframe::App for PawCutApp {
                 .show_inside(ui, &mut self.ws);
         });
         self.ws.dialogs_ui(&ctx);
+        let catalog = crate::keymap::radial_catalog();
+        if let Some(id) = self.ws.radial.show(&ctx, &catalog)
+            && let Some(a) = crate::keymap::radial_action(&id)
+        {
+            self.ws.run_action(a);
+        }
 
         self.file_drop_overlay(&ctx);
         self.ws.toasts.ui(&ctx);

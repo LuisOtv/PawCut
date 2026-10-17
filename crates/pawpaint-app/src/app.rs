@@ -43,6 +43,8 @@ struct PrefsFile {
     brushes: Vec<Brush>,
     #[serde(default)]
     files: Vec<PathBuf>,
+    #[serde(default)]
+    toolbox_cols: u8,
 }
 
 pub fn save_prefs(st: &State) {
@@ -51,6 +53,7 @@ pub fn save_prefs(st: &State) {
         recent: st.prefs.recent.clone(),
         brushes: user,
         files: st.prefs.files.clone(),
+        toolbox_cols: st.prefs.toolbox_cols,
     };
     let _ = std::fs::create_dir_all(config_dir());
     if let Ok(t) = serde_json::to_string(&file) {
@@ -75,6 +78,178 @@ pub fn save_brush_preset(st: &mut State, ctx: &egui::Context) {
     st.say("Pincel salvo");
 }
 
+/// Campo de tamanho em px com largura fixa: o diálogo não muda de largura enquanto os dígitos mudam.
+fn size_field(ui: &mut egui::Ui, v: &mut usize) {
+    theme::fixed_width(ui, theme::NUM_W, |ui| {
+        ui.add(egui::DragValue::new(v).range(1..=8192).suffix(" px"))
+    });
+}
+
+/// Slider de diálogo: a caixa do valor tem largura fixa e no máximo duas casas decimais.
+fn dialog_slider<N: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    v: &mut N,
+    range: std::ops::RangeInclusive<N>,
+    suffix: &str,
+) -> egui::Response {
+    theme::fixed_width(ui, theme::NUM_W, |ui| {
+        ui.add(paw_ui::Slider::new(v, range).max_decimals(2).suffix(suffix))
+    })
+}
+
+/// Prévia de filtro mais lenta que isso (ms) só é refeita quando o slider é solto.
+const SLOW_PREVIEW_MS: f32 = 60.0;
+
+#[derive(Debug, PartialEq, Eq)]
+enum PreviewAction {
+    Nothing,
+    /// Refaz a prévia agora.
+    Apply,
+    /// Mudou, mas o filtro é lento e o slider ainda está sendo arrastado: espera soltar.
+    Wait,
+}
+
+fn preview_action(
+    preview: bool,
+    changed: bool,
+    waiting: bool,
+    applied: bool,
+    last_ms: f32,
+    dragging: bool,
+) -> PreviewAction {
+    if !preview || !(changed || waiting || !applied) {
+        return PreviewAction::Nothing;
+    }
+    if applied && last_ms > SLOW_PREVIEW_MS && dragging {
+        PreviewAction::Wait
+    } else {
+        PreviewAction::Apply
+    }
+}
+
+// ---------------------------------------------------------------- roda de atalhos
+
+/// Roda padrão: pincel em cima, borracha embaixo, desfazer/refazer nos lados.
+const RADIAL_DEFAULTS: &[&str] = &[
+    "tool:brush",
+    "picker",
+    "redo",
+    "new_layer",
+    "tool:eraser",
+    "swap_colors",
+    "undo",
+    "fit",
+];
+
+fn tool_id(t: Tool) -> String {
+    format!("tool:{}", format!("{t:?}").to_lowercase())
+}
+
+/// Tudo que pode ir para a roda.
+pub fn radial_catalog() -> Vec<paw_ui::radial::RadialAction> {
+    use paw_ui::icons::Icon;
+    use paw_ui::radial::RadialAction as A;
+    let mut v: Vec<A> = vec![
+        A::new("undo", "Desfazer", Icon::Undo),
+        A::new("redo", "Refazer", Icon::Redo),
+        A::new("picker", "Conta-gotas", Icon::Eyedropper),
+        A::new("swap_colors", "Trocar frente e fundo", Icon::Swap),
+        A::new("new_layer", "Nova camada", Icon::Plus),
+        A::new("dup_layer", "Duplicar camada", Icon::Duplicate),
+        A::new("merge_down", "Unir com a de baixo", Icon::MergeDown),
+        A::new("clear", "Limpar", Icon::Trash),
+        A::new("select_all", "Selecionar tudo", Icon::SelRect),
+        A::new("deselect", "Tirar seleção", Icon::Close),
+        A::new("invert_selection", "Inverter seleção", Icon::Swap),
+        A::new("copy", "Copiar", Icon::Copy),
+        A::new("cut", "Recortar", Icon::Scissors),
+        A::new("paste", "Colar", Icon::Paste),
+        A::new("fit", "Caber na tela", Icon::Fit),
+        A::new("zoom_100", "Zoom 100%", Icon::Search),
+        A::new("zoom_in", "Ampliar", Icon::ZoomIn),
+        A::new("zoom_out", "Reduzir", Icon::ZoomOut),
+        A::new("mirror_h", "Espelho horizontal", Icon::FlipH),
+        A::new("mirror_v", "Espelho vertical", Icon::FlipV),
+        A::new("flip_canvas", "Espelhar imagem", Icon::FlipH),
+        A::new("save", "Salvar", Icon::Save),
+        A::new("export", "Exportar", Icon::DeliverPage),
+    ];
+    for t in Tool::ALL {
+        v.push(A::new(tool_id(t), t.label(), t.icon()));
+    }
+    v
+}
+
+/// Executa uma ação escolhida na roda.
+pub fn run_radial(st: &mut State, id: &str) {
+    if let Some(t) = Tool::ALL.into_iter().find(|t| tool_id(*t) == id) {
+        set_tool(st, t);
+        return;
+    }
+    match id {
+        "picker" => set_tool(st, Tool::Picker),
+        "swap_colors" => swap_colors(st),
+        "save" => save(st),
+        "export" => ask(st, Purpose::Export),
+        "mirror_h" => st.mirror.0 = !st.mirror.0,
+        "mirror_v" => st.mirror.1 = !st.mirror.1,
+        _ if st.docs.is_empty() => {}
+        "undo" => {
+            if let Some(d) = st.doc_mut() {
+                if d.float.is_some() {
+                    canvas::abort_float(d);
+                } else {
+                    d.ed.undo();
+                }
+            }
+        }
+        "redo" => {
+            if let Some(d) = st.doc_mut() {
+                commit_if_floating(d);
+                d.ed.redo();
+            }
+        }
+        "new_layer" => new_layer(st),
+        "dup_layer" => dup_layer(st),
+        "merge_down" => merge_down(st),
+        "clear" => edit_clear(st),
+        "copy" => edit_copy(st, false),
+        "cut" => edit_cut(st),
+        "paste" => edit_paste(st),
+        "fit" => {
+            if let Some(d) = st.doc_mut() {
+                d.fit = true;
+                d.pan = egui::Vec2::ZERO;
+            }
+        }
+        "zoom_100" => zoom_to(st, 1.0),
+        "zoom_in" => zoom_by(st, 1.25),
+        "zoom_out" => zoom_by(st, 0.8),
+        "select_all" => {
+            if let Some(d) = st.doc_mut() {
+                d.ed.select_all();
+            }
+        }
+        "deselect" => {
+            if let Some(d) = st.doc_mut() {
+                d.ed.deselect();
+            }
+        }
+        "invert_selection" => {
+            if let Some(d) = st.doc_mut() {
+                d.ed.invert_selection();
+            }
+        }
+        "flip_canvas" => {
+            if let Some(d) = st.doc_mut() {
+                commit_if_floating(d);
+                d.ed.flip_image(true);
+            }
+        }
+        _ => {}
+    }
+}
+
 // ---------------------------------------------------------------- recuperação automática
 
 fn autosave_dir() -> PathBuf {
@@ -94,16 +269,59 @@ fn autosave_file(uid: u64) -> PathBuf {
 }
 
 /// Guarda uma cópia dos documentos com mudanças, para recuperar se o app fechar de repente.
+///
+/// Salvar uma foto grande com várias camadas leva segundos, então isso roda numa thread, com uma
+/// cópia do documento (copiar só copia ponteiros dos blocos, ~2 ms): a pintura nunca espera o
+/// disco. Se o anterior ainda não terminou, tenta de novo em 10 s.
 fn autosave(st: &mut State) {
+    if st.autosave_job.as_ref().is_some_and(|j| !j.is_finished()) {
+        st.last_autosave = std::time::Instant::now() - std::time::Duration::from_secs(35);
+        return;
+    }
+    st.autosave_job = None;
     st.last_autosave = std::time::Instant::now();
     let _ = std::fs::create_dir_all(autosave_dir());
+    let mut jobs = Vec::new();
     for d in &st.docs {
         let f = autosave_file(d.uid);
         if d.ed.is_dirty() && d.float.is_none() {
-            let _ = file::save_project(&d.ed, &f);
+            jobs.push((d.uid, d.ed.doc().clone(), f));
         } else if !d.ed.is_dirty() {
             let _ = std::fs::remove_file(&f);
         }
+    }
+    if jobs.is_empty() {
+        return;
+    }
+    let closed = st.autosave_closed.clone();
+    let is_closed = move |uid: u64| closed.lock().is_ok_and(|c| c.contains(&uid));
+    let handle = std::thread::spawn(move || {
+        for (uid, doc, f) in jobs {
+            if is_closed(uid) {
+                continue;
+            }
+            let _ = file::save_doc(&doc, &f, file::SaveSpeed::Fast);
+            // Fechou durante o salvamento: apaga o que acabou de escrever.
+            if is_closed(uid) {
+                let _ = std::fs::remove_file(&f);
+            }
+        }
+    });
+    st.autosave_job = Some(handle);
+}
+
+/// Apaga o autosave de um documento fechado e impede que um salvamento atrasado o recrie.
+fn forget_autosave(st: &State, uid: u64) {
+    if let Ok(mut c) = st.autosave_closed.lock() {
+        c.insert(uid);
+    }
+    let _ = std::fs::remove_file(autosave_file(uid));
+}
+
+/// Espera o autosave em andamento terminar (ao fechar o app e nos testes).
+fn finish_autosave(st: &mut State) {
+    if let Some(j) = st.autosave_job.take() {
+        let _ = j.join();
     }
 }
 
@@ -147,7 +365,7 @@ pub fn default_layout() -> DockState<Panel> {
             Panel::Overview,
         ],
     );
-    tree.split_left(canvas, 0.07, vec![Panel::Toolbox]);
+    tree.split_left(canvas, 0.085, vec![Panel::Toolbox]);
     dock
 }
 
@@ -192,15 +410,26 @@ impl TabViewer for Viewer<'_> {
             .show(ui, |ui| {
                 ui.set_min_size(size - egui::vec2(PAD * 2.0, PAD * 2.0));
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                // Sliders acompanham a largura do docker (o padrão de 100 px cortava o valor
+                // quando o docker ficava estreito).
+                // Rótulo (~90 px) + trilho + campo do valor (72 px): o trilho fica com o resto.
+                ui.spacing_mut().slider_width = (ui.available_width() - 190.0).clamp(40.0, 200.0);
+                // Dockers com mais conteúdo que altura rolam em vez de cortar (o quadrado de cor
+                // perdia as amostras embaixo).
+                let scroll = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink(false)
+                        .show(ui, |ui| add(ui));
+                };
                 match tab {
                     Panel::Canvas => {}
-                    Panel::Toolbox => docks::toolbox(st, ui),
+                    Panel::Toolbox => scroll(ui, &mut |ui| docks::toolbox(st, ui)),
                     Panel::Layers => docks::layers(st, ui),
                     Panel::BrushPresets => docks::brush_presets(st, ui),
                     Panel::BrushEditor => docks::brush_editor(st, ui),
-                    Panel::ToolOptions => docks::tool_options(st, ui),
-                    Panel::Color => docks::color(st, ui),
-                    Panel::Palette => docks::palette(st, ui),
+                    Panel::ToolOptions => scroll(ui, &mut |ui| docks::tool_options(st, ui)),
+                    Panel::Color => scroll(ui, &mut |ui| docks::color(st, ui)),
+                    Panel::Palette => scroll(ui, &mut |ui| docks::palette(st, ui)),
                     Panel::Overview => docks::overview(st, ui),
                     Panel::History => docks::history(st, ui),
                 }
@@ -235,6 +464,7 @@ impl PaintApp {
         {
             app.st.prefs.recent = p.recent;
             app.st.prefs.files = p.files;
+            app.st.prefs.toolbox_cols = p.toolbox_cols;
             app.st.user_presets = p.brushes.len();
             app.st.presets.extend(p.brushes);
         }
@@ -283,6 +513,7 @@ impl PaintApp {
                 prefs: Prefs {
                     recent: Vec::new(),
                     files: Vec::new(),
+                    toolbox_cols: 0,
                 },
                 interaction: None,
                 text_input: None,
@@ -292,7 +523,13 @@ impl PaintApp {
                 allow_close: false,
                 tool_changed: false,
                 last_autosave: std::time::Instant::now(),
+                autosave_job: None,
+                autosave_closed: Default::default(),
                 popup_palette: None,
+                radial: paw_ui::radial::Radial::load(
+                    Some(config_dir().join("radial.json")),
+                    RADIAL_DEFAULTS,
+                ),
             },
             last_title: String::new(),
             last_layout: String::new(),
@@ -303,6 +540,39 @@ impl PaintApp {
 }
 
 // ---------------------------------------------------------------- operações de estado
+
+/// Espelho e Borracha da barra do pincel (dentro de um menu quando a janela é estreita).
+fn mirror_and_eraser(st: &mut State, ui: &mut egui::Ui) {
+    use paw_ui::icons::{self, Icon};
+    ui.horizontal(|ui| {
+        if icons::button(
+            ui,
+            Icon::FlipH,
+            16.0,
+            st.mirror.0,
+            "Espelho horizontal: pinta também refletido (eixo vertical no meio)",
+        )
+        .clicked()
+        {
+            st.mirror.0 = !st.mirror.0;
+        }
+        if icons::button(
+            ui,
+            Icon::FlipV,
+            16.0,
+            st.mirror.1,
+            "Espelho vertical: pinta também refletido (eixo horizontal no meio)",
+        )
+        .clicked()
+        {
+            st.mirror.1 = !st.mirror.1;
+        }
+        let erasing = st.tool == Tool::Eraser;
+        if icons::button(ui, Icon::Eraser, 16.0, erasing, "Alterna borracha (E)").clicked() {
+            set_tool(st, if erasing { Tool::Brush } else { Tool::Eraser });
+        }
+    });
+}
 
 pub fn set_tool(st: &mut State, tool: Tool) {
     if st.tool == tool {
@@ -336,7 +606,7 @@ pub fn request_close_doc(st: &mut State, i: usize) {
 fn close_doc(st: &mut State, i: usize) {
     if i < st.docs.len() {
         let removed = st.docs.remove(i);
-        let _ = std::fs::remove_file(autosave_file(removed.uid));
+        forget_autosave(st, removed.uid);
         st.cur = st.cur.min(st.docs.len().saturating_sub(1));
         st.interaction = None;
     }
@@ -570,6 +840,8 @@ fn open_filter(st: &mut State, kind: FilterKind) {
         c,
         preview: true,
         applied: false,
+        last_ms: 0.0,
+        waiting: false,
     });
 }
 
@@ -1004,6 +1276,15 @@ impl PaintApp {
                     ui.close();
                     st.dock_commands.push(DockCommand::Reset);
                 }
+                ui.separator();
+                if ui
+                    .button("Roda de atalhos…")
+                    .on_hover_text("Botão do meio do mouse: segure, arraste até a ação e solte")
+                    .clicked()
+                {
+                    ui.close();
+                    st.radial.editing = true;
+                }
             });
         });
     }
@@ -1011,7 +1292,16 @@ impl PaintApp {
     /// Barra de cima com as opções do pincel (como a do Krita).
     fn brush_bar(&mut self, ui: &mut egui::Ui) {
         let st = &mut self.st;
+        // Janela estreita: os sliders encolhem e Espelho/Borracha vão para um menu "⋯"; antes
+        // eles saíam da tela e não dava para alcançá-los.
+        let compact = ui.available_width() < 1180.0;
         ui.horizontal_centered(|ui| {
+            if compact {
+                // O resto (nome da ferramenta, dois menus, três rótulos, três campos de 72 px e o
+                // botão "⋯") ocupa uns 840 px; os trilhos dividem o que sobra.
+                ui.spacing_mut().slider_width =
+                    ((ui.available_width() - 840.0) / 3.0).clamp(36.0, 110.0);
+            }
             ui.add_space(4.0);
             ui.label(RichText::new(st.tool.label()).strong());
             ui.separator();
@@ -1048,14 +1338,14 @@ impl PaintApp {
                 let mut o = st.brush.opacity * 100.0;
                 ui.label("Opacidade");
                 ui.add(
-                    egui::Slider::new(&mut o, 1.0..=100.0)
+                    paw_ui::Slider::new(&mut o, 1.0..=100.0)
                         .suffix("%")
                         .trailing_fill(true),
                 );
                 st.brush.opacity = o / 100.0;
                 ui.label("Tamanho");
                 ui.add(
-                    egui::Slider::new(&mut st.brush.size, 1.0..=500.0)
+                    paw_ui::Slider::new(&mut st.brush.size, 1.0..=500.0)
                         .suffix(" px")
                         .logarithmic(true)
                         .trailing_fill(true),
@@ -1063,24 +1353,18 @@ impl PaintApp {
                 let mut f = st.brush.flow * 100.0;
                 ui.label("Fluxo");
                 ui.add(
-                    egui::Slider::new(&mut f, 1.0..=100.0)
+                    paw_ui::Slider::new(&mut f, 1.0..=100.0)
                         .suffix("%")
                         .trailing_fill(true),
                 );
                 st.brush.flow = f / 100.0;
                 ui.separator();
-                ui.separator();
-                ui.toggle_value(&mut st.mirror.0, "Espelho ↔")
-                    .on_hover_text("Pinta também refletido na vertical (eixo no meio)");
-                ui.toggle_value(&mut st.mirror.1, "Espelho ↕")
-                    .on_hover_text("Pinta também refletido na horizontal (eixo no meio)");
-                let mut erasing = st.tool == Tool::Eraser;
-                if ui
-                    .toggle_value(&mut erasing, "Borracha")
-                    .on_hover_text("Alterna borracha (E)")
-                    .changed()
-                {
-                    set_tool(st, if erasing { Tool::Eraser } else { Tool::Brush });
+                if compact {
+                    ui.menu_button("⋯", |ui| mirror_and_eraser(st, ui))
+                        .response
+                        .on_hover_text("Espelho e Borracha");
+                } else {
+                    mirror_and_eraser(st, ui);
                 }
             } else {
                 ui.label(
@@ -1275,7 +1559,11 @@ impl PaintApp {
         let ctrl = Modifiers::COMMAND;
         let cs = Modifiers::COMMAND | Modifiers::SHIFT;
         let hit = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
-        if ctx.egui_wants_keyboard_input() || st.dialog.is_some() || st.text_input.is_some() {
+        if ctx.egui_wants_keyboard_input()
+            || st.dialog.is_some()
+            || st.text_input.is_some()
+            || st.radial.is_open()
+        {
             return;
         }
         if hit(ctrl, Key::N) {
@@ -1456,6 +1744,12 @@ impl PaintApp {
         };
         let mut keep = true;
         let mut then: Option<StateAction> = None;
+        // Esc cancela e Enter confirma, como em qualquer diálogo (menos quando um campo de texto
+        // está sendo editado, que usa essas teclas). A recuperação e o "sair sem salvar" nunca
+        // são decididos por Enter, e a recuperação não é descartada por Esc.
+        let typing = ctx.text_edit_focused();
+        let esc = !typing && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+        let enter = !typing && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
         let title = match &dialog {
             Dialog::New { .. } => "Nova imagem",
             Dialog::Filter { .. } => "Filtro",
@@ -1489,9 +1783,9 @@ impl PaintApp {
                     });
                     ui.horizontal(|ui| {
                         ui.label("Tamanho");
-                        ui.add(egui::DragValue::new(w).range(1..=8192).suffix(" px"));
+                        size_field(ui, w);
                         ui.label("×");
-                        ui.add(egui::DragValue::new(h).range(1..=8192).suffix(" px"));
+                        size_field(ui, h);
                     });
                     ui.horizontal(|ui| {
                         ui.label("Fundo");
@@ -1503,8 +1797,8 @@ impl PaintApp {
                         }
                     });
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Criar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Criar").clicked() || enter {
                             keep = false;
                             let (w, h, bg, color) = (*w, *h, *bg, *color);
                             then = Some(Box::new(move |st| {
@@ -1516,7 +1810,7 @@ impl PaintApp {
                                 add_doc(st, Editor::new(w, h, background), None);
                             }));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                         }
                     });
@@ -1528,6 +1822,8 @@ impl PaintApp {
                     c,
                     preview,
                     applied,
+                    last_ms,
+                    waiting,
                 } => {
                     let mut changed = false;
                     let mut slider =
@@ -1537,7 +1833,7 @@ impl PaintApp {
                          r: std::ops::RangeInclusive<f32>| {
                             ui.horizontal(|ui| {
                                 ui.label(name);
-                                changed |= ui.add(egui::Slider::new(v, r)).changed();
+                                changed |= dialog_slider(ui, v, r, "").changed();
                             });
                         };
                     match kind {
@@ -1568,15 +1864,22 @@ impl PaintApp {
                     ui.checkbox(preview, "Prévia na tela");
                     let (f, label) = filter_of(kind, *a, *b, *c);
                     let cur = st.cur;
-                    if (changed || (*preview && !*applied))
-                        && *preview
+                    let dragging = ui.input(|i| i.pointer.any_down());
+                    let action =
+                        preview_action(*preview, changed, *waiting, *applied, *last_ms, dragging);
+                    if action == PreviewAction::Wait {
+                        *waiting = true;
+                    } else if action == PreviewAction::Apply
                         && let Some(d) = st.docs.get_mut(cur)
                     {
+                        let started = std::time::Instant::now();
                         if *applied {
                             d.ed.undo();
                         }
                         let id = d.active;
                         *applied = d.ed.apply_filter(id, &f, label).is_ok();
+                        *last_ms = started.elapsed().as_secs_f32() * 1000.0;
+                        *waiting = false;
                     } else if changed
                         && !*preview
                         && *applied
@@ -1584,11 +1887,12 @@ impl PaintApp {
                     {
                         d.ed.undo();
                         *applied = false;
+                        *waiting = false;
                     }
                     ui.add_space(8.0);
                     let applied_now = *applied;
-                    ui.horizontal(|ui| {
-                        if ui.button("Aplicar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
                             keep = false;
                             then = Some(Box::new(move |st| {
                                 if !applied_now && let Some(d) = st.doc_mut() {
@@ -1599,7 +1903,7 @@ impl PaintApp {
                                 }
                             }));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                             then = Some(Box::new(move |st| {
                                 if applied_now && let Some(d) = st.doc_mut() {
@@ -1662,7 +1966,7 @@ impl PaintApp {
                     };
                     let mut changed = false;
                     if let Some(pos) = resp.interact_pointer_pos() {
-                        if resp.drag_started() || resp.clicked() {
+                        if resp.drag_started_by(egui::PointerButton::Primary) || resp.clicked() {
                             let near = points
                                 .iter()
                                 .position(|(x, y)| to_screen(*x, *y).distance(pos) < 10.0);
@@ -1672,7 +1976,7 @@ impl PaintApp {
                             }));
                             changed = true;
                         }
-                        if resp.dragged()
+                        if resp.dragged_by(egui::PointerButton::Primary)
                             && let Some(i) = *drag
                             && i < points.len()
                         {
@@ -1689,7 +1993,7 @@ impl PaintApp {
                         points.remove(i);
                         changed = true;
                     }
-                    if resp.drag_stopped() {
+                    if resp.drag_stopped_by(egui::PointerButton::Primary) {
                         *drag = None;
                     }
                     ui.label(
@@ -1709,8 +2013,8 @@ impl PaintApp {
                     }
                     let applied_now = *applied;
                     let pts = points.clone();
-                    ui.horizontal(|ui| {
-                        if ui.button("Aplicar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
                             keep = false;
                             then = Some(Box::new(move |st| {
                                 if !applied_now && let Some(d) = st.doc_mut() {
@@ -1719,7 +2023,7 @@ impl PaintApp {
                                 }
                             }));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                             then = Some(Box::new(move |st| {
                                 if applied_now && let Some(d) = st.doc_mut() {
@@ -1731,9 +2035,9 @@ impl PaintApp {
                 }
                 Dialog::CanvasSize { w, h, anchor } => {
                     ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(w).range(1..=8192).suffix(" px"));
+                        size_field(ui, w);
                         ui.label("×");
-                        ui.add(egui::DragValue::new(h).range(1..=8192).suffix(" px"));
+                        size_field(ui, h);
                     });
                     ui.label(
                         RichText::new("Onde a imagem fica na tela nova:")
@@ -1751,8 +2055,8 @@ impl PaintApp {
                         }
                     });
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Aplicar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
                             keep = false;
                             let (nw, nh, anchor) = (*w, *h, *anchor);
                             then = Some(Box::new(move |st| {
@@ -1768,7 +2072,7 @@ impl PaintApp {
                                 }
                             }));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                         }
                     });
@@ -1781,9 +2085,9 @@ impl PaintApp {
                 } => {
                     let before = (*w, *h);
                     ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(w).range(1..=8192).suffix(" px"));
+                        size_field(ui, w);
                         ui.label("×");
-                        ui.add(egui::DragValue::new(h).range(1..=8192).suffix(" px"));
+                        size_field(ui, h);
                     });
                     ui.checkbox(lock, "Manter proporção");
                     if *lock {
@@ -1794,8 +2098,8 @@ impl PaintApp {
                         }
                     }
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Escalar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Escalar").clicked() || enter {
                             keep = false;
                             let (nw, nh) = (*w, *h);
                             then = Some(Box::new(move |st| {
@@ -1806,15 +2110,15 @@ impl PaintApp {
                                 }
                             }));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                         }
                     });
                 }
                 Dialog::Feather(r) => {
-                    ui.add(egui::Slider::new(r, 1..=100).suffix(" px"));
-                    ui.horizontal(|ui| {
-                        if ui.button("Aplicar").clicked() {
+                    dialog_slider(ui, r, 1..=100, " px");
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
                             keep = false;
                             let r = *r;
                             then = Some(Box::new(move |st| {
@@ -1823,20 +2127,20 @@ impl PaintApp {
                                 }
                             }));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                         }
                     });
                 }
                 Dialog::Grow(px) => {
-                    ui.add(egui::Slider::new(px, -100..=100).suffix(" px"));
+                    dialog_slider(ui, px, -100..=100, " px");
                     ui.label(
                         RichText::new("Positivo expande, negativo contrai.")
                             .small()
                             .weak(),
                     );
-                    ui.horizontal(|ui| {
-                        if ui.button("Aplicar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Aplicar").clicked() || enter {
                             keep = false;
                             let px = *px;
                             then = Some(Box::new(move |st| {
@@ -1845,7 +2149,7 @@ impl PaintApp {
                                 }
                             }));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                         }
                     });
@@ -1863,7 +2167,7 @@ impl PaintApp {
                         let mut o = l.opacity * 100.0;
                         if ui
                             .add(
-                                egui::Slider::new(&mut o, 0.0..=100.0)
+                                paw_ui::Slider::new(&mut o, 0.0..=100.0)
                                     .suffix("%")
                                     .text("Opacidade"),
                             )
@@ -1889,7 +2193,7 @@ impl PaintApp {
                                 .edit_layer(id, "mode", "Modo de mistura", |x| x.mode = mode);
                         }
                     }
-                    if ui.button("Fechar").clicked() {
+                    if ui.button("Fechar").clicked() || enter || esc {
                         keep = false;
                         st.docs[cur].ed.end_change();
                     }
@@ -1897,8 +2201,8 @@ impl PaintApp {
                 Dialog::ConfirmClose(i) => {
                     let i = *i;
                     ui.label("Este documento tem mudanças que não foram salvas.");
-                    ui.horizontal(|ui| {
-                        if ui.button("Salvar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Salvar").clicked() {
                             keep = false;
                             then = Some(Box::new(move |st| {
                                 st.cur = i.min(st.docs.len().saturating_sub(1));
@@ -1912,7 +2216,7 @@ impl PaintApp {
                             keep = false;
                             then = Some(Box::new(move |st| close_doc(st, i)));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                         }
                     });
@@ -1923,8 +2227,8 @@ impl PaintApp {
                         files.len()
                     ));
                     let files = files.clone();
-                    ui.horizontal(|ui| {
-                        if ui.button("Recuperar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Recuperar").clicked() {
                             keep = false;
                             let files = files.clone();
                             then = Some(Box::new(move |st| {
@@ -1953,12 +2257,12 @@ impl PaintApp {
                 }
                 Dialog::ConfirmQuit => {
                     ui.label("Há documentos com mudanças que não foram salvas.");
-                    ui.horizontal(|ui| {
-                        if ui.button("Sair sem salvar").clicked() {
+                    paw_ui::theme::dialog_actions(ui, |ui| {
+                        if paw_ui::theme::primary_button(ui, "Sair sem salvar").clicked() {
                             keep = false;
                             then = Some(Box::new(|st| st.allow_close = true));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button("Cancelar").clicked() || esc {
                             keep = false;
                         }
                     });
@@ -2010,8 +2314,9 @@ impl PaintApp {
             && (self.st.allow_close || !self.st.docs.iter().any(|d| d.ed.is_dirty()))
         {
             for d in &self.st.docs {
-                let _ = std::fs::remove_file(autosave_file(d.uid));
+                forget_autosave(&self.st, d.uid);
             }
+            finish_autosave(&mut self.st);
         }
         if ctx.input(|i| i.viewport().close_requested())
             && !self.st.allow_close
@@ -2049,6 +2354,9 @@ impl PaintApp {
             .show(ui, |ui| self.status_bar(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let style = theme::dock_style(ui.style().as_ref());
+            let mut style = style;
+            // Painéis podem ficar bem estreitos (a caixa de ferramentas vira uma coluna só).
+            style.separator.extra = 44.0;
             DockArea::new(&mut self.dock)
                 .style(style)
                 .show_leaf_collapse_buttons(false)
@@ -2060,6 +2368,10 @@ impl PaintApp {
             autosave(&mut self.st);
         }
         self.dialogs(&ctx);
+        let catalog = radial_catalog();
+        if let Some(id) = self.st.radial.show(&ctx, &catalog) {
+            run_radial(&mut self.st, &id);
+        }
         self.st.toasts.tick(&ctx);
         self.st.toasts.ui(&ctx);
         self.save_layout();
@@ -2467,6 +2779,7 @@ mod tests {
         let id = d.active;
         d.ed.fill_selection(id, [1, 2, 3]).unwrap();
         autosave(&mut h.app.st);
+        finish_autosave(&mut h.app.st);
         let mine = autosave_file(uid);
         assert!(mine.exists());
         assert!(
@@ -2481,7 +2794,345 @@ mod tests {
         let _ = std::fs::remove_file(&dead);
         h.app.st.doc_mut().unwrap().ed.mark_saved();
         autosave(&mut h.app.st);
+        finish_autosave(&mut h.app.st);
         assert!(!mine.exists());
+    }
+
+    #[test]
+    fn dialogs_keep_their_width_while_values_change() {
+        let mut h = Harness::new();
+        let width = |h: &mut Harness, title: &str, d: Dialog| -> f32 {
+            h.app.st.dialog = Some(d);
+            for _ in 0..3 {
+                h.frame(vec![]);
+            }
+            // O diálogo é a única janela (camada "Middle") visível.
+            let r = h
+                .ctx
+                .memory(|m| {
+                    m.areas()
+                        .visible_layer_ids()
+                        .into_iter()
+                        .filter(|l| l.order == egui::Order::Middle)
+                        .filter_map(|l| m.area_rect(l.id))
+                        .next()
+                })
+                .unwrap_or_else(|| panic!("{title}: janela não apareceu"));
+            h.app.st.dialog = None;
+            h.frame(vec![]);
+            r.width()
+        };
+        let new = |w, hh| Dialog::New {
+            w,
+            h: hh,
+            bg: 0,
+            color: [1, 2, 3],
+        };
+        let canvas = |w, hh| Dialog::CanvasSize {
+            w,
+            h: hh,
+            anchor: 4,
+        };
+        let scale = |w, hh| Dialog::ScaleImage {
+            w,
+            h: hh,
+            keep: false,
+            ratio: 1.0,
+        };
+        let filter = |kind, a, b, c| Dialog::Filter {
+            kind,
+            a,
+            b,
+            c,
+            preview: false,
+            applied: false,
+            last_ms: 0.0,
+            waiting: false,
+        };
+        let cases: Vec<(&str, Dialog, Dialog)> = vec![
+            ("Nova imagem", new(1, 1), new(8192, 8192)),
+            ("Tamanho da tela", canvas(1, 1), canvas(8192, 8192)),
+            ("Escalar imagem", scale(1, 1), scale(8192, 8192)),
+            (
+                "Suavizar borda da seleção",
+                Dialog::Feather(1),
+                Dialog::Feather(100),
+            ),
+            (
+                "Expandir ou contrair seleção",
+                Dialog::Grow(-100),
+                Dialog::Grow(5),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::BrightnessContrast, -1.0, 1.0, 0.0),
+                filter(FilterKind::BrightnessContrast, 0.123_456, -0.987_654, 0.0),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::HueSaturation, -180.0, -1.0, 1.0),
+                filter(FilterKind::HueSaturation, 0.0, 0.5, -0.333_333),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::Levels, 0.0, 1.0, 0.1),
+                filter(FilterKind::Levels, 0.456_789, 0.5, 4.0),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::Blur, 0.5, 0.0, 0.0),
+                filter(FilterKind::Blur, 60.0, 0.0, 0.0),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::Sharpen, 0.0, 0.3, 0.0),
+                filter(FilterKind::Sharpen, 2.999_9, 10.0, 0.0),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::Posterize, 2.0, 0.0, 0.0),
+                filter(FilterKind::Posterize, 32.0, 0.0, 0.0),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::Pixelate, 2.0, 0.0, 0.0),
+                filter(FilterKind::Pixelate, 80.0, 0.0, 0.0),
+            ),
+            (
+                "Filtro",
+                filter(FilterKind::Noise, 0.0, 0.0, 0.0),
+                filter(FilterKind::Noise, 0.777_77, 0.0, 0.0),
+            ),
+        ];
+        for (i, (title, lo, hi)) in cases.into_iter().enumerate() {
+            let (a, b) = (width(&mut h, title, lo), width(&mut h, title, hi));
+            assert!(
+                (a - b).abs() < 0.5,
+                "caso {i} ({title}): largura {a} -> {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn escape_cancels_and_enter_confirms_dialogs_but_never_decides_the_dangerous_ones() {
+        let key = |k, pressed| Event::Key {
+            key: k,
+            physical_key: Some(k),
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        let press = |h: &mut Harness, k| {
+            h.frame(vec![key(k, true)]);
+            h.frame(vec![key(k, false)]);
+        };
+        let mut h = Harness::new();
+        // Esc fecha o diálogo "Nova imagem" sem criar nada.
+        h.app.st.dialog = Some(Dialog::New {
+            w: 50,
+            h: 40,
+            bg: 0,
+            color: [1, 2, 3],
+        });
+        h.frame(vec![]);
+        press(&mut h, Key::Escape);
+        assert!(h.app.st.dialog.is_none() && h.app.st.docs.len() == 1);
+        // Enter cria a imagem.
+        h.app.st.dialog = Some(Dialog::New {
+            w: 50,
+            h: 40,
+            bg: 0,
+            color: [1, 2, 3],
+        });
+        h.frame(vec![]);
+        press(&mut h, Key::Enter);
+        assert!(h.app.st.dialog.is_none() && h.app.st.docs.len() == 2);
+        // Enter não confirma "sair sem salvar", e Esc só fecha (não sai).
+        h.app.st.dialog = Some(Dialog::ConfirmQuit);
+        h.frame(vec![]);
+        press(&mut h, Key::Enter);
+        assert!(matches!(h.app.st.dialog, Some(Dialog::ConfirmQuit)) && !h.app.st.allow_close);
+        press(&mut h, Key::Escape);
+        assert!(h.app.st.dialog.is_none() && !h.app.st.allow_close);
+        // A recuperação não é descartada nem por Esc nem por Enter.
+        h.app.st.dialog = Some(Dialog::Recover(vec![]));
+        h.frame(vec![]);
+        press(&mut h, Key::Escape);
+        press(&mut h, Key::Enter);
+        assert!(matches!(h.app.st.dialog, Some(Dialog::Recover(_))));
+        h.app.st.dialog = None;
+        // Esc num filtro com prévia desfaz a prévia.
+        h.app.st.dialog = Some(Dialog::Filter {
+            kind: FilterKind::Threshold,
+            a: 0.5,
+            b: 0.0,
+            c: 0.0,
+            preview: true,
+            applied: false,
+            last_ms: 0.0,
+            waiting: false,
+        });
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let steps = |h: &Harness| h.app.st.doc().unwrap().ed.history().0.len();
+        let with_preview = steps(&h);
+        press(&mut h, Key::Escape);
+        assert!(h.app.st.dialog.is_none());
+        assert_eq!(steps(&h), with_preview - 1, "a prévia foi desfeita");
+    }
+
+    #[test]
+    fn middle_button_wheel_picks_a_tool_without_painting() {
+        let mut h = Harness::new();
+        let before = h.app.st.doc().unwrap().ed.history().0.len();
+        let c = h.screen(150.0, 100.0);
+        let ev = |pos, button, pressed| Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        h.frame(vec![Event::PointerMoved(c)]);
+        h.frame(vec![ev(c, PointerButton::Middle, true)]);
+        assert!(h.app.st.radial.is_open());
+        // Embaixo fica a borracha (roda padrão).
+        let down = c + vec2(0.0, 80.0);
+        h.frame(vec![Event::PointerMoved(down)]);
+        h.frame(vec![ev(down, PointerButton::Middle, false)]);
+        assert!(!h.app.st.radial.is_open());
+        assert_eq!(h.app.st.tool, Tool::Eraser);
+        assert_eq!(
+            h.app.st.doc().unwrap().ed.history().0.len(),
+            before,
+            "não pintou nada"
+        );
+        // Toque rápido + clique: escolhe sem pintar por baixo.
+        h.frame(vec![ev(c, PointerButton::Middle, true)]);
+        h.frame(vec![ev(c, PointerButton::Middle, false)]);
+        let up = c + vec2(0.0, -80.0);
+        h.frame(vec![Event::PointerMoved(up)]);
+        h.frame(vec![ev(up, PointerButton::Primary, true)]);
+        h.frame(vec![ev(up, PointerButton::Primary, false)]);
+        assert_eq!(h.app.st.tool, Tool::Brush);
+        assert_eq!(
+            h.app.st.doc().unwrap().ed.history().0.len(),
+            before,
+            "o clique na roda não pinta"
+        );
+        // Toda ação do catálogo roda sem cair, com e sem documento.
+        for a in radial_catalog() {
+            run_radial(&mut h.app.st, &a.id);
+            h.frame(vec![]);
+        }
+        let mut empty = PaintApp::empty();
+        for a in radial_catalog() {
+            run_radial(&mut empty.st, &a.id);
+        }
+    }
+
+    #[test]
+    fn toolbox_reflows_down_to_one_column() {
+        assert_eq!(docks::toolbox_columns(40.0, 0), 1);
+        assert_eq!(docks::toolbox_columns(80.0, 0), 2);
+        assert_eq!(docks::toolbox_columns(200.0, 0), 5);
+        assert_eq!(
+            docks::toolbox_columns(200.0, 1),
+            1,
+            "uma coluna fixa, como no Photoshop"
+        );
+    }
+
+    #[test]
+    fn slow_filter_previews_wait_for_the_slider_to_be_released() {
+        use PreviewAction::*;
+        // Primeira prévia sempre sai, mesmo arrastando.
+        assert_eq!(preview_action(true, true, false, false, 0.0, true), Apply);
+        // Filtro rápido acompanha o arraste.
+        assert_eq!(preview_action(true, true, false, true, 10.0, true), Apply);
+        // Filtro lento espera enquanto arrasta e refaz ao soltar, mesmo sem mudança nova.
+        assert_eq!(preview_action(true, true, false, true, 900.0, true), Wait);
+        assert_eq!(preview_action(true, false, true, true, 900.0, true), Wait);
+        assert_eq!(preview_action(true, false, true, true, 900.0, false), Apply);
+        // Sem mudança e sem pendência não faz nada; prévia desligada também não.
+        assert_eq!(
+            preview_action(true, false, false, true, 900.0, false),
+            Nothing
+        );
+        assert_eq!(
+            preview_action(false, true, false, true, 900.0, false),
+            Nothing
+        );
+    }
+
+    #[test]
+    fn selection_outline_is_kept_while_painting_and_rebuilt_when_the_selection_changes() {
+        let mut h = Harness::new();
+        let ctx = egui::Context::default();
+        let d = h.app.st.doc_mut().unwrap();
+        let id = d.active;
+        d.ed.set_selection(
+            Some(pawpaint_core::Selection::rect(300, 200, 10, 10, 50, 50)),
+            "Selecionar",
+        );
+        canvas::selection_overlay(&ctx, d);
+        let first = d
+            .sel_overlay
+            .as_ref()
+            .map(|(_, t, o)| (t.id(), *o))
+            .unwrap();
+        // Mexer nos pixels não muda a seleção: o contorno é o mesmo, sem recalcular.
+        d.ed.fill_selection(id, [1, 2, 3]).unwrap();
+        canvas::selection_overlay(&ctx, d);
+        assert_eq!(
+            d.sel_overlay.as_ref().map(|(_, t, o)| (t.id(), *o)),
+            Some(first)
+        );
+        // Outra seleção: contorno novo, no lugar novo.
+        d.ed.set_selection(
+            Some(pawpaint_core::Selection::rect(300, 200, 20, 30, 60, 70)),
+            "Selecionar",
+        );
+        canvas::selection_overlay(&ctx, d);
+        let second = d
+            .sel_overlay
+            .as_ref()
+            .map(|(_, t, o)| (t.id(), *o))
+            .unwrap();
+        assert_ne!(second, first);
+        assert_eq!(second.1, (19, 29));
+        d.ed.deselect();
+        canvas::selection_overlay(&ctx, d);
+        assert!(d.sel_overlay.is_none());
+    }
+
+    #[test]
+    fn autosave_runs_off_the_ui_thread_and_a_closed_document_is_not_resurrected() {
+        let mut h = Harness::new();
+        let uid = h.app.st.doc().unwrap().uid;
+        let d = h.app.st.doc_mut().unwrap();
+        let id = d.active;
+        d.ed.fill_selection(id, [9, 8, 7]).unwrap();
+        // Fechou o documento antes de o salvamento em segundo plano começar a escrever.
+        autosave(&mut h.app.st);
+        forget_autosave(&h.app.st, uid);
+        finish_autosave(&mut h.app.st);
+        assert!(
+            !autosave_file(uid).exists(),
+            "autosave de documento fechado voltou"
+        );
+        // Pintar enquanto o salvamento roda não mexe no que está sendo salvo.
+        let mut h = Harness::new();
+        let uid = h.app.st.doc().unwrap().uid;
+        let d = h.app.st.doc_mut().unwrap();
+        let id = d.active;
+        d.ed.fill_selection(id, [5, 5, 5]).unwrap();
+        autosave(&mut h.app.st);
+        let d = h.app.st.doc_mut().unwrap();
+        d.ed.fill_selection(id, [200, 200, 200]).unwrap();
+        finish_autosave(&mut h.app.st);
+        let saved = file::load_project(&autosave_file(uid)).unwrap();
+        assert_eq!(saved.doc().layers[0].pixels.pixel(5, 5), [5, 5, 5, 255]);
+        forget_autosave(&h.app.st, uid);
     }
 
     #[test]
@@ -2501,6 +3152,8 @@ mod tests {
             c: 0.0,
             preview: true,
             applied: false,
+            last_ms: 0.0,
+            waiting: false,
         });
         h.frame(vec![]);
         h.frame(vec![]);

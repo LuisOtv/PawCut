@@ -202,6 +202,24 @@ impl MediaLibrary {
         Ok(pcm)
     }
 
+    /// O áudio já decodificado, sem decodificar nada (`None` se ainda não está na memória).
+    pub fn resident_audio(&mut self, path: &Path, speed: f64) -> Option<Arc<Pcm>> {
+        self.audio
+            .get(&(path.to_path_buf(), speed.to_bits()))
+            .cloned()
+    }
+
+    /// Guarda um áudio decodificado em outra thread (o player nunca decodifica sozinho).
+    pub fn insert_audio(&mut self, path: &Path, speed: f64, pcm: Arc<Pcm>) {
+        let key = (path.to_path_buf(), speed.to_bits());
+        if let Some(old) = self.audio.pop(&key) {
+            self.audio_bytes -= old.samples.len() * 4;
+        }
+        self.audio_bytes += pcm.samples.len() * 4;
+        self.audio.put(key, pcm);
+        self.evict_audio();
+    }
+
     fn evict_audio(&mut self) {
         while self.audio_bytes > self.audio_budget && self.audio.len() > 1 {
             match self.audio.pop_lru() {

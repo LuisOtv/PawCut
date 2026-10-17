@@ -100,6 +100,46 @@ impl Tool {
         Tool::Text,
     ];
 
+    /// Ícone da suíte para a ferramenta.
+    pub fn icon(self) -> paw_ui::icons::Icon {
+        use paw_ui::icons::Icon;
+        match self {
+            Tool::Brush => Icon::Brush,
+            Tool::Eraser => Icon::Eraser,
+            Tool::Smudge => Icon::Smudge,
+            Tool::Fill => Icon::Bucket,
+            Tool::Gradient => Icon::Gradient,
+            Tool::Picker => Icon::Eyedropper,
+            Tool::SelRect => Icon::SelRect,
+            Tool::SelEllipse => Icon::SelEllipse,
+            Tool::Lasso => Icon::Lasso,
+            Tool::Wand => Icon::Wand,
+            Tool::Move => Icon::Move,
+            Tool::Transform => Icon::Transform,
+            Tool::Crop => Icon::Crop,
+            Tool::Line => Icon::Line,
+            Tool::Rect => Icon::Rectangle,
+            Tool::Ellipse => Icon::Ellipse,
+            Tool::Text => Icon::Text,
+        }
+    }
+
+    /// Grupo da ferramenta na caixa (pintura, seleção, mover, formas): cada grupo começa numa
+    /// linha nova, como no Krita e no Photoshop.
+    pub fn group(self) -> u8 {
+        match self {
+            Tool::Brush
+            | Tool::Eraser
+            | Tool::Smudge
+            | Tool::Fill
+            | Tool::Gradient
+            | Tool::Picker => 0,
+            Tool::SelRect | Tool::SelEllipse | Tool::Lasso | Tool::Wand => 1,
+            Tool::Move | Tool::Transform | Tool::Crop => 2,
+            Tool::Line | Tool::Rect | Tool::Ellipse | Tool::Text => 3,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Tool::Brush => "Pincel",
@@ -226,7 +266,7 @@ pub struct DocView {
     pub tex: Option<TextureHandle>,
     pub tex_size: (usize, usize),
     /// Contorno da seleção (revisão de onde veio, textura e canto).
-    pub sel_overlay: Option<(u64, TextureHandle, (usize, usize))>,
+    pub sel_overlay: Option<(pawpaint_core::Selection, TextureHandle, (usize, usize))>,
     pub float: Option<FloatState>,
     /// Retângulo de corte em andamento (coordenadas da imagem).
     pub crop: Option<(f32, f32, f32, f32)>,
@@ -234,6 +274,9 @@ pub struct DocView {
     pub cursor: Option<(f32, f32)>,
     /// Canto de cima à esquerda da imagem na janela (último quadro).
     pub view_origin: egui::Pos2,
+    /// Tamanho da área do canvas na janela (último quadro): a Visão geral desenha com ele o
+    /// retângulo do que está aparecendo.
+    pub canvas_size: Vec2,
     pub name: String,
     /// Pintar na máscara da camada ativa (em vez dos pixels).
     pub edit_mask: bool,
@@ -259,6 +302,7 @@ impl DocView {
             crop: None,
             cursor: None,
             view_origin: egui::Pos2::ZERO,
+            canvas_size: Vec2::ZERO,
             name: "Sem título".to_string(),
             edit_mask: false,
             thumbs: Default::default(),
@@ -311,6 +355,10 @@ pub enum Dialog {
         c: f32,
         preview: bool,
         applied: bool,
+        /// Quanto a última prévia demorou (ms): se for lenta, só atualiza quando soltar o slider.
+        last_ms: f32,
+        /// Mudou durante o arraste de um filtro lento e a prévia ainda não foi refeita.
+        waiting: bool,
     },
     CanvasSize {
         w: usize,
@@ -377,6 +425,8 @@ pub enum Interaction {
 pub struct Prefs {
     pub recent: Vec<[u8; 3]>,
     pub files: Vec<PathBuf>,
+    /// Colunas da caixa de ferramentas: 0 = quantas couberem, 1 = uma só (como no Photoshop).
+    pub toolbox_cols: u8,
 }
 
 pub struct State {
@@ -413,6 +463,12 @@ pub struct State {
     /// A ferramenta acabou de mudar (o Transformar já solta a camada).
     pub tool_changed: bool,
     pub last_autosave: std::time::Instant,
+    /// Autosave em andamento: roda fora da thread da interface, com uma cópia do documento.
+    pub autosave_job: Option<std::thread::JoinHandle<()>>,
+    /// Documentos já fechados: um autosave atrasado não pode recriar o arquivo deles.
+    pub autosave_closed: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u64>>>,
+    /// Roda de atalhos (botão do meio).
+    pub radial: paw_ui::radial::Radial,
     /// Paleta rápida (botão direito na tela, como no Krita): onde ela abriu.
     pub popup_palette: Option<egui::Pos2>,
 }

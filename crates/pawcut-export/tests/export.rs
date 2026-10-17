@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 use paw_media::{MediaLibrary, probe};
 use paw_testkit as kit;
 use pawcut_core::*;
-use pawcut_export::{ExportError, ExportSettings, export};
+use pawcut_export::{ExportError, ExportSettings, Stage, export};
 use pawcut_render::Renderer;
 
 const W: u32 = 320;
@@ -55,7 +55,11 @@ fn run(ed: &Editor, out: &std::path::Path, cancel: bool) -> Result<Vec<Frame>, E
             ..Default::default()
         },
         &flag,
-        |p| seen.push(p.done),
+        |p| {
+            if p.stage == Stage::Video {
+                seen.push(p.done)
+            }
+        },
     )
     .map(|_| seen)
 }
@@ -193,6 +197,71 @@ fn offline_audio_also_stops_the_export() {
         other => panic!("esperava Offline, veio {other:?}"),
     }
     assert!(!out.exists());
+}
+
+#[test]
+fn offline_media_in_a_disabled_clip_does_not_stop_the_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ed = editor();
+    put(
+        &mut ed,
+        TrackKind::Video,
+        ClipSource::SolidColor(Rgba::new(0, 0, 255, 255)),
+        0,
+        30,
+    );
+    let info = MediaInfo {
+        path: "/nao/existe.wav".into(),
+        kind: MediaKind::Audio,
+        duration: Some(60),
+        width: 0,
+        height: 0,
+    };
+    let m = ed.apply(Edit::AddMedia(info)).unwrap().media.unwrap();
+    let clip = put(&mut ed, TrackKind::Audio, ClipSource::Media(m), 5, 20);
+    ed.apply(Edit::SetClip {
+        clip,
+        change: ClipChange::Enabled(false),
+    })
+    .unwrap();
+    let out = dir.path().join("desligado.mp4");
+    run(&ed, &out, false).expect("clipe desligado não conta como mídia offline");
+    assert!(out.exists());
+}
+
+#[test]
+fn reports_audio_progress_before_the_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ed = editor();
+    put(
+        &mut ed,
+        TrackKind::Video,
+        ClipSource::SolidColor(Rgba::new(0, 0, 255, 255)),
+        0,
+        60,
+    );
+    let wav = kit::dc_audio(dir.path(), "a.wav", 0.3, 2.0);
+    let m = add_media(&mut ed, &wav);
+    put(&mut ed, TrackKind::Audio, ClipSource::Media(m), 0, 60);
+    let mut stages = Vec::new();
+    let flag = AtomicBool::new(false);
+    export(
+        ed.project(),
+        &mut renderer(),
+        &ExportSettings {
+            output: dir.path().join("o.mp4"),
+            crf: 28,
+            ..Default::default()
+        },
+        &flag,
+        |p| {
+            if stages.last() != Some(&p.stage) {
+                stages.push(p.stage);
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(stages, vec![Stage::Audio, Stage::Video]);
 }
 
 fn run_with(ed: &Editor, settings: ExportSettings) -> Result<(), ExportError> {

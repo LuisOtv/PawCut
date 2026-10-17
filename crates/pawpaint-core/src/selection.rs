@@ -57,6 +57,17 @@ impl Selection {
         &self.mask
     }
 
+    /// Identidade e tamanho (bytes) da máscara, para somar a memória do histórico.
+    pub fn mask_identity(&self) -> (usize, usize) {
+        (Arc::as_ptr(&self.mask) as usize, self.mask.len())
+    }
+
+    /// As duas seleções compartilham a mesma máscara (uma cópia barata, sem mudança): dá para
+    /// reaproveitar o que foi calculado a partir dela sem comparar milhões de bytes.
+    pub fn same_mask(&self, other: &Selection) -> bool {
+        Arc::ptr_eq(&self.mask, &other.mask)
+    }
+
     pub fn value(&self, x: usize, y: usize) -> u8 {
         if x < self.w && y < self.h {
             self.mask[y * self.w + x]
@@ -106,13 +117,15 @@ impl Selection {
     }
 
     pub fn rect(w: usize, h: usize, x0: i64, y0: i64, x1: i64, y1: i64) -> Self {
+        // Os dois lados dentro da imagem: um retângulo todo fora dela (arrastado além da borda)
+        // fica vazio em vez de começar depois de onde termina.
         let (xa, xb) = (
-            x0.min(x1).max(0) as usize,
-            (x0.max(x1)).clamp(0, w as i64) as usize,
+            x0.min(x1).clamp(0, w as i64) as usize,
+            x0.max(x1).clamp(0, w as i64) as usize,
         );
         let (ya, yb) = (
-            y0.min(y1).max(0) as usize,
-            (y0.max(y1)).clamp(0, h as i64) as usize,
+            y0.min(y1).clamp(0, h as i64) as usize,
+            y0.max(y1).clamp(0, h as i64) as usize,
         );
         let mut m = vec![0u8; w * h];
         for y in ya..yb {
@@ -309,6 +322,28 @@ impl Selection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rect_dragged_entirely_outside_the_image_is_empty_not_a_panic() {
+        // Achado pelo fuzz: arrastar a seleção toda para além da borda direita ou de baixo.
+        for (x0, y0, x1, y1) in [
+            (2423, 10, 2500, 50),
+            (10, 2423, 50, 2500),
+            (2500, 2500, 3000, 3000),
+            (-90, -80, -10, -5),
+            (150, 10, 2423, 50),
+        ] {
+            let s = Selection::rect(100, 100, x0, y0, x1, y1);
+            assert_eq!((s.width(), s.height()), (100, 100));
+        }
+        assert!(Selection::rect(100, 100, 2423, 10, 2500, 50).is_empty());
+        assert!(Selection::rect(100, 100, -90, -80, -10, -5).is_empty());
+        // Parcialmente fora: só a parte de dentro fica.
+        assert_eq!(
+            Selection::rect(100, 100, 80, 80, 500, 500).bounds(),
+            Some((80, 80, 100, 100))
+        );
+    }
 
     #[test]
     fn rect_bounds_and_ops() {
