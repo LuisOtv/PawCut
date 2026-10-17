@@ -158,6 +158,15 @@ O app abre bem em 960 x 600 e continua usável.
 - Nunca use `f32::clamp(min, max)` com limites que dependem do tamanho de algo na tela: se
   `min > max` o app cai. Use um clamp seguro (`clamp_in`) que fica no meio quando o intervalo
   se inverte.
+- **Barra de ferramentas larga demais** não vaza nem esconde coisa sem aviso: o que não cabe vai
+  para um menu "⋯" no fim da barra (PawPaint: `ui.available_width() < 1180.0` recolhe Espelho e
+  Borracha). Barra de busca e de status quebram a linha em vez de estourar a janela.
+- **Painéis acoplados (docks) rolam**, e sliders dentro deles medem a largura que sobrou
+  (`slider_width`), em vez de usar os 100 px do egui, que cortam o valor em painel estreito.
+  Miniaturas e vistas dentro do painel se desenham dentro do próprio retângulo (`painter_at`).
+- **Diálogo pequeno:** campos de tamanho em px e sliders com largura fixa (`NUM_W`) e no máximo
+  duas casas decimais, e um teste que abre o diálogo com os valores mais curtos e os mais longos
+  e confere que a janela não muda de largura.
 
 ## 5. Interação
 
@@ -235,6 +244,16 @@ zero.
   `~/.cache/<app>/` (pode apagar à vontade).
 - **Fechar com alterações** pergunta (Salvar, Não salvar, Cancelar). Fechar durante uma
   exportação pergunta também.
+- **Autosave nunca trava a pintura nem a digitação.** Em arquivo grande o salvamento leva
+  segundos: o app tira uma cópia barata do documento (PawPaint: os blocos de pixels são
+  compartilhados, ~2 ms) e salva numa thread, num arquivo temporário que só depois vira o
+  definitivo. Se o salvamento anterior ainda roda, tenta de novo em 10 s. Um documento fechado
+  durante o salvamento não pode ter o arquivo de recuperação recriado (conjunto de fechados).
+- **Salvar manual** em arquivo grande também usa todos os núcleos (uma camada por thread) e não
+  recomprime PNG dentro do zip.
+- **Qualquer caminho que troca o documento** (abrir, recentes, arrastar arquivo, Ctrl+N) pergunta
+  antes se há mudanças, e "Salvar" continua o que o usuário queria depois de salvar
+  (`after_save`).
 - Arquivo que sumiu aparece como offline (vermelho, `OFFLINE`) com Reconectar, nunca derruba o app.
 - Erros de arquivo e de mídia viram aviso legível, nunca `panic`. `unwrap` em dado do usuário
   é bug.
@@ -248,7 +267,25 @@ zero.
 - Estruturas imutáveis compartilhadas (`Arc<Project>`) entre interface, preview e áudio, em vez
   de copiar.
 - Pedir repaint só quando algo muda ou algo está tocando. Parado, o app fica em 0 % de CPU.
-- Medir antes de otimizar, e deixar um teste ou exemplo (`examples/`) que reproduz o gargalo.
+- Medir antes de otimizar, e deixar um teste ou exemplo (`examples/`) que reproduz o gargalo
+  (`bench_dsp`, `bench_mix`, `bench_text`, `bench_save`, `bench_ops`). Meça com a máquina
+  quieta: dois benchmarks ao mesmo tempo, ou um fuzz rodando, dobram os números.
+- **Algoritmo linear em texto e em amostras.** Substituir tudo num texto grande tem de ser uma
+  passada só (`replace_all` do PawWrite), nunca "achar, substituir e começar de novo".
+- **Imagem grande (12 megapixels) é a regra, não a exceção.** Filtro, preenchimento, achatar e
+  montar a textura da tela dividem as linhas entre os núcleos (`pawpaint_core::par`: cada thread
+  recebe um pedaço do vetor, sem trava e sem `unsafe`); varrem a memória em ordem (um desfoque
+  que andava coluna por coluna levava 8 s, por linhas leva 0,5 s); não guardam cópia do original
+  (relêem dos blocos); e só escrevem os blocos que mudaram, para o desfazer continuar
+  compartilhando o resto.
+- **Prévia ao vivo adapta ao custo.** Se a última prévia demorou mais que ~60 ms, o filtro só é
+  refeito quando o slider é solto (`preview_action`); a primeira prévia sempre aparece.
+- **Cache pela identidade do dado, não pela revisão do documento.** O contorno da seleção
+  dependia da revisão e era recalculado a cada pincelada; agora só muda quando a máscara muda
+  (`Selection::same_mask`).
+- **Laços de desenho com entrada do usuário** (carimbos ao longo de um traço) validam o número
+  antes: NaN, infinito e coordenadas absurdas são ignorados, e um salto enorme vai direto ao
+  destino em vez de carimbar milhões de vezes.
 
 ## 9. Qualidade
 
@@ -265,6 +302,11 @@ zero.
   captura. Pacotes: `xvfb xdotool imagemagick libxkbcommon-x11-0 libgl1-mesa-dri`.
   Faça isso também em 960 x 600 e com os painéis estreitos: foi assim que apareceram campos
   cortados, menus sem fim e janelas altas demais.
+- **Entradas absurdas:** cada core tem um teste que chama toda operação com NaN, infinito,
+  números enormes, negativos e tamanhos zero (`extreme_inputs_never_panic` no PawPaint). Ele
+  achou um laço infinito no pincel; rode com `timeout` se mexer nele.
+- **Otimização com resumo:** antes de reescrever um laço quente, grave um resumo (hash) da saída
+  da versão antiga num teste (`stamp_output_digest_is_stable`) e prove que a nova dá o mesmo.
 - Mensagem de commit: `tipo(app): o que mudou` (`feat`, `fix`, `perf`, `polish`).
 
 ## 10. Erros que já aconteceram (e a regra que saiu deles)
@@ -286,6 +328,16 @@ zero.
 | PawVoice: abrir outro projeto (Ctrl+O, recentes, arrastar arquivo) descartava as mudanças sem perguntar | 7: qualquer caminho que troca o projeto pergunta antes se há mudanças (`ConfirmDiscard`) |
 | Trocar a saída de áudio deixava a thread do player antigo rodando para sempre | todo `Player` termina a thread quando é descartado |
 | PawVoice: Esc em diálogo, renomear faixa e campo de seleção não cancelava | 4.10 vale para todo campo e diálogo; Esc nunca descarta trabalho (recuperação) |
+| PawWrite: "Substituir tudo" em roteiro grande demorava minutos (achava e recomeçava a busca a cada troca) | 8: passada única, com exemplo `bench_text` |
+| PawWrite: arrastar um arquivo para a janela descartava o roteiro sem perguntar | 7: todo caminho que troca o documento pergunta (`UnsavedDrop`, `after_save`) |
+| PawWrite: barra de busca estourava a janela estreita | 4: barras quebram a linha |
+| PawPaint: salvar ou autosave de foto grande congelava a janela por ~10 s | 7: cópia barata do documento, salvamento em thread, PNGs em paralelo |
+| PawPaint: desfoque numa foto de 12 MP levava 8 s e a prévia refazia a cada pixel do slider | 8: varrer a memória em ordem, dividir entre núcleos, prévia lenta só ao soltar |
+| PawPaint: o contorno da seleção era recalculado a cada pincelada | 8: cache pela identidade do dado |
+| PawPaint: o pincel fazia duas buscas em mapa por pixel e clonava o pincel a cada carimbo | 8: trabalho por bloco; resumo da saída garante que o desenho não mudou |
+| PawPaint: seleção retangular arrastada toda para fora da imagem derrubava o app (fuzz) | limites nos dois lados, nunca só em um |
+| PawPaint: um ponto do pincel em 1e30 ou NaN travava o app em laço infinito | 8: validar número antes de laço de desenho |
+| PawPaint: sliders e dock de pincéis cortados em painel estreito | 4: docks rolam, slider mede o espaço que sobrou |
 
 ## 11. Checklist para uma tela nova
 
@@ -303,5 +355,7 @@ zero.
 - [ ] Nada decodifica, lê disco grande ou espera rede na thread de interface ou na de áudio.
 - [ ] Operação longa mostra a etapa e deixa cancelar (ou roda em outra thread com aviso).
 - [ ] Mexer num parâmetro durante o play vale na hora, sem reiniciar o som.
-- [ ] Passou pelo `scripts/ui-fuzz.sh` sem cair.
+- [ ] Passou pelo `scripts/ui-fuzz.sh` sem cair, em mais de uma semente.
+- [ ] Funciona com um arquivo grande (foto de 12 MP, texto de 1 MB, narração de 30 min) sem congelar.
+- [ ] Toda operação que recebe número do usuário sobrevive a NaN, infinito, enorme e zero.
 - [ ] Texto em português, curto, sem traço longo.

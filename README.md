@@ -84,6 +84,9 @@ Editor de roteiros para vídeo: texto limpo e o tempo de fala sempre à vista.
   no PawCut e ajustar. Rótulos do PawVoice viram capítulos do YouTube.
 - **Mais:** mover seções pela estrutura (botão direito), meta de duração do vídeo na barra de baixo e modo leitura
   (F5) com a fala em letra grande rolando sozinha.
+- **Seguro com o seu texto:** arrastar um arquivo para a janela, abrir outro ou criar um novo pergunta antes de
+  descartar mudanças (e "Salvar" continua a ação depois de salvar); Esc fecha diálogos e a barra de busca.
+  Substituir tudo é uma passada só, mesmo em roteiros enormes.
 
 ## PawPaint
 
@@ -111,6 +114,12 @@ Editor de imagens no estilo do Krita: pintura, camadas, seleções, filtros e do
 
 - **Mais:** pastas de camadas, máscaras de camada (preto esconde, branco revela), pintura com espelho, borrão, curvas, colar prints da
   área de transferência do sistema, recuperação automática se o app fechar de repente.
+- **Fotos grandes sem travar:** filtros, preenchimento e exportação usam todos os núcleos (um desfoque numa foto de
+  12 megapixels leva ~0,5 s); a prévia de um filtro lento só é refeita ao soltar o slider; o autosave e o salvamento
+  rodam em segundo plano com uma cópia barata do documento; o carimbo do pincel ficou ~2x mais rápido, o que pesa
+  nos pincéis grandes.
+- **Janelas pequenas:** a barra do pincel recolhe o excesso num menu "⋯", os dockers rolam e os diálogos mantêm a
+  largura. Nos diálogos, Esc cancela e Enter confirma.
 
 Ainda não tem: mesa digitalizadora com pressão, camadas vetoriais e histograma.
 
@@ -212,6 +221,14 @@ e libclang. Se faltar o `libclang-dev`, o `.cargo/config.toml` aponta o bindgen 
 cargo test --workspace        # 140+ testes, incluindo cliques e arrastos simulados na interface
 cargo clippy --workspace --all-targets -- -D warnings
 scripts/ui-fuzz.sh pawcut 300 1 -- video.mp4   # cliques e atalhos aleatórios num display virtual; avisa se cair
+scripts/ui-fuzz.sh pawpaint 400 1 -- foto.png  # o mesmo para qualquer app (pawvoice, pawwrite, pawpaint)
+
+# Medidas de desempenho (sempre com --release e a máquina quieta)
+cargo run --release -p pawpaint-core --example bench_ops    # filtros, preencher, achatar, pincel
+cargo run --release -p pawpaint-core --example bench_save   # salvar e autosave de foto grande
+cargo run --release -p pawwrite-core --example bench_text   # buscar e substituir em texto grande
+cargo run --release -p pawvoice-core --example bench_mix    # mixagem ao vivo
+cargo run --release -p paw-audio --example bench_dsp        # efeitos de áudio
 ```
 
 Os crates são:
