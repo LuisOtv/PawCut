@@ -469,19 +469,21 @@ pub fn apply_to_tile(filter: &Filter, tile: &mut [u8]) {
         return;
     }
     let mut buf: Buf = tile
-        .chunks_exact(4)
-        .map(|p| to_f32(unpremultiply([p[0], p[1], p[2], p[3]])))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| to_f32(unpremultiply(*p)))
         .collect();
     let side = crate::tile::TILE;
     run(filter, &mut buf, side, side);
-    for (p, n) in tile.chunks_exact_mut(4).zip(&buf) {
+    for (p, n) in tile.as_chunks_mut::<4>().0.iter_mut().zip(&buf) {
         if p[3] == 0 {
             continue;
         }
         let q = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
         // o alfa não muda: ajuste de cor só tinge o que já existe
         let px = premultiply([q(n[0]), q(n[1]), q(n[2]), q(n[3])]);
-        p.copy_from_slice(&px);
+        *p = px;
     }
 }
 

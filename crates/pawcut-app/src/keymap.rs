@@ -464,6 +464,7 @@ impl Keymap {
             (A::NextMarker, vec![K::shift(Key::ArrowDown)]),
             (A::AddDissolve, vec![K::ctrl(Key::T)]),
             (A::ExtractInOut, vec![K::shift(Key::X)]),
+            (A::AlignAudio, vec![K::ctrl_shift(Key::J)]),
             (A::LiftInOut, vec![K::new(Key::Z)]),
             (A::NudgeLeft, vec![K::new(Key::Comma)]),
             (A::NudgeRight, vec![K::new(Key::Period)]),
