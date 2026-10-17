@@ -86,6 +86,8 @@ pub struct Workspace {
     pub prefs_note: Option<String>,
     pub capturing: Option<Action>,
     pub new_project: Option<NewProjectDialog>,
+    /// Janela do slideshow: segundos por imagem e do dissolve.
+    pub slideshow: Option<(f64, f64)>,
     pub confirm: Option<Pending>,
     pub recovery: Vec<PathBuf>,
     /// Pasta e arquivo do autosave desta sessão (só este arquivo é apagado automaticamente).
@@ -204,6 +206,7 @@ impl Workspace {
             prefs_note: None,
             capturing: None,
             new_project: None,
+            slideshow: None,
             confirm: None,
             recovery: config::leftover_autosaves(),
             autosave_dir: config::autosave_dir(),

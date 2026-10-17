@@ -756,6 +756,54 @@ impl AppState {
         }
     }
 
+    /// Slideshow: coloca no fim da primeira faixa de vídeo todas as imagens do Media Pool, em
+    /// ordem, `secs` segundos cada, com um dissolve de `dissolve` segundos entre elas.
+    /// Devolve quantas imagens entraram.
+    pub fn slideshow(&mut self, secs: f64, dissolve: f64) -> usize {
+        let p = self.project().clone();
+        let images: Vec<MediaId> = p
+            .media
+            .iter()
+            .filter(|m| matches!(m.info.kind, MediaKind::Image))
+            .map(|m| m.id)
+            .collect();
+        if images.is_empty() {
+            self.warn("Importe imagens para o Media Pool primeiro");
+            return 0;
+        }
+        let fps = p.settings.fps;
+        let len = fps.seconds_to_frames(secs.clamp(0.2, 600.0)).max(1);
+        let fade = fps
+            .seconds_to_frames(dissolve.clamp(0.0, 10.0))
+            .min(len.saturating_sub(1));
+        let track = self.ensure_track(TrackKind::Video, 0);
+        let mut clips = Vec::new();
+        for media in &images {
+            let item = Placement {
+                track,
+                draft: ClipDraft {
+                    source: ClipSource::Media(*media),
+                    source_start: 0.0,
+                    duration: len,
+                },
+            };
+            if let Some(o) = self.apply(Edit::Append { items: vec![item] }) {
+                clips.extend(o.clips);
+            }
+        }
+        if fade > 0 {
+            for c in clips.iter().skip(1) {
+                self.apply(Edit::SetDissolve {
+                    clip: *c,
+                    frames: fade,
+                });
+            }
+        }
+        self.selection = clips.clone();
+        self.say(format!("Slideshow com {} imagem(ns)", clips.len()));
+        clips.len()
+    }
+
     /// Auto-duck: nos clipes de áudio selecionados (a música) o volume cai `duck_db` enquanto os
     /// outros clipes de áudio (a voz) passam de `threshold_db`. Vira keyframes de volume.
     pub fn auto_duck(&mut self, threshold_db: f32, duck_db: f32) {
@@ -1687,6 +1735,33 @@ mod tests {
         s.set_playhead(140);
         s.add_dissolve();
         assert_eq!(s.project().video_tracks[0].clips[1].dissolve_in, 30);
+    }
+
+    #[test]
+    fn slideshow_lays_images_end_to_end_with_dissolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let imgs: Vec<_> = ["a", "b", "c"]
+            .iter()
+            .map(|n| paw_testkit::png(dir.path(), &format!("{n}.png"), "red", 64, 36))
+            .collect();
+        let mut s = state();
+        assert_eq!(s.slideshow(2.0, 0.5), 0, "sem imagens avisa");
+        assert_eq!(s.import(&imgs), 3);
+        assert_eq!(s.slideshow(2.0, 0.5), 3);
+        let clips = &s.project().video_tracks[0].clips;
+        assert_eq!(clips.len(), 3);
+        let fps = s.project().settings.fps;
+        let two_s = fps.seconds_to_frames(2.0);
+        assert!(clips.iter().all(|c| c.duration == two_s));
+        assert_eq!(clips[1].start, clips[0].end());
+        assert_eq!(clips[0].dissolve_in, 0, "o primeiro não tem dissolve");
+        assert_eq!(clips[1].dissolve_in, fps.seconds_to_frames(0.5));
+        assert_eq!(clips[2].dissolve_in, fps.seconds_to_frames(0.5));
+        // um desfazer por imagem nunca deixa o projeto num estado quebrado
+        for _ in 0..8 {
+            s.undo();
+        }
+        assert!(s.project().video_tracks.iter().all(|t| t.clips.is_empty()));
     }
 
     #[test]

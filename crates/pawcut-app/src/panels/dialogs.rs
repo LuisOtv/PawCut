@@ -326,6 +326,7 @@ impl Workspace {
         self.deliver_ui(ctx);
         self.prefs_ui(ctx);
         self.new_project_ui(ctx);
+        self.slideshow_ui(ctx);
         self.confirm_ui(ctx);
         self.recovery_ui(ctx);
         self.export_quit_ui(ctx);
@@ -1286,6 +1287,58 @@ impl Workspace {
         if let Err(e) = self.keymap.save(&config::keymap_path()) {
             self.st
                 .say(format!("Não foi possível salvar os atalhos: {e}"));
+        }
+    }
+
+    fn slideshow_ui(&mut self, ctx: &egui::Context) {
+        let Some((mut secs, mut fade)) = self.slideshow else {
+            return;
+        };
+        let images = self
+            .project_arc
+            .media
+            .iter()
+            .filter(|m| matches!(m.info.kind, pawcut_core::MediaKind::Image))
+            .count();
+        let keys = paw_ui::dialog::keys(ctx);
+        let (mut go, mut cancel) = (false, false);
+        paw_ui::dialog::window(ctx, "slideshow", "Slideshow", 340.0, |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "Coloca as {images} imagem(ns) do Media Pool, em ordem, no fim da timeline."
+                ))
+                .weak(),
+            );
+            ui.add(
+                paw_ui::Slider::new(&mut secs, 0.5..=30.0)
+                    .text("cada imagem")
+                    .suffix(" s"),
+            );
+            ui.add(
+                paw_ui::Slider::new(&mut fade, 0.0..=3.0)
+                    .text("dissolve")
+                    .suffix(" s"),
+            );
+            paw_ui::theme::dialog_actions(ui, |ui| {
+                ui.add_enabled_ui(images > 0, |ui| {
+                    if paw_ui::theme::primary_button(ui, "Criar").clicked() {
+                        go = true;
+                    }
+                });
+                if ui.button("Cancelar").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        go |= keys.enter && images > 0;
+        cancel |= keys.esc;
+        if go {
+            self.slideshow = None;
+            self.st.slideshow(secs, fade);
+        } else if cancel {
+            self.slideshow = None;
+        } else {
+            self.slideshow = Some((secs, fade));
         }
     }
 

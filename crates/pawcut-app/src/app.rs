@@ -284,6 +284,13 @@ impl PawCutApp {
                 self.item(ui, "Empurrar 1 frame para trás", Action::NudgeLeft);
                 self.item(ui, "Empurrar 1 frame para frente", Action::NudgeRight);
                 self.item(ui, "Mostrar no Media Pool", Action::ShowInPool);
+                if ui
+                    .button("Slideshow com as imagens do Media Pool…")
+                    .clicked()
+                {
+                    ui.close();
+                    self.ws.slideshow = Some((3.0, 0.5));
+                }
                 ui.separator();
                 if ui.button("Adicionar faixa de vídeo").clicked() {
                     ui.close();
