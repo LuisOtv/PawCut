@@ -151,7 +151,8 @@ fn adjust_below(
         (Some(m), None) => Some(m.to_vec()),
         (None, None) => None,
     };
-    let mut adjusted = out.to_vec();
+    let mut adjusted = [0u8; TILE_BYTES];
+    adjusted.copy_from_slice(out);
     crate::filters::apply_to_tile(filter, &mut adjusted);
     for p in 0..TILE * TILE {
         let i = p * 4;

@@ -2161,6 +2161,40 @@ mod perf_probe {
         let t = Instant::now();
         e.apply_filter(id, &Filter::GaussianBlur(8.0), "b").unwrap();
         println!("blur: {:?}", t.elapsed());
+        // três camadas de ajuste por cima: o custo extra da composição
+        for f in [
+            Filter::HueSaturation {
+                hue: 20.0,
+                saturation: 0.2,
+                lightness: 0.0,
+            },
+            Filter::Curves(vec![(0.0, 0.0), (0.5, 0.6), (1.0, 1.0)]),
+            Filter::BrightnessContrast {
+                brightness: 0.1,
+                contrast: 0.1,
+            },
+        ] {
+            e.add_adjustment_layer(f, None, None).unwrap();
+        }
+        let t = Instant::now();
+        let mut n = 0;
+        for ty in 0..64 {
+            for tx in 0..64 {
+                n += composite::composite_tile(e.doc(), tx, ty, None).len();
+            }
+        }
+        println!(
+            "full composite with 3 adjustment layers ({n} bytes): {:?}",
+            t.elapsed()
+        );
+        let t = Instant::now();
+        let img = composite::flatten(e.doc());
+        println!(
+            "flatten with 3 adjustments ({}x{}): {:?}",
+            img.width(),
+            img.height(),
+            t.elapsed()
+        );
     }
 
     /// Valores absurdos (NaN, infinito, enormes, negativos, vazios) em tudo que recebe números do

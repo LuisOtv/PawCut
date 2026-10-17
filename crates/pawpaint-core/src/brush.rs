@@ -554,8 +554,16 @@ impl Stroker {
             )
         };
         // Valores de pincel absurdos (de um arquivo editado à mão) não podem travar o app.
-        size = if size.is_finite() { size.clamp(0.0, 8192.0) } else { 24.0 };
-        flow = if flow.is_finite() { flow.clamp(0.0, 1.0) } else { 1.0 };
+        size = if size.is_finite() {
+            size.clamp(0.0, 8192.0)
+        } else {
+            24.0
+        };
+        flow = if flow.is_finite() {
+            flow.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
         let dynamics = self.brush.dynamics;
         if !dynamics.is_none() {
             let sensor = |me: &mut Self, s: Sensor| -> f32 {
@@ -577,8 +585,16 @@ impl Stroker {
             if dynamics.follow_stroke {
                 angle += self.seg.angle;
             }
-            size = if size.is_finite() { size.clamp(0.0, 8192.0) } else { 24.0 };
-            flow = if flow.is_finite() { flow.clamp(0.0, 1.0) } else { 1.0 };
+            size = if size.is_finite() {
+                size.clamp(0.0, 8192.0)
+            } else {
+                24.0
+            };
+            flow = if flow.is_finite() {
+                flow.clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
         }
         let (mut cx, mut cy) = (cx, cy);
         if scatter > 0.0 {
@@ -1096,7 +1112,13 @@ mod dynamics_tests {
                 s.wrap = true;
                 s.radial = 40;
                 s.mirror = (true, true);
-                for (x, y) in [(10.0, 10.0), (60.0, 40.0), (1e6, -1e6), (f32::NAN, 5.0), (5.0, 5.0)] {
+                for (x, y) in [
+                    (10.0, 10.0),
+                    (60.0, 40.0),
+                    (1e6, -1e6),
+                    (f32::NAN, 5.0),
+                    (5.0, 5.0),
+                ] {
                     s.add_point_pressure(x, y, a);
                 }
                 s.finish(20.0, 20.0);

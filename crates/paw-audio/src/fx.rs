@@ -1093,9 +1093,17 @@ mod tests {
                 duck(&mut m, &base, SR, a, b, a, b);
                 // velocidade/tempo/tom com fatores malucos (limitados por dentro)
                 let r = resample(&base, a);
-                assert!(r.len() <= base.len() * 25 + 2, "resample não explode: {}", r.len());
+                assert!(
+                    r.len() <= base.len() * 25 + 2,
+                    "resample não explode: {}",
+                    r.len()
+                );
                 let t = time_stretch(&base, SR, a);
-                assert!(t.len() <= base.len() * 5 + 2, "stretch não explode: {}", t.len());
+                assert!(
+                    t.len() <= base.len() * 5 + 2,
+                    "stretch não explode: {}",
+                    t.len()
+                );
                 let mut p = base.clone();
                 pitch_shift(&mut p, SR, a);
                 assert_eq!(p.len(), base.len());
