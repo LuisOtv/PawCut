@@ -938,7 +938,11 @@ fn appearance_presets_save_apply_and_persist() {
     ws.apply_preset(0);
     assert_eq!(ws.st.project().clip(b).unwrap().color.saturation, 40.0);
     ws.st.undo();
-    assert_eq!(ws.st.project().clip(b).unwrap().color.saturation, 0.0, "um desfazer");
+    assert_eq!(
+        ws.st.project().clip(b).unwrap().color.saturation,
+        0.0,
+        "um desfazer"
+    );
     // vai para o disco e volta
     assert_eq!(crate::presets::load(&path).len(), 1);
     ws.delete_preset(0);

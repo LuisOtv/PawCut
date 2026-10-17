@@ -23,7 +23,9 @@ impl Engine {
         match self {
             Engine::Cpp { model, .. } => format!(
                 "whisper.cpp ({})",
-                model.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())
+                model
+                    .file_name()
+                    .map_or(String::new(), |n| n.to_string_lossy().into_owned())
             ),
             Engine::OpenAi { model, .. } => format!("whisper ({model})"),
         }
@@ -44,7 +46,9 @@ fn find_in_path(names: &[&str]) -> Option<PathBuf> {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
 }
 
 /// O primeiro modelo `ggml-*.bin` (prefere `small`) numa pasta.
@@ -71,7 +75,11 @@ pub fn detect() -> Result<Engine, String> {
     let forced = std::env::var_os("PAW_WHISPER_BIN").map(PathBuf::from);
     let cpp = forced
         .clone()
-        .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().contains("cpp") || n.to_string_lossy().contains("cli")))
+        .filter(|p| {
+            p.file_name().is_some_and(|n| {
+                n.to_string_lossy().contains("cpp") || n.to_string_lossy().contains("cli")
+            })
+        })
         .or_else(|| find_in_path(&["whisper-cli", "whisper-cpp", "whisper.cpp"]));
     if let Some(bin) = cpp {
         let model = std::env::var_os("PAW_WHISPER_MODEL")
@@ -146,7 +154,8 @@ pub fn transcribe(engine: &Engine, wav: &Path, lang: &str, work: &Path) -> Resul
         }
         Engine::OpenAi { bin, model } => {
             let mut c = Command::new(bin);
-            c.arg(wav).args(["--model", model, "--output_format", "srt", "--output_dir"]);
+            c.arg(wav)
+                .args(["--model", model, "--output_format", "srt", "--output_dir"]);
             c.arg(work);
             if lang != "auto" {
                 c.args(["--language", lang]);
@@ -159,10 +168,41 @@ pub fn transcribe(engine: &Engine, wav: &Path, lang: &str, work: &Path) -> Resul
         .map_err(|e| format!("Não consegui rodar o whisper: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+        let last = err
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
         return Err(format!("O whisper falhou: {last}"));
     }
     std::fs::read_to_string(&srt).map_err(|_| "O whisper não gerou a legenda".to_string())
+}
+
+/// Lê as falas de um SRT: (início s, fim s, texto). Blocos que não entende são pulados.
+pub fn parse_srt(text: &str) -> Vec<(f64, f64, String)> {
+    fn secs(t: &str) -> Option<f64> {
+        let t = t.trim().replace(',', ".");
+        let mut it = t.split(':');
+        let (h, m, s) = (it.next()?, it.next()?, it.next()?);
+        Some(
+            h.parse::<f64>().ok()? * 3600.0
+                + m.parse::<f64>().ok()? * 60.0
+                + s.parse::<f64>().ok()?,
+        )
+    }
+    let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+    text.split("\n\n")
+        .filter_map(|block| {
+            let lines: Vec<&str> = block.lines().filter(|l| !l.trim().is_empty()).collect();
+            let i = lines.iter().position(|l| l.contains("-->"))?;
+            let (a, b) = lines[i].split_once("-->")?;
+            let words = lines[i + 1..].join(" ");
+            let words = words.trim();
+            (!words.is_empty())
+                .then(|| (secs(a), secs(b), words.to_string()))
+                .and_then(|(a, b, w)| Some((a?, b?, w)))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -179,7 +219,10 @@ mod tests {
         let bytes = std::fs::read(&p).unwrap();
         assert_eq!(&bytes[0..4], b"RIFF");
         assert_eq!(&bytes[8..12], b"WAVE");
-        assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 16_000);
+        assert_eq!(
+            u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+            16_000
+        );
         // 1 s a 16 kHz, 16 bits = 32 000 bytes de dados
         let data = u32::from_le_bytes(bytes[40..44].try_into().unwrap());
         assert!((data as i64 - 32_000).abs() <= 8, "{data}");
@@ -203,7 +246,10 @@ mod tests {
         let cpp = fake(
             dir.path(),
             "whisper-cli",
-            &format!("while [ $# -gt 0 ]; do [ \"$1\" = \"-of\" ] && out=\"$2\"; shift; done\nprintf '%s' '{}' > \"$out.srt\"", srt.replace('\n', "\\n")),
+            &format!(
+                "while [ $# -gt 0 ]; do [ \"$1\" = \"-of\" ] && out=\"$2\"; shift; done\nprintf '%s' '{}' > \"$out.srt\"",
+                srt.replace('\n', "\\n")
+            ),
         );
         let model = dir.path().join("ggml-small.bin");
         std::fs::write(&model, b"m").unwrap();
@@ -214,25 +260,56 @@ mod tests {
         let oa = fake(
             dir.path(),
             "whisper",
-            &format!("while [ $# -gt 0 ]; do [ \"$1\" = \"--output_dir\" ] && d=\"$2\"; shift; done\nprintf '%s' '{}' > \"$d/fala.srt\"", srt.replace('\n', "\\n")),
+            &format!(
+                "while [ $# -gt 0 ]; do [ \"$1\" = \"--output_dir\" ] && d=\"$2\"; shift; done\nprintf '%s' '{}' > \"$d/fala.srt\"",
+                srt.replace('\n', "\\n")
+            ),
         );
-        let e = Engine::OpenAi { bin: oa, model: "small".into() };
-        assert!(transcribe(&e, &wav, "auto", &dir.path().join("w2")).unwrap().contains("Olá"));
+        let e = Engine::OpenAi {
+            bin: oa,
+            model: "small".into(),
+        };
+        assert!(
+            transcribe(&e, &wav, "auto", &dir.path().join("w2"))
+                .unwrap()
+                .contains("Olá")
+        );
         assert!(e.label().contains("small"));
         // programa que falha devolve o motivo; programa que não existe, também
         let bad = fake(dir.path(), "ruim", "echo 'sem memória' >&2; exit 3");
-        let e = Engine::OpenAi { bin: bad, model: "small".into() };
+        let e = Engine::OpenAi {
+            bin: bad,
+            model: "small".into(),
+        };
         let err = transcribe(&e, &wav, "pt", &dir.path().join("w3")).unwrap_err();
         assert!(err.contains("sem memória"), "{err}");
-        let e = Engine::OpenAi { bin: dir.path().join("nao-existe"), model: "small".into() };
+        let e = Engine::OpenAi {
+            bin: dir.path().join("nao-existe"),
+            model: "small".into(),
+        };
         assert!(transcribe(&e, &wav, "pt", &dir.path().join("w4")).is_err());
+    }
+
+    #[test]
+    fn parses_srt_blocks_and_skips_garbage() {
+        let srt = "\u{feff}1\n00:00:00,000 --> 00:00:01,500\nOlá\nmundo\n\nlixo\n\n2\n01:02:03,250 --> 01:02:04,000\nFim\n\n3\n00:00:09,0 --> 00:00:10,0\n\n";
+        let v = parse_srt(srt);
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert_eq!(v[0], (0.0, 1.5, "Olá mundo".to_string()));
+        assert!((v[1].0 - 3723.25).abs() < 1e-9);
+        assert!(parse_srt("").is_empty());
     }
 
     #[test]
     fn model_search_prefers_small() {
         let dir = tempfile::tempdir().unwrap();
         assert!(find_model(dir.path()).is_none());
-        for n in ["ggml-base.bin", "ggml-small.bin", "ggml-tiny.bin", "outro.bin"] {
+        for n in [
+            "ggml-base.bin",
+            "ggml-small.bin",
+            "ggml-tiny.bin",
+            "outro.bin",
+        ] {
             std::fs::write(dir.path().join(n), b"m").unwrap();
         }
         assert!(find_model(dir.path()).unwrap().ends_with("ggml-small.bin"));

@@ -102,6 +102,14 @@ pub fn mono_max(p: &[Vec<f32>]) -> Vec<f32> {
         .collect()
 }
 
+/// Os canais somados num só (média), para quem precisa de mono com sinal (o whisper).
+pub fn mono_max_signed(p: &[Vec<f32>]) -> Vec<f32> {
+    let n = p.first().map_or(0, Vec::len);
+    (0..n)
+        .map(|i| p.iter().map(|c| c[i]).sum::<f32>() / p.len() as f32)
+        .collect()
+}
+
 /// "Melhorar voz" em um clique: passa-altas, noise gate automático, compressor médio,
 /// loudness no alvo e limitador em −1 dB.
 pub fn enhance_voice(p: &mut [Vec<f32>], rate: u32, target: f32) {

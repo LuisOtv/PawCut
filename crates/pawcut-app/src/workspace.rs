@@ -231,7 +231,9 @@ impl Workspace {
     fn poll_transcription(&mut self, ctx: &egui::Context) {
         let Some(t) = &self.transcription else { return };
         match t.rx.try_recv() {
-            Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(300)),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(300))
+            }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.transcription = None;
                 self.st.warn("A transcrição foi interrompida");
@@ -257,7 +259,8 @@ impl Workspace {
                     c.end += clip_start;
                 }
                 let n = self.st.import_subtitles(&cues);
-                self.st.say(format!("{n} legenda(s) criada(s) pela transcrição"));
+                self.st
+                    .say(format!("{n} legenda(s) criada(s) pela transcrição"));
             }
             Err(e) => self.st.warn(format!("Não entendi a legenda gerada: {e}")),
         }

@@ -256,7 +256,11 @@ impl PawCutApp {
                 self.item(ui, "Levantar In/Out (deixa o buraco)", Action::LiftInOut);
                 self.item(ui, "Ligar / separar áudio e vídeo", Action::LinkUnlink);
                 self.item(ui, "Alinhar clipes pelo áudio", Action::AlignAudio);
-                self.item(ui, "Transcrever o áudio em legendas (whisper)", Action::Transcribe);
+                self.item(
+                    ui,
+                    "Transcrever o áudio em legendas (whisper)",
+                    Action::Transcribe,
+                );
                 ui.separator();
                 self.item(ui, "Insert do Source", Action::InsertEdit);
                 self.item(ui, "Overwrite do Source", Action::OverwriteEdit);

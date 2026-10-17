@@ -280,6 +280,8 @@ pub struct VoiceApp {
     player: Player,
     /// Efeito demorado rodando em outra thread.
     effect: Option<EffectJob>,
+    /// Transcrição (whisper) rodando em outra thread.
+    transcription: Option<Receiver<Result<String, String>>>,
     /// Uma reprodução foi iniciada e ainda não foi vista terminar (para repetir em loop).
     play_active: bool,
     /// Revisão da sessão que o player está tocando: se mudar, troca a mixagem ao vivo.
@@ -528,6 +530,7 @@ impl VoiceApp {
             label_edit: None,
             player: Player::spawn(RATE, 2),
             effect: None,
+            transcription: None,
             play_active: false,
             play_rev: 0,
             looping: false,
@@ -835,6 +838,80 @@ impl VoiceApp {
     }
 
     /// Recolhe o efeito que terminou.
+    /// Transcreve a primeira faixa selecionada com o whisper instalado; cada fala vira um rótulo.
+    pub fn start_transcription(&mut self, lang: &str) {
+        if self.transcription.is_some() {
+            self.warn("Já está transcrevendo");
+            return;
+        }
+        let engine = match paw_audio::whisper::detect() {
+            Ok(e) => e,
+            Err(msg) => {
+                self.warn(msg);
+                return;
+            }
+        };
+        let Some(id) = self.sel_tracks().first().copied() else {
+            self.warn("Selecione uma faixa");
+            return;
+        };
+        let planar = self.ed.render(id);
+        let mono = effects::mono_max_signed(&planar);
+        if mono.is_empty() {
+            self.warn("A faixa está vazia");
+            return;
+        }
+        let (tx, rx) = channel();
+        let lang = lang.to_string();
+        let label = engine.label();
+        std::thread::spawn(move || {
+            let dir = std::env::temp_dir().join(format!("pawvoice-whisper-{}", std::process::id()));
+            let wav = dir.join("fala.wav");
+            let result = std::fs::create_dir_all(&dir)
+                .and_then(|_| paw_audio::whisper::write_wav16k(&wav, &mono, RATE))
+                .map_err(|e| e.to_string())
+                .and_then(|_| paw_audio::whisper::transcribe(&engine, &wav, &lang, &dir));
+            let _ = std::fs::remove_dir_all(&dir);
+            let _ = tx.send(result);
+        });
+        self.transcription = Some(rx);
+        self.say(format!("Transcrevendo com {label}… pode levar um tempo"));
+    }
+
+    fn poll_transcription(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.transcription else {
+            return;
+        };
+        match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(300))
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.transcription = None;
+                self.warn("A transcrição foi interrompida");
+            }
+            Ok(result) => {
+                self.transcription = None;
+                match result {
+                    Err(e) => self.warn(e),
+                    Ok(text) => self.finish_transcription(&text),
+                }
+            }
+        }
+    }
+
+    /// As falas do SRT viram rótulos (um passo de desfazer).
+    pub fn finish_transcription(&mut self, srt: &str) {
+        let items: Vec<(usize, usize, String)> = paw_audio::whisper::parse_srt(srt)
+            .into_iter()
+            .map(|(a, b, t)| ((a * RATE as f64) as usize, (b * RATE as f64) as usize, t))
+            .collect();
+        match self.ed.add_labels(true, &items, "Transcrever") {
+            Ok(_) => self.say(format!("{} fala(s) rotulada(s)", items.len())),
+            Err(_) => self.warn("O whisper não achou fala nenhuma"),
+        }
+    }
+
     fn poll_effect(&mut self, ctx: &egui::Context) {
         let Some(job) = &self.effect else { return };
         match job.rx.try_recv() {
@@ -2389,6 +2466,17 @@ impl VoiceApp {
                     min_sound: 0.3,
                     text: "Fala".into(),
                 });
+            }
+            if ui
+                .add_enabled(
+                    self.transcription.is_none(),
+                    egui::Button::new("Transcrever a fala em rótulos (whisper)"),
+                )
+                .on_hover_text("Precisa do whisper instalado; cada fala vira um rótulo com o texto")
+                .clicked()
+            {
+                ui.close();
+                self.start_transcription("pt");
             }
             if ui.button("Marcar áudio estourado…").clicked() {
                 ui.close();
@@ -4906,6 +4994,7 @@ impl VoiceApp {
         let ctx = ui.ctx().clone();
         self.poll_file();
         self.poll_effect(&ctx);
+        self.poll_transcription(&ctx);
         if self.effect.is_none() {
             self.poll_imports();
         }
@@ -5141,6 +5230,26 @@ mod tests {
         let before = mono(&app, voice_id);
         app.auto_duck(voice_id, -35.0, 12.0, 20.0, 200.0);
         assert_eq!(mono(&app, voice_id), before);
+    }
+
+    #[test]
+    fn transcription_turns_speech_into_labels() {
+        let (mut app, _) = app_with(vec![0.1; 48_000 * 4]);
+        let srt = "1\n00:00:00,500 --> 00:00:01,500\nOlá\n\n2\n00:00:02,000 --> 00:00:03,250\nTudo bem?\n\n";
+        app.finish_transcription(srt);
+        let labels = &app.ed.session().label_tracks[0].labels;
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[0].at, 24_000);
+        assert_eq!(labels[1].end, 156_000);
+        assert_eq!(labels[1].text, "Tudo bem?");
+        assert!(app.ed.undo(), "um passo de desfazer");
+        assert!(app.ed.session().label_tracks.is_empty());
+        // SRT vazio avisa e não cria faixa
+        app.finish_transcription("");
+        assert!(app.ed.session().label_tracks.is_empty());
+        // sem whisper instalado: avisa e não fica "transcrevendo"
+        app.start_transcription("pt");
+        assert!(app.transcription.is_none());
     }
 
     #[test]
