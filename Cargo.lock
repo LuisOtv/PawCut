@@ -2751,6 +2751,7 @@ version = "0.1.0"
 dependencies = [
  "cosmic-text",
  "image",
+ "paw-audio",
  "paw-media",
  "paw-testkit",
  "pawcut-core",

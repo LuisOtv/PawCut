@@ -485,6 +485,13 @@ impl PaintApp {
             .iter()
             .map(|b| docks::brush_thumb(ctx, b, &b.name))
             .collect();
+        // Para os testes visuais: `PAWPAINT_PANEL=BrushEditor` traz esse docker para a frente.
+        if let Ok(name) = std::env::var("PAWPAINT_PANEL")
+            && let Some(panel) = Panel::ALL.into_iter().find(|p| format!("{p:?}") == name)
+            && let Some(path) = app.dock.find_tab(&panel)
+        {
+            let _ = app.dock.set_active_tab(path);
+        }
         for p in args {
             open_path(&mut app.st, &p);
         }

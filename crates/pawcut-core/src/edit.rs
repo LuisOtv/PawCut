@@ -64,6 +64,8 @@ pub enum ClipChange {
     DissolveColor(Option<Rgba>),
     BlurFill(bool),
     Chroma(Option<ChromaKey>),
+    /// Troca a lista de efeitos de áudio do clipe.
+    AudioFx(Vec<crate::model::AudioFx>),
 }
 /// Uma alteração no projeto. Aplicada pelo `Editor`, que guarda o histórico.
 #[derive(Debug, Clone, PartialEq)]
@@ -585,6 +587,7 @@ fn place(p: &mut Project, at: Frame, items: Vec<Placement>) -> Result<Outcome, E
             dissolve_color: None,
             blur_fill: false,
             chroma: None,
+            audio_fx: Vec::new(),
         };
         let (track, ids) = p
             .track_and_ids(pl.track)
@@ -882,6 +885,15 @@ fn set_clip(p: &mut Project, id: ClipId, change: ClipChange) -> Result<Outcome, 
         ClipChange::FadeCurve(e) => c.fade_curve = e,
         ClipChange::DissolveColor(color) => c.dissolve_color = color,
         ClipChange::BlurFill(on) => c.blur_fill = on,
+        ClipChange::AudioFx(list) => {
+            if list.len() > 12 || list.iter().any(|f| !f.is_valid()) {
+                return Err(EditError::InvalidValue("efeito de áudio fora da faixa"));
+            }
+            if c.audio_fx == list {
+                return Err(EditError::NoChange);
+            }
+            c.audio_fx = list;
+        }
         ClipChange::Chroma(k) => {
             if let Some(k) = &k {
                 let ok = |v: f32| (0.0..=1.0).contains(&v);
@@ -1339,6 +1351,7 @@ impl Edit {
                 ClipChange::DissolveColor(_) => "Transição",
                 ClipChange::BlurFill(_) => "Fundo desfocado",
                 ClipChange::Chroma(_) => "Chroma key",
+                ClipChange::AudioFx(_) => "Efeitos de áudio",
             },
             Edit::SetSpeed { .. } => "Velocidade",
             Edit::Link { .. } => "Ligar clipes",

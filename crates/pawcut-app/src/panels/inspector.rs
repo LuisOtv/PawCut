@@ -478,6 +478,207 @@ impl Workspace {
         }
     }
 
+    /// Efeitos de áudio do clipe: cada um liga e desliga e mostra os próprios valores. Os efeitos
+    /// rodam no áudio inteiro do clipe e ficam guardados com ele.
+    fn audio_fx_section(&mut self, ui: &mut egui::Ui, aclips: &[Clip]) {
+        use pawcut_core::AudioFx as Fx;
+        let Some(first) = aclips.first() else { return };
+        let before = first.audio_fx.clone();
+        let mut list = before.clone();
+        section(ui, "Efeitos de áudio", |ui| {
+            row(
+                ui,
+                "Preset",
+                |ui| {
+                    if ui
+                        .button("Limpar voz")
+                        .on_hover_text(
+                            "Tira o ronco, abaixa o chiado nas pausas, tira o chiado dos S e nivela o volume",
+                        )
+                        .clicked()
+                    {
+                        list = voice_cleanup();
+                    }
+                },
+                |_| {},
+            );
+            row(
+                ui,
+                "",
+                |ui| {
+                    if ui
+                        .add_enabled(!list.is_empty(), egui::Button::new("Tirar todos"))
+                        .clicked()
+                    {
+                        list.clear();
+                    }
+                },
+                |_| {},
+            );
+            for kind in FX_ORDER {
+                let at = list.iter().position(|f| fx_kind(f) == kind);
+                let mut on = at.is_some();
+                row(
+                    ui,
+                    fx_label(kind),
+                    |ui| {
+                        ui.checkbox(&mut on, "");
+                    },
+                    |_| {},
+                );
+                match (on, at) {
+                    (true, None) => {
+                        list.push(fx_default(kind));
+                        list.sort_by_key(fx_kind);
+                    }
+                    (false, Some(i)) => {
+                        list.remove(i);
+                    }
+                    _ => {}
+                }
+                let Some(i) = list.iter().position(|f| fx_kind(f) == kind) else {
+                    continue;
+                };
+                let drag = |ui: &mut egui::Ui,
+                            v: &mut f32,
+                            r: std::ops::RangeInclusive<f32>,
+                            sp: f64,
+                            suffix: &str| {
+                    ui.add(
+                        DragValue::new(v)
+                            .range(r)
+                            .speed(sp)
+                            .max_decimals(1)
+                            .suffix(suffix),
+                    );
+                };
+                match &mut list[i] {
+                    Fx::HighPass { hz } => row(
+                        ui,
+                        "  corta abaixo de",
+                        |ui| drag(ui, hz, 20.0..=400.0, 1.0, " Hz"),
+                        |_| {},
+                    ),
+                    Fx::NoiseGate {
+                        threshold_db,
+                        reduction_db,
+                    } => {
+                        row(
+                            ui,
+                            "  abaixo de",
+                            |ui| drag(ui, threshold_db, -80.0..=0.0, 0.5, " dB"),
+                            |_| {},
+                        );
+                        row(
+                            ui,
+                            "  abaixa",
+                            |ui| drag(ui, reduction_db, 0.0..=60.0, 0.5, " dB"),
+                            |_| {},
+                        );
+                    }
+                    Fx::Compressor {
+                        threshold_db,
+                        ratio,
+                        makeup_db,
+                        ..
+                    } => {
+                        row(
+                            ui,
+                            "  limiar",
+                            |ui| drag(ui, threshold_db, -60.0..=0.0, 0.5, " dB"),
+                            |_| {},
+                        );
+                        row(
+                            ui,
+                            "  razão",
+                            |ui| drag(ui, ratio, 1.0..=20.0, 0.1, " :1"),
+                            |_| {},
+                        );
+                        row(
+                            ui,
+                            "  ganho",
+                            |ui| drag(ui, makeup_db, 0.0..=24.0, 0.2, " dB"),
+                            |_| {},
+                        );
+                    }
+                    Fx::DeEss {
+                        threshold_db,
+                        reduction_db,
+                    } => {
+                        row(
+                            ui,
+                            "  limiar",
+                            |ui| drag(ui, threshold_db, -60.0..=0.0, 0.5, " dB"),
+                            |_| {},
+                        );
+                        row(
+                            ui,
+                            "  abaixa",
+                            |ui| drag(ui, reduction_db, 0.0..=24.0, 0.5, " dB"),
+                            |_| {},
+                        );
+                    }
+                    Fx::Eq3 {
+                        bass_db,
+                        mid_db,
+                        treble_db,
+                    } => {
+                        row(
+                            ui,
+                            "  graves",
+                            |ui| drag(ui, bass_db, -18.0..=18.0, 0.2, " dB"),
+                            |_| {},
+                        );
+                        row(
+                            ui,
+                            "  médios",
+                            |ui| drag(ui, mid_db, -18.0..=18.0, 0.2, " dB"),
+                            |_| {},
+                        );
+                        row(
+                            ui,
+                            "  agudos",
+                            |ui| drag(ui, treble_db, -18.0..=18.0, 0.2, " dB"),
+                            |_| {},
+                        );
+                    }
+                    Fx::Notch { hz } => row(
+                        ui,
+                        "  frequência",
+                        |ui| drag(ui, hz, 20.0..=12000.0, 1.0, " Hz"),
+                        |_| {},
+                    ),
+                    Fx::Reverb { room, wet_db } => {
+                        row(
+                            ui,
+                            "  sala",
+                            |ui| drag(ui, room, 0.0..=1.0, 0.01, ""),
+                            |_| {},
+                        );
+                        row(
+                            ui,
+                            "  quantidade",
+                            |ui| drag(ui, wet_db, -40.0..=0.0, 0.5, " dB"),
+                            |_| {},
+                        );
+                    }
+                }
+            }
+        });
+        if list != before {
+            self.apply_all(aclips, "audio-fx", |c| {
+                Some(Edit::SetClip {
+                    clip: c.id,
+                    change: ClipChange::AudioFx(list.clone()),
+                })
+            });
+            // um arraste de valor é um passo só; o próximo gesto abre outro
+            if ui.input(|i| !i.pointer.any_down()) {
+                self.st.editor.end_coalescing();
+            }
+        }
+    }
+
     /// Chroma key (fundo verde/azul): liga, escolhe a cor e ajusta.
     fn chroma_section(&mut self, ui: &mut egui::Ui, clips: &[Clip], first: &Clip) {
         section(ui, "Chroma key", |ui| {
@@ -1219,6 +1420,7 @@ impl Workspace {
                     });
                 }
                 if tab == InspectorTab::Audio && !aclips.is_empty() {
+                    self.audio_fx_section(ui, &aclips);
                     section(ui, "Áudio", |ui| {
                         self.param_row(
                             ui,
@@ -1648,5 +1850,90 @@ mod pan_tests {
         let c = st.project().clip(clip.id).unwrap();
         assert!(c.keyframes.get(&Param::X).is_none_or(|k| k.is_empty()));
         assert!(c.transform.x < -500.0);
+    }
+}
+
+/// A ordem fixa dos efeitos na lista e na tela.
+const FX_ORDER: [u8; 7] = [0, 1, 2, 3, 4, 5, 6];
+
+fn fx_kind(f: &pawcut_core::AudioFx) -> u8 {
+    use pawcut_core::AudioFx as Fx;
+    match f {
+        Fx::HighPass { .. } => 0,
+        Fx::NoiseGate { .. } => 1,
+        Fx::Notch { .. } => 2,
+        Fx::DeEss { .. } => 3,
+        Fx::Eq3 { .. } => 4,
+        Fx::Compressor { .. } => 5,
+        Fx::Reverb { .. } => 6,
+    }
+}
+
+fn fx_label(kind: u8) -> &'static str {
+    [
+        "Filtro de graves",
+        "Noise gate",
+        "Notch",
+        "De-esser",
+        "Equalizador",
+        "Compressor",
+        "Reverb",
+    ][kind as usize]
+}
+
+fn fx_default(kind: u8) -> pawcut_core::AudioFx {
+    use pawcut_core::AudioFx as Fx;
+    match kind {
+        0 => Fx::HighPass { hz: 80.0 },
+        1 => Fx::NoiseGate {
+            threshold_db: -45.0,
+            reduction_db: 15.0,
+        },
+        2 => Fx::Notch { hz: 60.0 },
+        3 => Fx::DeEss {
+            threshold_db: -32.0,
+            reduction_db: 8.0,
+        },
+        4 => Fx::Eq3 {
+            bass_db: 0.0,
+            mid_db: 0.0,
+            treble_db: 0.0,
+        },
+        5 => Fx::Compressor {
+            threshold_db: -22.0,
+            ratio: 3.0,
+            attack_ms: 5.0,
+            release_ms: 100.0,
+            makeup_db: 3.0,
+        },
+        _ => Fx::Reverb {
+            room: 0.4,
+            wet_db: -18.0,
+        },
+    }
+}
+
+/// O preset "Limpar voz": o que o "Melhorar voz" do PawVoice faz, como efeitos do clipe.
+pub(crate) fn voice_cleanup() -> Vec<pawcut_core::AudioFx> {
+    [0u8, 1, 3, 5].into_iter().map(fx_default).collect()
+}
+
+#[cfg(test)]
+mod fx_tests {
+    use super::*;
+
+    #[test]
+    fn every_default_effect_is_valid_and_ordered() {
+        for k in FX_ORDER {
+            let f = fx_default(k);
+            assert!(f.is_valid(), "{}", fx_label(k));
+            assert_eq!(fx_kind(&f), k);
+        }
+        let list = voice_cleanup();
+        assert_eq!(list.len(), 4);
+        assert!(
+            list.windows(2).all(|w| fx_kind(&w[0]) < fx_kind(&w[1])),
+            "em ordem"
+        );
     }
 }

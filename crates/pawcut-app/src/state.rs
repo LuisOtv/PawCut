@@ -1100,6 +1100,7 @@ impl AppState {
             dissolve_color: None,
             blur_fill: false,
             chroma: None,
+            audio_fx: Vec::new(),
         };
         let clips: Vec<(TrackId, Clip)> = cues
             .iter()
