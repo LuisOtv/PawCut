@@ -67,7 +67,8 @@ Gravador e editor de voz com a interface e o jeito de usar do Audacity.
 - **Mais efeitos:** **equalizador** paramétrico com curva e presets (voz clara, rádio, telefone, zumbido 60 Hz),
   notch, reverb, tremolo, phaser, wah-wah, **velocidade**, **tempo** (muda a duração sem mudar a voz) e **tom**
   (sem mudar a duração), reparar áudio estourado, apagar uma faixa de frequências, fade ajustável, repetir, tirar a
-  voz do centro (karaokê) e **auto-duck** (a música abaixa quando a voz fala).
+  voz do centro (karaokê), **auto-duck** (a música abaixa quando a voz fala) e **crossfade** entre duas faixas
+  selecionadas. **Ctrl+R** repete o último efeito, com os mesmos valores, na seleção de agora.
 - **Análise:** rotular as falas (um rótulo por trecho com som), marcar onde o áudio estourou e **transcrever em
   rótulos** (precisa do `whisper` instalado: `pip install openai-whisper` ou o whisper.cpp com um modelo ggml).
 - **Gerar:** Faixas → Gerar tom, ruído (branco, rosa, marrom) ou metrônomo.

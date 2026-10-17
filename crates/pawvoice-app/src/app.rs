@@ -257,6 +257,15 @@ struct SpecCache {
     cols: usize,
 }
 
+/// O último efeito aplicado, para "Repetir último efeito" (Ctrl+R).
+#[derive(Clone)]
+struct LastEffect {
+    label: &'static str,
+    resize: bool,
+    /// Faz uma cópia nova do efeito a cada uso.
+    make: std::sync::Arc<dyn Fn() -> Box<dyn FnMut(&mut [Vec<f32>]) + Send> + Send + Sync>,
+}
+
 /// Efeito que está sendo calculado fora da thread da interface.
 struct EffectJob {
     label: &'static str,
@@ -294,6 +303,7 @@ pub struct VoiceApp {
     player: Player,
     /// Efeito demorado rodando em outra thread.
     effect: Option<EffectJob>,
+    last_effect: Option<LastEffect>,
     /// Transcrição (whisper) rodando em outra thread.
     transcription: Option<Receiver<Result<String, String>>>,
     /// Uma reprodução foi iniciada e ainda não foi vista terminar (para repetir em loop).
@@ -563,6 +573,7 @@ impl VoiceApp {
             label_edit: None,
             player: Player::spawn(RATE, 2),
             effect: None,
+            last_effect: None,
             transcription: None,
             play_active: false,
             play_rev: 0,
@@ -809,7 +820,7 @@ impl VoiceApp {
     pub fn apply_effect(
         &mut self,
         label: &'static str,
-        f: impl FnMut(&mut [Vec<f32>]) + Send + 'static,
+        f: impl FnMut(&mut [Vec<f32>]) + Send + Clone + 'static,
     ) {
         self.apply_effect_ex(label, false, f);
     }
@@ -820,12 +831,24 @@ impl VoiceApp {
         &mut self,
         label: &'static str,
         resize: bool,
-        mut f: impl FnMut(&mut [Vec<f32>]) + Send + 'static,
+        mut f: impl FnMut(&mut [Vec<f32>]) + Send + Clone + 'static,
     ) {
         self.stop();
         if self.effect.is_some() {
             return;
         }
+        let proto = std::sync::Mutex::new(f.clone());
+        self.last_effect = Some(LastEffect {
+            label,
+            resize,
+            make: std::sync::Arc::new(move || {
+                let copy = proto
+                    .lock()
+                    .map(|p| p.clone())
+                    .unwrap_or_else(|e| e.into_inner().clone());
+                Box::new(copy)
+            }),
+        });
         let Some((tracks, a, b)) = self.target() else {
             self.warn("Grave ou importe áudio primeiro");
             return;
@@ -863,6 +886,16 @@ impl VoiceApp {
             rx,
             started: Instant::now(),
         });
+    }
+
+    /// Aplica de novo o último efeito (Ctrl+R), na seleção de agora.
+    pub fn repeat_last_effect(&mut self) {
+        let Some(last) = self.last_effect.clone() else {
+            self.warn("Ainda não aplicou nenhum efeito");
+            return;
+        };
+        let make = last.make.clone();
+        self.apply_effect_ex(last.label, last.resize, move |p| (make())(p));
     }
 
     fn finish_effect(&mut self, job: pawvoice_core::ProcessJob, label: &'static str) {
@@ -1856,6 +1889,9 @@ impl VoiceApp {
         if pressed(ctrl, Key::B) {
             self.add_label_here();
         }
+        if pressed(ctrl, Key::R) {
+            self.repeat_last_effect();
+        }
         if pressed(Modifiers::COMMAND | Modifiers::ALT, Key::I) {
             self.split_new();
         }
@@ -2365,6 +2401,16 @@ impl VoiceApp {
                 let t = self.lufs_target;
                 self.apply_effect("Melhorar voz", move |p| effects::enhance_voice(p, RATE, t));
             }
+            if ui
+                .add_enabled(
+                    self.last_effect.is_some(),
+                    egui::Button::new("Repetir último efeito").shortcut_text("Ctrl+R"),
+                )
+                .clicked()
+            {
+                ui.close();
+                self.repeat_last_effect();
+            }
             ui.menu_button("Volume", |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("Normalizar loudness").clicked() {
@@ -2530,11 +2576,17 @@ impl VoiceApp {
                     ui.close();
                     self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Pitch(2.0)));
                 }
-                if ui.button("Crossfade: faixa de cima sai, a de baixo entra").clicked() {
+                if ui
+                    .button("Crossfade: faixa de cima sai, a de baixo entra")
+                    .clicked()
+                {
                     ui.close();
                     self.crossfade_tracks(true);
                 }
-                if ui.button("Crossfade: faixa de baixo sai, a de cima entra").clicked() {
+                if ui
+                    .button("Crossfade: faixa de baixo sai, a de cima entra")
+                    .clicked()
+                {
                     ui.close();
                     self.crossfade_tracks(false);
                 }
@@ -5077,8 +5129,10 @@ impl VoiceApp {
                     let id = self.ed.add_track(vec![samples], at, Some(d.title().into()));
                     self.selected = vec![id];
                 } else {
-                    let (label, job) = d.job(RATE);
-                    self.apply_effect_ex(label, d.resizes(), job);
+                    let label = d.job(RATE).0;
+                    // um job novo por trecho (e por "repetir último efeito")
+                    let resizes = d.resizes();
+                    self.apply_effect_ex(label, resizes, move |p| (d.job(RATE).1)(p));
                 }
             }
             Some(Dialog::Limiter(db)) => self.apply_effect("Limitador", move |p| {
@@ -5303,10 +5357,37 @@ mod tests {
         // equalizador mantém o tamanho
         app.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::equalizer()));
         if let Some(Dialog::Fx(d)) = app.dialog.take() {
-            let (label, job) = d.job(RATE);
-            app.apply_effect_ex(label, d.resizes(), job);
+            let label = d.job(RATE).0;
+            let resizes = d.resizes();
+            app.apply_effect_ex(label, resizes, move |p| (d.job(RATE).1)(p));
         }
         assert_eq!(mono(&app, id).len(), 48_000);
+    }
+
+    #[test]
+    fn repeat_last_effect_applies_the_same_effect_again() {
+        let (mut app, id) = app_with(vec![0.2; 4_800]);
+        // nada aplicado ainda: avisa e não mexe
+        app.repeat_last_effect();
+        assert!((mono(&app, id)[100] - 0.2).abs() < 1e-6);
+        app.apply_effect("Dobrar", |p| effects::each(p, |s| dsp::gain(s, 6.0)));
+        let once = mono(&app, id)[100];
+        assert!(once > 0.39, "{once}");
+        app.repeat_last_effect();
+        let twice = mono(&app, id)[100];
+        assert!((twice / once - 1.995).abs() < 0.02, "{once} -> {twice}");
+        // um diálogo de efeito (que muda a duração) também se repete
+        app.sel = None;
+        app.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Repeat(2)));
+        if let Some(Dialog::Fx(d)) = app.dialog.take() {
+            let label = d.job(RATE).0;
+            let resizes = d.resizes();
+            app.apply_effect_ex(label, resizes, move |p| (d.job(RATE).1)(p));
+        }
+        assert_eq!(mono(&app, id).len(), 9_600);
+        app.sel = None;
+        app.repeat_last_effect();
+        assert_eq!(mono(&app, id).len(), 19_200);
     }
 
     #[test]
@@ -5318,7 +5399,12 @@ mod tests {
         app.sel = Some((0, 4_800));
         app.crossfade_tracks(true);
         let (t, b) = (mono(&app, top), mono(&app, bottom));
-        assert!(t[10] > 0.7 && t[4_790] < 0.1, "cima sai: {} {}", t[10], t[4_790]);
+        assert!(
+            t[10] > 0.7 && t[4_790] < 0.1,
+            "cima sai: {} {}",
+            t[10],
+            t[4_790]
+        );
         assert!(b[10] < 0.1 && b[4_790] > 0.7, "baixo entra");
         assert!((t[2_400] + b[2_400] - 0.8).abs() < 0.05, "soma constante");
         // uma só faixa: avisa e não mexe
