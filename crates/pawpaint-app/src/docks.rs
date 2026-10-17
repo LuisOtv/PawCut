@@ -804,6 +804,16 @@ pub fn brush_editor(st: &mut State, ui: &mut egui::Ui) {
                 let mut sm = b.smoothing * 100.0;
                 slider(ui, "Estabilizador", &mut sm, 0.0..=100.0, "%");
                 b.smoothing = sm / 100.0;
+                ui.label(RichText::new("Spray").color(theme::TEXT_DIM));
+                ui.add(paw_ui::Slider::new(&mut b.spray, 0..=100).suffix(" partículas"));
+                ui.end_row();
+                if b.spray > 0 {
+                    ui.label(RichText::new("  tamanho").color(theme::TEXT_DIM));
+                    let mut ps = b.spray_size * 100.0;
+                    ui.add(paw_ui::Slider::new(&mut ps, 2.0..=100.0).suffix("%"));
+                    b.spray_size = ps / 100.0;
+                    ui.end_row();
+                }
                 ui.label("Ponta");
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut b.tip, Tip::Round, "Redonda");
@@ -887,6 +897,11 @@ pub fn tool_options(st: &mut State, ui: &mut egui::Ui) {
     let o = &mut st.opts;
     match tool {
         Tool::Brush | Tool::Eraser => {
+            label(ui, "Simetria radial");
+            let mut n = st.symmetry as i32;
+            ui.add(paw_ui::Slider::new(&mut n, 1..=16).text("repetições"));
+            st.symmetry = n as u32;
+            ui.add_space(4.0);
             label(ui, "Modo de mistura do pincel");
             egui::ComboBox::from_id_salt("brush-blend")
                 .selected_text(st.blend.label())

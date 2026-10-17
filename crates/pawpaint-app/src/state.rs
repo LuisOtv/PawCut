@@ -460,6 +460,8 @@ pub struct State {
     pub mirror: (bool, bool),
     /// Modo de repetição (mosaico), como o Shift+W do Krita.
     pub wrap: bool,
+    /// Simetria radial (repetições em volta do centro); 1 = desligada.
+    pub symmetry: u32,
     pub opts: ToolOpts,
     pub clipboard: Option<Clip>,
     pub toasts: Toasts,

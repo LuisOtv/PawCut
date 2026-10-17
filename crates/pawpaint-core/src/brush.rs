@@ -111,6 +111,16 @@ pub struct Brush {
     /// Pressão, velocidade e direção mudando o carimbo ao longo do traço.
     #[serde(default)]
     pub dynamics: Dynamics,
+    /// Spray: partículas por carimbo (0 = pincel normal).
+    #[serde(default)]
+    pub spray: u32,
+    /// Tamanho de cada partícula do spray, em fração do pincel.
+    #[serde(default = "spray_default")]
+    pub spray_size: f32,
+}
+
+fn spray_default() -> f32 {
+    0.12
 }
 
 impl Brush {
@@ -129,6 +139,8 @@ impl Brush {
             scatter: 0.0,
             smoothing: 0.0,
             dynamics: Dynamics::default(),
+            spray: 0,
+            spray_size: 0.12,
         }
     }
 
@@ -210,6 +222,16 @@ impl Brush {
                 roundness: 0.25,
                 angle: 40.0,
                 spacing: 0.03,
+                ..b.clone()
+            },
+            Brush {
+                name: "Spray".into(),
+                size: 70.0,
+                hardness: 0.8,
+                flow: 0.7,
+                spacing: 0.25,
+                spray: 24,
+                spray_size: 0.06,
                 ..b.clone()
             },
             Brush {
@@ -307,6 +329,8 @@ pub struct Stroker {
     pub mirror: (bool, bool),
     /// Mosaico: carimbos que passam de uma borda reaparecem na outra.
     pub wrap: bool,
+    /// Simetria radial: o traço se repete `radial` vezes em volta do centro da imagem (1 = não).
+    pub radial: u32,
     pub buf: StrokeBuffer,
     w: usize,
     h: usize,
@@ -339,6 +363,7 @@ impl Stroker {
             erase: false,
             mirror: (false, false),
             wrap: false,
+            radial: 1,
             buf: StrokeBuffer::new(),
             w,
             h,
@@ -467,6 +492,20 @@ impl Stroker {
     }
 
     fn stamp(&mut self, cx: f32, cy: f32) {
+        let n = self.radial.clamp(1, 32);
+        if n == 1 {
+            self.stamp_wrapped(cx, cy);
+            return;
+        }
+        let (mx, my) = (self.w as f32 / 2.0, self.h as f32 / 2.0);
+        let (dx, dy) = (cx - mx, cy - my);
+        for k in 0..n {
+            let (sin, cos) = (std::f32::consts::TAU * k as f32 / n as f32).sin_cos();
+            self.stamp_wrapped(mx + dx * cos - dy * sin, my + dx * sin + dy * cos);
+        }
+    }
+
+    fn stamp_wrapped(&mut self, cx: f32, cy: f32) {
         let (w, h) = (self.w as f32, self.h as f32);
         if self.wrap {
             // O ponto volta para dentro da imagem e as cópias das bordas completam o carimbo.
@@ -548,6 +587,49 @@ impl Stroker {
             cx += a.cos() * r;
             cy += a.sin() * r;
         }
+        let spray = self.brush.spray;
+        if spray > 0 {
+            // Spray: várias partículas pequenas espalhadas dentro do círculo do pincel.
+            let psize = (size * self.brush.spray_size.clamp(0.02, 1.0)).max(1.0);
+            for _ in 0..spray.min(200) {
+                self.seed = self
+                    .seed
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223);
+                let a = (self.seed >> 8) as f32 / 16_777_216.0 * std::f32::consts::TAU;
+                self.seed = self
+                    .seed
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223);
+                let rr = ((self.seed >> 8) as f32 / 16_777_216.0).sqrt() * size / 2.0;
+                self.dab(
+                    cx + a.cos() * rr,
+                    cy + a.sin() * rr,
+                    psize,
+                    (hardness, flow, roundness, angle),
+                    (tip, grain),
+                );
+            }
+            return;
+        }
+        self.dab(
+            cx,
+            cy,
+            size,
+            (hardness, flow, roundness, angle),
+            (tip, grain),
+        );
+    }
+
+    /// Um carimbo redondo (ou quadrado) com o tamanho e a forma dados.
+    fn dab(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        size: f32,
+        (hardness, flow, roundness, angle): (f32, f32, f32, f32),
+        (tip, grain): (Tip, f32),
+    ) {
         let r = (size / 2.0).max(0.5);
         let (rx, ry) = (r, (r * roundness.clamp(0.05, 1.0)).max(0.5));
         let (sin, cos) = angle.to_radians().sin_cos();
@@ -867,6 +949,35 @@ mod dynamics_tests {
     }
 
     #[test]
+    fn radial_symmetry_repeats_the_stroke_around_the_center() {
+        let mut b = base();
+        b.size = 20.0;
+        let alpha = |s: &Stroker, x: usize, y: usize| {
+            s.buf
+                .tile(x / TILE, y / TILE)
+                .map_or(0, |t| t[((y % TILE) * TILE + x % TILE) * 4 + 3])
+        };
+        // centro (200,100); um toque 60 px à direita
+        let mut s = Stroker::new(400, 200);
+        s.begin(b.clone(), [0, 0, 0], false);
+        s.radial = 4;
+        s.add_point(260.0, 100.0);
+        assert!(alpha(&s, 260, 100) > 200, "original");
+        assert!(alpha(&s, 200, 160) > 200, "girado 90°");
+        assert!(alpha(&s, 140, 100) > 200, "girado 180°");
+        assert!(alpha(&s, 200, 40) > 200, "girado 270°");
+        assert_eq!(alpha(&s, 230, 130), 0, "entre as cópias fica vazio");
+        // radial 1 e valor absurdo são seguros
+        for n in [0, 1, 1000] {
+            let mut s = Stroker::new(400, 200);
+            s.begin(b.clone(), [0, 0, 0], false);
+            s.radial = n;
+            s.add_point(260.0, 100.0);
+            assert!(alpha(&s, 260, 100) > 200);
+        }
+    }
+
+    #[test]
     fn wrap_carries_the_stroke_to_the_opposite_edge() {
         let mut b = base();
         b.size = 40.0;
@@ -894,6 +1005,41 @@ mod dynamics_tests {
         s.begin(b, [0, 0, 0], false);
         s.add_point(395.0, 100.0);
         assert_eq!(alpha(&s, 5, 100), 0);
+    }
+
+    #[test]
+    fn spray_scatters_small_particles_inside_the_brush_circle() {
+        let mut b = base();
+        b.size = 80.0;
+        b.spray = 40;
+        b.spray_size = 0.05;
+        b.flow = 1.0;
+        let s = stroke(b, &[(200.0, 100.0, 1.0)]);
+        let alpha = |x: usize, y: usize| {
+            s.buf
+                .tile(x / TILE, y / TILE)
+                .map_or(0, |t| t[((y % TILE) * TILE + x % TILE) * 4 + 3])
+        };
+        // dentro do círculo de raio 40 há pontos soltos; o buraco entre eles fica vazio
+        let mut covered = 0;
+        let mut total = 0;
+        for y in 60..140 {
+            for x in 160..240 {
+                total += 1;
+                if alpha(x, y) > 0 {
+                    covered += 1;
+                }
+            }
+        }
+        assert!(covered > 40, "tem partículas: {covered}");
+        assert!(
+            covered * 5 < total,
+            "mas não é um disco cheio: {covered}/{total}"
+        );
+        // nada além do raio (com folga do tamanho da partícula)
+        for (x, y) in [(120usize, 100usize), (280, 100), (200, 40), (200, 160)] {
+            assert_eq!(alpha(x, y), 0, "{x},{y}");
+        }
     }
 
     #[test]
@@ -986,16 +1132,36 @@ mod tests {
         assert!(s.buf.tile(0, 0).is_some());
     }
 
+    /// Marca dos pincéis que já existiam (não pode mudar sem aviso).
+    const OLD_DIGESTS: [u64; 8] = [
+        8249476363878655934,
+        2563027581617550316,
+        15369106445377999013,
+        13540469021327228302,
+        4187682486068578447,
+        13548342055724576395,
+        14168245826372103528,
+        4867819075218364718,
+    ];
+
     #[test]
     fn stamp_output_digest_is_stable() {
-        let mut digests = Vec::new();
-        for (i, b) in Brush::presets().into_iter().enumerate() {
-            digests.push(stroke_digest(
-                b.clone(),
-                i % 2 == 1,
-                (i % 3 == 0, i % 4 == 0),
-            ));
-        }
+        // Cada preset com os mesmos ajustes de sempre (borracha e espelho escolhidos pelo nome,
+        // para presets novos não mexerem nos resultados dos antigos).
+        let presets = Brush::presets();
+        let digest = |name: &str, erase: bool, mirror: (bool, bool)| {
+            let b = presets.iter().find(|b| b.name == name).unwrap().clone();
+            stroke_digest(b, erase, mirror)
+        };
+        let mut digests = vec![
+            digest("Básico", false, (true, true)),
+            digest("Aerógrafo", true, (false, false)),
+            digest("Lápis", false, (false, false)),
+            digest("Tinta", true, (true, false)),
+            digest("Marcador", false, (false, true)),
+            digest("Giz", true, (false, false)),
+            digest("Aquarela macia", false, (true, false)),
+        ];
         let mut odd = Brush::basic();
         odd.size = 70.0;
         odd.roundness = 0.4;
@@ -1004,25 +1170,29 @@ mod tests {
         odd.scatter = 0.5;
         odd.tip = Tip::Square;
         digests.push(stroke_digest(odd, false, (true, true)));
+        // presets com dinâmica ou spray: só precisam ser determinísticos e diferentes
+        for name in [
+            "Caneta tinteiro",
+            "Pincel de pressão",
+            "Traço que some",
+            "Spray",
+        ] {
+            let d = digest(name, false, (false, false));
+            assert_eq!(
+                d,
+                digest(name, false, (false, false)),
+                "{name} determinístico"
+            );
+            digests.push(d);
+        }
+        let unique: HashSet<_> = digests.iter().collect();
         assert_eq!(
-            digests,
-            [
-                8249476363878655934,
-                2563027581617550316,
-                15369106445377999013,
-                13540469021327228302,
-                // presets novos (com dinâmica): a pressão fica em 100 % com o mouse
-                2126189341365558986,
-                9477292715354680785,
-                15890544401212262641,
-                12698941806583515267,
-                // (o índice do preset escolhe borracha/espelho no teste, por isso mudam de lugar)
-                4187682486068578447,
-                10352106225972257635,
-                9612605382220453586,
-                4867819075218364718
-            ]
+            unique.len(),
+            digests.len(),
+            "cada pincel deixa uma marca diferente"
         );
+        // os digests dos pincéis antigos não podem mudar
+        assert_eq!(&digests[..8], &OLD_DIGESTS);
     }
     use super::*;
 

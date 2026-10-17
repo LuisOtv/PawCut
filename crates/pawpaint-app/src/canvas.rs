@@ -451,6 +451,21 @@ pub fn canvas_panel(st: &mut State, ui: &mut egui::Ui) {
             Stroke::new(1.0, Color32::from_rgb(255, 80, 200)),
         );
     }
+    // Simetria radial: raios a partir do centro.
+    if st.symmetry > 1 {
+        let (mx, my) = (cw / 2.0, ch / 2.0);
+        let reach = (cw * cw + ch * ch).sqrt();
+        for k in 0..st.symmetry.min(32) {
+            let a = std::f32::consts::TAU * k as f32 / st.symmetry as f32;
+            clip.line_segment(
+                [
+                    to_screen(mx, my),
+                    to_screen(mx + a.cos() * reach, my + a.sin() * reach),
+                ],
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 80, 200, 110)),
+            );
+        }
+    }
     // Corte em andamento: escurece o que sai.
     if let Some((x0, y0, x1, y1)) = d.crop {
         let r = Rect::from_two_pos(to_screen(x0, y0), to_screen(x1, y1));
@@ -843,6 +858,7 @@ fn start_interaction(
             let (brush, color) = (st.brush.clone(), st.fg);
             st.docs[cur].ed.set_mirror(st.mirror.0, st.mirror.1);
             st.docs[cur].ed.set_wrap(st.wrap);
+            st.docs[cur].ed.set_radial(st.symmetry);
             // Na máscara: cor escura esconde, cor clara revela (a borracha sempre revela).
             let on_mask = st.docs[cur].edit_mask
                 && st.docs[cur]

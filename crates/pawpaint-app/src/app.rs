@@ -515,6 +515,7 @@ impl PaintApp {
                 blend: BlendMode::Normal,
                 mirror: (false, false),
                 wrap: false,
+                symmetry: 1,
                 opts: ToolOpts::default(),
                 clipboard: None,
                 toasts: Toasts::default(),
@@ -2885,6 +2886,27 @@ mod tests {
         assert!(h.px(150 + 100, 100)[1] > 200, "e não à direita");
         // visão girada não muda a imagem: salvar e desfazer seguem normais
         assert!(h.app.st.doc().unwrap().ed.is_dirty());
+    }
+
+    #[test]
+    fn radial_symmetry_paints_the_repeated_strokes() {
+        let mut h = Harness::new();
+        h.app.st.brush = Brush {
+            size: 14.0,
+            hardness: 1.0,
+            ..Brush::basic()
+        };
+        h.app.st.fg = [0, 0, 255];
+        h.app.st.tool = Tool::Brush;
+        h.app.st.symmetry = 4;
+        // documento 300x200: centro (150,100); toque a 60 px à direita
+        let at = h.screen(210.0, 100.0);
+        paint_screen(&mut h, at, at + vec2(0.5, 0.0));
+        assert!(h.px(210, 100)[0] < 60);
+        assert!(h.px(150, 160)[0] < 60, "90°");
+        assert!(h.px(90, 100)[0] < 60, "180°");
+        assert!(h.px(150, 40)[0] < 60, "270°");
+        assert!(h.px(180, 130)[0] > 200, "entre as cópias não pinta");
     }
 
     #[test]

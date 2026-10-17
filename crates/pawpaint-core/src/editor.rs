@@ -109,6 +109,7 @@ pub struct Editor {
     smudge: Option<ActiveSmudge>,
     mirror: (bool, bool),
     wrap: bool,
+    radial: u32,
     paint_mask: bool,
     pixel_rev: u64,
     history_budget: usize,
@@ -161,6 +162,7 @@ impl Editor {
             smudge: None,
             mirror: (false, false),
             wrap: false,
+            radial: 1,
             paint_mask: false,
             pixel_rev: 0,
             history_budget: HISTORY_BUDGET,
@@ -200,6 +202,15 @@ impl Editor {
     /// Modo de repetição (mosaico): o traço que passa de uma borda reaparece na oposta.
     pub fn set_wrap(&mut self, on: bool) {
         self.wrap = on;
+    }
+
+    /// Simetria radial: quantas vezes o traço se repete em volta do centro (1 = desligada).
+    pub fn set_radial(&mut self, n: u32) {
+        self.radial = n.clamp(1, 32);
+    }
+
+    pub fn radial(&self) -> u32 {
+        self.radial
     }
 
     pub fn wrap(&self) -> bool {
@@ -731,6 +742,7 @@ impl Editor {
         stroker.begin(brush, color, erase);
         stroker.mirror = self.mirror;
         stroker.wrap = self.wrap;
+        stroker.radial = self.radial;
         let on_mask = self.paint_mask && self.doc.layer(layer).is_some_and(|l| l.mask.is_some());
         self.stroke = Some(ActiveStroke {
             on_mask,
