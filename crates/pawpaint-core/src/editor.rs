@@ -797,6 +797,16 @@ impl Editor {
         }
     }
 
+    /// O traço que começou agora copia de outro lugar da camada (carimbo de clone): cada pixel
+    /// pintado vem do pixel que está `offset` adiante, como estava quando o traço começou.
+    pub fn set_clone_source(&mut self, offset: (f32, f32)) {
+        let Some(s) = &mut self.stroke else { return };
+        let Some(layer) = self.doc.layer(s.layer) else {
+            return;
+        };
+        s.stroker.clone_src = Some((layer.pixels.clone(), offset));
+    }
+
     /// Como `stroke_point`, com a pressão da caneta (0..1) neste ponto.
     pub fn stroke_point_pressure(&mut self, x: f32, y: f32, pressure: f32) {
         if let Some(s) = &mut self.stroke {
@@ -1912,6 +1922,51 @@ mod tests {
         e.jump_to(0);
         assert_eq!(e.doc().layers.len(), 1);
     }
+    // ---- carimbo de clone
+
+    #[test]
+    fn clone_stroke_copies_pixels_from_the_offset_position() {
+        let mut e = Editor::new(120, 80, Background::Transparent);
+        let id = top(&e);
+        // origem: um quadrado vermelho opaco em 10..30 x 10..30 (o resto transparente)
+        e.set_selection(Some(Selection::rect(120, 80, 10, 10, 30, 30)), "x");
+        e.fill_selection(id, [255, 0, 0]).unwrap();
+        e.deselect();
+        let brush = Brush {
+            size: 8.0,
+            hardness: 1.0,
+            spacing: 0.1,
+            ..Brush::basic()
+        };
+        // pinta em (80,20) copiando de 60 px à esquerda (cai no quadrado)
+        e.begin_stroke(id, brush.clone(), [0, 255, 0], false, BlendMode::Normal)
+            .unwrap();
+        e.set_clone_source((-60.0, 0.0));
+        e.stroke_point(80.0, 20.0);
+        e.stroke_point(84.0, 20.0);
+        e.end_stroke(84.0, 20.0);
+        let px = e.doc().layer(id).unwrap().pixels.pixel(82, 20);
+        assert_eq!(
+            px,
+            [255, 0, 0, 255],
+            "veio do quadrado vermelho, não do verde da cor"
+        );
+        // pinta onde a origem é transparente: não deixa nada
+        e.begin_stroke(id, brush.clone(), [0, 255, 0], false, BlendMode::Normal)
+            .unwrap();
+        e.set_clone_source((-60.0, 0.0));
+        e.stroke_point(80.0, 60.0);
+        e.end_stroke(80.0, 60.0);
+        assert_eq!(e.doc().layer(id).unwrap().pixels.pixel(80, 60)[3], 0);
+        // origem fora da imagem também não deixa nada nem quebra
+        e.begin_stroke(id, brush, [0, 255, 0], false, BlendMode::Normal)
+            .unwrap();
+        e.set_clone_source((-500.0, -500.0));
+        e.stroke_point(5.0, 5.0);
+        e.end_stroke(5.0, 5.0);
+        assert_eq!(e.doc().layer(id).unwrap().pixels.pixel(5, 5)[3], 0);
+    }
+
     // ---- camadas de ajuste
 
     fn pix(e: &Editor, x: u32, y: u32) -> [u8; 4] {

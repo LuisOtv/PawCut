@@ -329,6 +329,8 @@ pub struct Stroker {
     pub mirror: (bool, bool),
     /// Mosaico: carimbos que passam de uma borda reaparecem na outra.
     pub wrap: bool,
+    /// Carimbo de clone: em vez da cor, cada pixel vem da imagem copiada, deslocada por `(dx, dy)`.
+    pub clone_src: Option<(TiledImage, (f32, f32))>,
     /// Simetria radial: o traço se repete `radial` vezes em volta do centro da imagem (1 = não).
     pub radial: u32,
     pub buf: StrokeBuffer,
@@ -364,6 +366,7 @@ impl Stroker {
             mirror: (false, false),
             wrap: false,
             radial: 1,
+            clone_src: None,
             buf: StrokeBuffer::new(),
             w,
             h,
@@ -648,6 +651,7 @@ impl Stroker {
         let hard = hardness.clamp(0.0, 0.999);
         let cutoff = 1.0 + 1.5 / rx.min(ry);
         let (color, erase) = (self.color, self.erase);
+        let cloning = self.clone_src.is_some();
         // Bloco a bloco: uma busca no mapa por bloco (antes eram duas por pixel), e blocos que o
         // círculo não alcança nem são criados.
         for ty in y0 / TILE..=(y1 - 1) / TILE {
@@ -657,6 +661,7 @@ impl Stroker {
                 // Primeiro a cobertura de cada pixel do bloco; o bloco só entra no mapa (e só é
                 // criado) se o carimbo realmente cobre algum pixel dele.
                 let mut cover = [0.0f32; TILE * TILE];
+                let mut from_src = [[0u8; 3]; TILE * TILE];
                 let mut any = false;
                 for py in by0..by1 {
                     for px in bx0..bx1 {
@@ -683,6 +688,20 @@ impl Stroker {
                             a *= 1.0 - grain * (1.0 - n);
                         }
                         a *= flow;
+                        if let Some((src, (ox, oy))) = &self.clone_src {
+                            // Clone: a cor e a opacidade vêm do pixel copiado.
+                            let (sx, sy) = ((px as f32 + ox).round(), (py as f32 + oy).round());
+                            if sx < 0.0
+                                || sy < 0.0
+                                || sx >= src.width() as f32
+                                || sy >= src.height() as f32
+                            {
+                                continue;
+                            }
+                            let sp = unpremultiply(src.pixel(sx as usize, sy as usize));
+                            a *= sp[3] as f32 / 255.0;
+                            from_src[(py % TILE) * TILE + px % TILE] = [sp[0], sp[1], sp[2]];
+                        }
                         if a > 0.0 {
                             cover[(py % TILE) * TILE + px % TILE] = a;
                             any = true;
@@ -702,6 +721,7 @@ impl Stroker {
                     let da = t[i + 3] as f32 / 255.0;
                     let k = 1.0 - a;
                     if !erase {
+                        let color = if cloning { from_src[p] } else { color };
                         for c in 0..3 {
                             t[i + c] = (color[c] as f32 * a + t[i + c] as f32 * k)
                                 .round()

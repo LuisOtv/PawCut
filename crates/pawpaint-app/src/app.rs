@@ -538,6 +538,8 @@ impl PaintApp {
                 tool_changed: false,
                 last_autosave: std::time::Instant::now(),
                 pen: None,
+                clone_source: None,
+                clone_offset: None,
                 reference: None,
                 new_adjust: None,
                 autosave_job: None,
@@ -1971,6 +1973,7 @@ impl PaintApp {
                 "B" => Key::B,
                 "E" => Key::E,
                 "S" => Key::S,
+                "H" => Key::H,
                 "F" => Key::F,
                 "G" => Key::G,
                 "P" => Key::P,
@@ -2919,6 +2922,63 @@ mod tests {
         assert!(h.px(150 + 100, 100)[1] > 200, "e não à direita");
         // visão girada não muda a imagem: salvar e desfazer seguem normais
         assert!(h.app.st.doc().unwrap().ed.is_dirty());
+    }
+
+    #[test]
+    fn clone_stamp_copies_from_the_alt_click_source() {
+        let mut h = Harness::new();
+        {
+            let d = h.app.st.doc_mut().unwrap();
+            let id = d.active;
+            d.ed.set_selection(
+                Some(pawpaint_core::selection::Selection::rect(
+                    300, 200, 20, 20, 60, 60,
+                )),
+                "t",
+            );
+            d.ed.fill_selection(id, [255, 0, 0]).unwrap();
+            d.ed.deselect();
+        }
+        h.app.st.brush = Brush {
+            size: 10.0,
+            hardness: 1.0,
+            ..Brush::basic()
+        };
+        h.app.st.tool = Tool::Clone;
+        // sem origem: avisa e não pinta
+        let at = h.screen(160.0, 40.0);
+        paint_screen(&mut h, at, at + vec2(10.0, 0.0));
+        assert_eq!(h.px(165, 40), [255, 255, 255, 255]);
+        assert!(h.app.st.clone_source.is_none());
+        // Alt+clique escolhe a origem no quadrado vermelho
+        h.frame(vec![Event::ModifiersChanged(Modifiers::ALT)]);
+        h.mv(40.0, 40.0);
+        h.button(40.0, 40.0, true, Modifiers::ALT);
+        h.button(40.0, 40.0, false, Modifiers::ALT);
+        h.frame(vec![Event::ModifiersChanged(Modifiers::NONE)]);
+        assert_eq!(
+            h.app.st.clone_source.map(|p| (p.0.round(), p.1.round())),
+            Some((40.0, 40.0))
+        );
+        // pinta em outro lugar: sai vermelho (copiado), não a cor do pincel
+        h.app.st.fg = [0, 0, 255];
+        paint_screen(&mut h, at, at + vec2(10.0, 0.0));
+        assert_eq!(h.px(165, 40), [255, 0, 0, 255], "copiou o vermelho");
+        // o deslocamento fica para os próximos traços (alinhado)
+        let at2 = h.screen(160.0, 140.0);
+        paint_screen(&mut h, at2, at2 + vec2(10.0, 0.0));
+        // origem = y 140 - 0 = 140?  o deslocamento é (-120, 0): vem de y=140 (branco), então pinta branco
+        assert_eq!(h.px(165, 140), [255, 255, 255, 255]);
+        // tecla H escolhe a ferramenta
+        h.app.st.tool = Tool::Brush;
+        h.frame(vec![Event::Key {
+            key: Key::H,
+            physical_key: Some(Key::H),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        assert_eq!(h.app.st.tool, Tool::Clone);
     }
 
     #[test]

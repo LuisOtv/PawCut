@@ -668,6 +668,20 @@ pub fn canvas_panel(st: &mut State, ui: &mut egui::Ui) {
         }
     }
 
+    // Carimbo de clone: cruz onde está a origem (anda junto com o cursor).
+    if st.tool == Tool::Clone
+        && let Some(src) = st.clone_source
+    {
+        let at = match (st.clone_offset, doc_pos) {
+            (Some(off), Some(p)) => to_screen(p.x + off.0, p.y + off.1),
+            _ => to_screen(src.0, src.1),
+        };
+        let r = 7.0;
+        for (c, w) in [(Color32::BLACK, 3.0), (Color32::WHITE, 1.5)] {
+            clip.line_segment([at - vec2(r, 0.0), at + vec2(r, 0.0)], Stroke::new(w, c));
+            clip.line_segment([at - vec2(0.0, r), at + vec2(0.0, r)], Stroke::new(w, c));
+        }
+    }
     // Cursor: círculo do pincel nas ferramentas de pintura.
     if over && st.interaction.is_none()
         || matches!(
@@ -807,6 +821,7 @@ fn start_interaction(
             Tool::Brush
                 | Tool::Eraser
                 | Tool::Smudge
+                | Tool::Clone
                 | Tool::Fill
                 | Tool::Gradient
                 | Tool::Line
@@ -847,8 +862,20 @@ fn start_interaction(
         });
         return;
     }
+    // Carimbo de clone: Alt+clique escolhe a origem; sem origem não pinta.
+    let cloning = st.tool == Tool::Clone;
+    if cloning && mods.alt {
+        st.clone_source = Some(pt);
+        st.clone_offset = None;
+        st.say("Origem escolhida. Agora pinte onde quiser copiar.");
+        return;
+    }
+    if cloning && st.clone_source.is_none() {
+        st.warn("Alt+clique escolhe de onde copiar");
+        return;
+    }
     match st.tool {
-        Tool::Brush | Tool::Eraser => {
+        Tool::Brush | Tool::Eraser | Tool::Clone => {
             let erase = st.tool == Tool::Eraser;
             let mode = if erase {
                 pawpaint_core::BlendMode::Normal
@@ -874,6 +901,10 @@ fn start_interaction(
                 .begin_stroke(active, brush, color, erase, mode)
             {
                 Ok(()) => {
+                    if cloning && let Some(src) = st.clone_source {
+                        let off = *st.clone_offset.get_or_insert((src.0 - pt.0, src.1 - pt.1));
+                        st.docs[cur].ed.set_clone_source(off);
+                    }
                     let pressure = st.pen.unwrap_or(1.0);
                     st.docs[cur].ed.stroke_point_pressure(pt.0, pt.1, pressure);
                     st.interaction = Some(Interaction::Stroke);

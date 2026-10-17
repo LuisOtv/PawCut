@@ -67,6 +67,8 @@ pub enum Tool {
     Brush,
     Eraser,
     Smudge,
+    /// Carimbo de clone: Alt+clique escolhe a origem, pintar copia dela.
+    Clone,
     Fill,
     Gradient,
     Picker,
@@ -84,10 +86,11 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 17] = [
+    pub const ALL: [Tool; 18] = [
         Tool::Brush,
         Tool::Eraser,
         Tool::Smudge,
+        Tool::Clone,
         Tool::Fill,
         Tool::Gradient,
         Tool::Picker,
@@ -111,6 +114,7 @@ impl Tool {
             Tool::Brush => Icon::Brush,
             Tool::Eraser => Icon::Eraser,
             Tool::Smudge => Icon::Smudge,
+            Tool::Clone => Icon::Clone,
             Tool::Fill => Icon::Bucket,
             Tool::Gradient => Icon::Gradient,
             Tool::Picker => Icon::Eyedropper,
@@ -135,6 +139,7 @@ impl Tool {
             Tool::Brush
             | Tool::Eraser
             | Tool::Smudge
+            | Tool::Clone
             | Tool::Fill
             | Tool::Gradient
             | Tool::Picker => 0,
@@ -149,6 +154,7 @@ impl Tool {
             Tool::Brush => "Pincel",
             Tool::Eraser => "Borracha",
             Tool::Smudge => "Borrão (arrasta a cor)",
+            Tool::Clone => "Carimbo de clone (Alt+clique escolhe a origem)",
             Tool::Fill => "Balde de tinta",
             Tool::Gradient => "Degradê",
             Tool::Picker => "Conta-gotas",
@@ -171,6 +177,7 @@ impl Tool {
             Tool::Brush => "B",
             Tool::Eraser => "E",
             Tool::Smudge => "S",
+            Tool::Clone => "H",
             Tool::Fill => "F",
             Tool::Gradient => "G",
             Tool::Picker => "P",
@@ -191,7 +198,13 @@ impl Tool {
     pub fn paints(self) -> bool {
         matches!(
             self,
-            Tool::Brush | Tool::Eraser | Tool::Smudge | Tool::Line | Tool::Rect | Tool::Ellipse
+            Tool::Brush
+                | Tool::Eraser
+                | Tool::Smudge
+                | Tool::Clone
+                | Tool::Line
+                | Tool::Rect
+                | Tool::Ellipse
         )
     }
 }
@@ -494,6 +507,10 @@ pub struct State {
     pub last_autosave: std::time::Instant,
     /// Pressão da caneta (0..1) enquanto ela toca a tela; `None` com mouse.
     pub pen: Option<f32>,
+    /// Origem do carimbo de clone (Alt+clique) e o deslocamento fixado no primeiro traço depois
+    /// dela (alinhado: os traços seguintes continuam copiando do mesmo jeito).
+    pub clone_source: Option<(f32, f32)>,
+    pub clone_offset: Option<(f32, f32)>,
     /// Imagem de referência (o painel Referência): a imagem e, depois de desenhada pela primeira
     /// vez, a textura dela.
     pub reference: Option<Reference>,

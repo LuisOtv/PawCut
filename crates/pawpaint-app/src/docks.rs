@@ -919,6 +919,19 @@ pub fn tool_options(st: &mut State, ui: &mut egui::Ui) {
         Tool::Smudge => {
             ui.label(RichText::new("Arraste sobre a pintura para borrar. O fluxo do pincel controla a força; dureza e tamanho valem como no pincel.").weak().small());
         }
+        Tool::Clone => {
+            ui.label(
+                RichText::new(
+                    "Alt+clique escolhe de onde copiar; depois pinte onde quiser. A cruz mostra o que está sendo copiado. Copia da camada ativa, com o tamanho, a dureza e o fluxo do pincel.",
+                )
+                .weak()
+                .small(),
+            );
+            if ui.button("Escolher outra origem").clicked() {
+                st.clone_source = None;
+                st.clone_offset = None;
+            }
+        }
         Tool::Fill => {
             ui.add(paw_ui::Slider::new(&mut o.fill_tolerance, 0.0..=1.0).text("Tolerância"));
             let mut op = o.fill_opacity * 100.0;

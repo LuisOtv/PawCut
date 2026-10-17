@@ -52,6 +52,7 @@ pub enum Icon {
     Brush,
     Eraser,
     Smudge,
+    Clone,
     Bucket,
     Gradient,
     Eyedropper,
@@ -142,6 +143,7 @@ impl Icon {
         Icon::Brush,
         Icon::Eraser,
         Icon::Smudge,
+        Icon::Clone,
         Icon::Bucket,
         Icon::Gradient,
         Icon::Eyedropper,
@@ -593,6 +595,14 @@ pub fn paint(painter: &Painter, r: Rect, icon: Icon, c: Color32) {
             pen.line(3.0, 12.0, 10.0, 12.0);
             pen.line(3.0, 16.0, 12.0, 16.0);
             pen.circle(16.5, 12.0, 4.5);
+        }
+        Icon::Clone => {
+            // carimbo: cabo, base larga e o "pé" com a marca
+            pen.rect(9.0, 3.0, 6.0, 9.0, 3.0);
+            pen.line(5.0, 12.0, 19.0, 12.0);
+            pen.rect(5.0, 12.0, 14.0, 4.0, 1.5);
+            pen.line(4.0, 21.0, 20.0, 21.0);
+            pen.circle(12.0, 18.5, 1.5);
         }
         Icon::Bucket => {
             pen.closed(&[(11.0, 3.5), (19.0, 11.5), (11.5, 19.0), (3.5, 11.0)]);
