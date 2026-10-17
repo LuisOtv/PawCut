@@ -112,8 +112,8 @@ Cantos com raio 3 (widgets) e 4 (janelas). Bordas de 1 px em `BORDER`. Espaço e
   alinhamento vertical central em todos.
 - **Seções recolhíveis**: `theme::section`, com setinha. O estado aberto ou fechado é lembrado.
 - **Propriedades em grade fixa**: `theme::row(rótulo, valor, extras)`. Rótulo alinhado à direita,
-  valor, e até dois botões no fim (◆ keyframe, ↺ voltar ao padrão) **sempre nas mesmas colunas**.
-  Se uma linha não usa o segundo botão, reserve o espaço (`ui.add_space(22.0)`) para o ↺ não
+  valor, e até dois botões no fim (keyframe e voltar ao padrão, com os ícones da suíte) **sempre nas mesmas colunas**.
+  Se uma linha não usa o segundo botão, reserve o espaço (`ui.add_space(22.0)`) para o botão de voltar não
   andar para o lado.
 - **Barra de estado** embaixo: informação que muda sempre (tempo, contagens, zoom), nunca
   botão perigoso.
