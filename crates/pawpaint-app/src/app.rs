@@ -351,19 +351,16 @@ fn leftovers() -> Vec<PathBuf> {
 pub fn default_layout() -> DockState<Panel> {
     let mut dock = DockState::new(vec![Panel::Canvas]);
     let tree = dock.main_surface_mut();
-    let [canvas, right] =
-        tree.split_right(NodeIndex::root(), 0.79, vec![Panel::Color, Panel::Palette]);
-    let [_, layers] = tree.split_below(right, 0.33, vec![Panel::Layers]);
+    let [canvas, right] = tree.split_right(
+        NodeIndex::root(),
+        0.79,
+        vec![Panel::Color, Panel::Palette, Panel::Overview],
+    );
+    let [_, layers] = tree.split_below(right, 0.33, vec![Panel::Layers, Panel::History]);
     tree.split_below(
         layers,
         0.68,
-        vec![
-            Panel::BrushPresets,
-            Panel::BrushEditor,
-            Panel::ToolOptions,
-            Panel::History,
-            Panel::Overview,
-        ],
+        vec![Panel::BrushPresets, Panel::BrushEditor, Panel::ToolOptions],
     );
     tree.split_left(canvas, 0.085, vec![Panel::Toolbox]);
     dock
@@ -371,6 +368,7 @@ pub fn default_layout() -> DockState<Panel> {
 
 struct Viewer<'a> {
     st: &'a mut State,
+    fit: &'a mut paw_ui::tabfit::TabFit<Panel>,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -381,7 +379,11 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn title(&mut self, tab: &mut Panel) -> egui::WidgetText {
-        format!("  {}  ", tab.title()).into()
+        format!(
+            "  {}  ",
+            self.fit.title(*tab, tab.title(), *tab != Panel::Canvas)
+        )
+        .into()
     }
 
     fn is_closeable(&self, tab: &Panel) -> bool {
@@ -398,6 +400,7 @@ impl TabViewer for Viewer<'_> {
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Panel) {
         let st = &mut *self.st;
+        self.fit.record(*tab, ui.available_width());
         if *tab == Panel::Canvas {
             canvas::canvas_panel(st, ui);
             return;
@@ -441,6 +444,7 @@ impl TabViewer for Viewer<'_> {
 
 pub struct PaintApp {
     dock: DockState<Panel>,
+    tab_fit: paw_ui::tabfit::TabFit<Panel>,
     st: State,
     last_title: String,
     last_layout: String,
@@ -489,6 +493,7 @@ impl PaintApp {
         let brush = presets[0].clone();
         Self {
             dock: default_layout(),
+            tab_fit: Default::default(),
             st: State {
                 docs: Vec::new(),
                 cur: 0,
@@ -2357,11 +2362,18 @@ impl PaintApp {
             let mut style = style;
             // Painéis podem ficar bem estreitos (a caixa de ferramentas vira uma coluna só).
             style.separator.extra = 44.0;
+            self.tab_fit.observe(&self.dock, Panel::title);
             DockArea::new(&mut self.dock)
                 .style(style)
                 .show_leaf_collapse_buttons(false)
                 .show_leaf_close_all_buttons(false)
-                .show_inside(ui, &mut Viewer { st: &mut self.st });
+                .show_inside(
+                    ui,
+                    &mut Viewer {
+                        st: &mut self.st,
+                        fit: &mut self.tab_fit,
+                    },
+                );
         });
         self.apply_dock_commands();
         if self.st.last_autosave.elapsed().as_secs() >= 45 {

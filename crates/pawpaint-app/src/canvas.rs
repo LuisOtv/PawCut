@@ -41,7 +41,8 @@ fn full_image(
             for y in 0..th {
                 let src = &t[y * TILE * 4..y * TILE * 4 + tw * 4];
                 let dst = &mut rows[y * w + tx * TILE..y * w + tx * TILE + tw];
-                for (d, p) in dst.iter_mut().zip(src.chunks_exact(4)) {
+                let (px, _) = src.as_chunks::<4>();
+                for (d, p) in dst.iter_mut().zip(px) {
                     *d = Color32::from_rgba_premultiplied(p[0], p[1], p[2], p[3]);
                 }
             }
