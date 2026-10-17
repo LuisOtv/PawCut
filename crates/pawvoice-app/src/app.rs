@@ -2341,232 +2341,234 @@ impl VoiceApp {
                 let t = self.lufs_target;
                 self.apply_effect("Melhorar voz", move |p| effects::enhance_voice(p, RATE, t));
             }
-            ui.separator();
-            ui.label(RichText::new("Volume").weak().small());
-            ui.horizontal(|ui| {
-                if ui.button("Normalizar loudness").clicked() {
+            ui.menu_button("Volume", |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Normalizar loudness").clicked() {
+                        ui.close();
+                        let t = self.lufs_target;
+                        self.apply_effect("Normalizar loudness", move |p| {
+                            effects::loudness(p, RATE, t);
+                        });
+                    }
+                    theme::fixed_width(ui, theme::NUM_W + 20.0, |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut self.lufs_target)
+                                .range(-30.0..=-6.0)
+                                .speed(0.2)
+                                .suffix(" LUFS"),
+                        )
+                        .on_hover_text("−14 YouTube · −16 narração/podcast · −23 TV")
+                    });
+                });
+                if ui.button("Normalizar (pico −1 dB)").clicked() {
                     ui.close();
-                    let t = self.lufs_target;
-                    self.apply_effect("Normalizar loudness", move |p| {
-                        effects::loudness(p, RATE, t);
+                    self.apply_effect("Normalizar", effects::peak_normalize);
+                }
+                if ui.button("Amplificar…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Gain(3.0));
+                }
+                if ui.button("Compressor…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Compressor(Compression::Medium));
+                }
+                if ui.button("De-esser (tira o chiado do S)…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::DeEss {
+                        threshold: -32.0,
+                        reduction: 10.0,
                     });
                 }
-                theme::fixed_width(ui, theme::NUM_W + 20.0, |ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut self.lufs_target)
-                            .range(-30.0..=-6.0)
-                            .speed(0.2)
-                            .suffix(" LUFS"),
-                    )
-                    .on_hover_text("−14 YouTube · −16 narração/podcast · −23 TV")
-                });
+                if ui.button("Limitador…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Limiter(-1.0));
+                }
+                let has_sel = self.sel.is_some();
+                if ui
+                    .add_enabled(has_sel, egui::Button::new("Fade in"))
+                    .on_disabled_hover_text("Selecione o trecho do fade")
+                    .clicked()
+                {
+                    ui.close();
+                    self.apply_effect("Fade in", move |p| effects::each(p, |s| dsp::fade(s, true)));
+                }
+                if ui
+                    .add_enabled(has_sel, egui::Button::new("Fade out"))
+                    .on_disabled_hover_text("Selecione o trecho do fade")
+                    .clicked()
+                {
+                    ui.close();
+                    self.apply_effect("Fade out", move |p| {
+                        effects::each(p, |s| dsp::fade(s, false))
+                    });
+                }
             });
-            if ui.button("Normalizar (pico −1 dB)").clicked() {
-                ui.close();
-                self.apply_effect("Normalizar", effects::peak_normalize);
-            }
-            if ui.button("Amplificar…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Gain(3.0));
-            }
-            if ui.button("Compressor…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Compressor(Compression::Medium));
-            }
-            if ui.button("De-esser (tira o chiado do S)…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::DeEss {
-                    threshold: -32.0,
-                    reduction: 10.0,
-                });
-            }
-            if ui.button("Limitador…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Limiter(-1.0));
-            }
-            let has_sel = self.sel.is_some();
-            if ui
-                .add_enabled(has_sel, egui::Button::new("Fade in"))
-                .on_disabled_hover_text("Selecione o trecho do fade")
-                .clicked()
-            {
-                ui.close();
-                self.apply_effect("Fade in", move |p| effects::each(p, |s| dsp::fade(s, true)));
-            }
-            if ui
-                .add_enabled(has_sel, egui::Button::new("Fade out"))
-                .on_disabled_hover_text("Selecione o trecho do fade")
-                .clicked()
-            {
-                ui.close();
-                self.apply_effect("Fade out", move |p| {
-                    effects::each(p, |s| dsp::fade(s, false))
-                });
-            }
-            ui.separator();
-            ui.label(RichText::new("Ruído e timbre").weak().small());
-            if ui.button("Redução de ruído…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::NoiseReduction {
-                    reduction: 12.0,
-                    sensitivity: 6.0,
-                });
-            }
-            if ui.button("Noise gate (chiado nas pausas)…").clicked() {
-                ui.close();
-                let floor = self
-                    .target()
-                    .and_then(|(tracks, a, b)| {
-                        let p = self.ed.render_range(*tracks.first()?, a, b);
-                        p.first().map(|c| dsp::noise_floor_db(c, RATE))
-                    })
-                    .unwrap_or(-60.0);
-                self.dialog = Some(Dialog::Gate {
-                    threshold: (floor + 8.0).clamp(-80.0, -10.0),
-                    reduction: 18.0,
-                });
-            }
-            if ui.button("Filtro passa-altas 80 Hz (tira ronco)").clicked() {
-                ui.close();
-                self.apply_effect("Passa-altas", move |p| {
-                    effects::each(p, |s| dsp::high_pass(s, RATE, 80.0))
-                });
-            }
-            if ui.button("Graves e agudos…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::BassTreble {
-                    bass: 0.0,
-                    treble: 0.0,
-                });
-            }
-            if ui.button("Equalizador…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::equalizer()));
-            }
-            if ui.button("Notch (zumbido, apito)…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::notch()));
-            }
-            if ui.button("Apagar faixa de frequências…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::SpectralDelete {
-                    lo: 2000.0,
-                    hi: 4000.0,
-                    amount: 40.0,
-                }));
-            }
-            if ui.button("Reparar áudio estourado…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Declip(0.97)));
-            }
-            if ui.button("Fade ajustável…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Fade {
-                    start: 0.0,
-                    end: -40.0,
-                    curve: 0.0,
-                }));
-            }
-            if ui.button("Tirar voz do centro (karaokê)…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::RemoveCenter));
-            }
-            ui.separator();
-            ui.label(RichText::new("Espaço e modulação").weak().small());
-            if ui.button("Reverb…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::reverb()));
-            }
-            if ui.button("Tremolo…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::tremolo()));
-            }
-            if ui.button("Phaser…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::phaser()));
-            }
-            if ui.button("Wah-wah…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::wah()));
-            }
-            ui.separator();
-            ui.label(RichText::new("Tempo e tom").weak().small());
-            if ui.button("Repetir…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Repeat(2)));
-            }
-            if ui.button("Velocidade…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Speed(1.25)));
-            }
-            if ui.button("Tempo (sem mudar o tom)…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Tempo(1.1)));
-            }
-            if ui.button("Tom (sem mudar o tempo)…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Pitch(2.0)));
-            }
-            if ui.button("Auto-duck (música abaixa na voz)…").clicked() {
-                ui.close();
-                let control = self
-                    .ed
-                    .session()
-                    .tracks
-                    .iter()
-                    .map(|t| t.id)
-                    .find(|id| !self.selected.contains(id))
-                    .unwrap_or(0);
-                self.dialog = Some(Dialog::Duck {
-                    control,
-                    threshold: -35.0,
-                    amount: 12.0,
-                    attack: 80.0,
-                    release: 600.0,
-                });
-            }
-            ui.separator();
-            ui.label(RichText::new("Análise").weak().small());
-            if ui.button("Rotular falas (um rótulo por trecho)…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::LabelSounds {
-                    threshold: -40.0,
-                    min_silence: 0.5,
-                    min_sound: 0.3,
-                    text: "Fala".into(),
-                });
-            }
-            if ui
-                .add_enabled(
-                    self.transcription.is_none(),
-                    egui::Button::new("Transcrever a fala em rótulos (whisper)"),
-                )
-                .on_hover_text("Precisa do whisper instalado; cada fala vira um rótulo com o texto")
-                .clicked()
-            {
-                ui.close();
-                self.start_transcription("pt");
-            }
-            if ui.button("Marcar áudio estourado…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::MarkClipping {
-                    level: 0.99,
-                    min_run: 3,
-                });
-            }
-            ui.separator();
-            ui.label(RichText::new("Pausas").weak().small());
-            if ui.button("Truncar silêncio…").clicked() {
-                ui.close();
-                self.dialog = Some(Dialog::Silences {
-                    threshold: -40.0,
-                    min: 0.6,
-                });
-            }
-            if ui.button("Inverter (de trás para frente)").clicked() {
-                ui.close();
-                self.apply_effect("Inverter", move |p| effects::each(p, |s| s.reverse()));
-            }
+            ui.menu_button("Ruído e timbre", |ui| {
+                if ui.button("Redução de ruído…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::NoiseReduction {
+                        reduction: 12.0,
+                        sensitivity: 6.0,
+                    });
+                }
+                if ui.button("Noise gate (chiado nas pausas)…").clicked() {
+                    ui.close();
+                    let floor = self
+                        .target()
+                        .and_then(|(tracks, a, b)| {
+                            let p = self.ed.render_range(*tracks.first()?, a, b);
+                            p.first().map(|c| dsp::noise_floor_db(c, RATE))
+                        })
+                        .unwrap_or(-60.0);
+                    self.dialog = Some(Dialog::Gate {
+                        threshold: (floor + 8.0).clamp(-80.0, -10.0),
+                        reduction: 18.0,
+                    });
+                }
+                if ui.button("Filtro passa-altas 80 Hz (tira ronco)").clicked() {
+                    ui.close();
+                    self.apply_effect("Passa-altas", move |p| {
+                        effects::each(p, |s| dsp::high_pass(s, RATE, 80.0))
+                    });
+                }
+                if ui.button("Graves e agudos…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::BassTreble {
+                        bass: 0.0,
+                        treble: 0.0,
+                    });
+                }
+                if ui.button("Equalizador…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::equalizer()));
+                }
+                if ui.button("Notch (zumbido, apito)…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::notch()));
+                }
+                if ui.button("Apagar faixa de frequências…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::SpectralDelete {
+                        lo: 2000.0,
+                        hi: 4000.0,
+                        amount: 40.0,
+                    }));
+                }
+                if ui.button("Reparar áudio estourado…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Declip(0.97)));
+                }
+                if ui.button("Fade ajustável…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Fade {
+                        start: 0.0,
+                        end: -40.0,
+                        curve: 0.0,
+                    }));
+                }
+                if ui.button("Tirar voz do centro (karaokê)…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::RemoveCenter));
+                }
+            });
+            ui.menu_button("Espaço e modulação", |ui| {
+                if ui.button("Reverb…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::reverb()));
+                }
+                if ui.button("Tremolo…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::tremolo()));
+                }
+                if ui.button("Phaser…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::phaser()));
+                }
+                if ui.button("Wah-wah…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::wah()));
+                }
+            });
+            ui.menu_button("Tempo e tom", |ui| {
+                if ui.button("Repetir…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Repeat(2)));
+                }
+                if ui.button("Velocidade…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Speed(1.25)));
+                }
+                if ui.button("Tempo (sem mudar o tom)…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Tempo(1.1)));
+                }
+                if ui.button("Tom (sem mudar o tempo)…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Fx(crate::fx_dialogs::FxDialog::Pitch(2.0)));
+                }
+                if ui.button("Auto-duck (música abaixa na voz)…").clicked() {
+                    ui.close();
+                    let control = self
+                        .ed
+                        .session()
+                        .tracks
+                        .iter()
+                        .map(|t| t.id)
+                        .find(|id| !self.selected.contains(id))
+                        .unwrap_or(0);
+                    self.dialog = Some(Dialog::Duck {
+                        control,
+                        threshold: -35.0,
+                        amount: 12.0,
+                        attack: 80.0,
+                        release: 600.0,
+                    });
+                }
+            });
+            ui.menu_button("Análise", |ui| {
+                if ui.button("Rotular falas (um rótulo por trecho)…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::LabelSounds {
+                        threshold: -40.0,
+                        min_silence: 0.5,
+                        min_sound: 0.3,
+                        text: "Fala".into(),
+                    });
+                }
+                if ui
+                    .add_enabled(
+                        self.transcription.is_none(),
+                        egui::Button::new("Transcrever a fala em rótulos (whisper)"),
+                    )
+                    .on_hover_text(
+                        "Precisa do whisper instalado; cada fala vira um rótulo com o texto",
+                    )
+                    .clicked()
+                {
+                    ui.close();
+                    self.start_transcription("pt");
+                }
+                if ui.button("Marcar áudio estourado…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::MarkClipping {
+                        level: 0.99,
+                        min_run: 3,
+                    });
+                }
+            });
+            ui.menu_button("Pausas", |ui| {
+                if ui.button("Truncar silêncio…").clicked() {
+                    ui.close();
+                    self.dialog = Some(Dialog::Silences {
+                        threshold: -40.0,
+                        min: 0.6,
+                    });
+                }
+                if ui.button("Inverter (de trás para frente)").clicked() {
+                    ui.close();
+                    self.apply_effect("Inverter", move |p| effects::each(p, |s| s.reverse()));
+                }
+            });
         }
     }
 
