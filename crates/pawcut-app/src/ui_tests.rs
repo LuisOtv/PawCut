@@ -978,3 +978,56 @@ fn transcription_result_becomes_subtitles_after_the_clip_start() {
     ws.start_transcription("pt");
     assert!(ws.transcription.is_none());
 }
+
+#[test]
+fn stabilizing_a_shaky_clip_adds_position_keyframes_and_a_zoom() {
+    let dir = tempfile::tempdir().unwrap();
+    let video = paw_testkit::shaky_video(dir.path(), 3);
+    let mut st = AppState::new(Project::new(ProjectSettings::default()));
+    assert_eq!(st.import(&[video]), 1);
+    let m = st.project().media[0].id;
+    st.drop_media(m, TrackKind::Video, 0, 0);
+    let clip = st.project().video_tracks[0].clips[0].id;
+    st.select(clip, false);
+    let ctx = egui::Context::default();
+    let mut ws = Workspace::new(&ctx, st);
+    ws.recovery.clear();
+    ws.start_stabilization();
+    assert!(ws.stabilizing.is_some());
+    // já rodando: pedir de novo só avisa
+    ws.start_stabilization();
+    let start = std::time::Instant::now();
+    while ws.stabilizing.is_some() {
+        ws.begin_frame(&ctx);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(60),
+            "não terminou"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let c = ws.st.project().clip(clip).unwrap().clone();
+    let xs = c.keyframes.get(&Param::X).expect("keyframes de X");
+    assert!(xs.len() > 20, "{}", xs.len());
+    assert!(c.keyframes.contains_key(&Param::Y));
+    assert!(
+        c.transform.scale > 1.0,
+        "zoom para esconder as bordas: {}",
+        c.transform.scale
+    );
+    // um desfazer tira tudo
+    ws.st.undo();
+    let c = ws.st.project().clip(clip).unwrap();
+    assert!(c.keyframes.get(&Param::X).is_none_or(|k| k.is_empty()));
+    assert_eq!(c.transform.scale, 1.0);
+    // clipe com velocidade mudada: avisa e não roda
+    ws.st.apply(Edit::SetSpeed {
+        clips: vec![clip],
+        speed: 2.0,
+    });
+    ws.start_stabilization();
+    assert!(ws.stabilizing.is_none());
+    // nada selecionado: avisa
+    ws.st.selection.clear();
+    ws.start_stabilization();
+    assert!(ws.stabilizing.is_none());
+}

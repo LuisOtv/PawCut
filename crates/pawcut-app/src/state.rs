@@ -866,6 +866,59 @@ impl AppState {
         ));
     }
 
+    /// Aplica o resultado do estabilizador no clipe: keyframes de posição (X e Y) a cada 2 frames
+    /// e um zoom que esconde as bordas. Troca os keyframes de posição que já existiam.
+    pub fn apply_stabilization(&mut self, clip: ClipId, result: &crate::stabilize::Stabilization) {
+        let p = self.project().clone();
+        let Some(c) = p.clip(clip).cloned() else {
+            return;
+        };
+        if result.moves.is_empty() {
+            return;
+        }
+        let (pw, ph) = (p.settings.width as f32, p.settings.height as f32);
+        let m = result.max_move.clamp(0.0, pw.min(ph) / 3.0);
+        let zoom = (((pw + 2.0 * m) / pw).max((ph + 2.0 * m) / ph)).clamp(1.0, 1.5);
+        let mut t = c.transform;
+        t.scale = (t.scale * zoom).clamp(0.05, 10.0);
+        self.apply_coalescing(
+            Edit::SetClip {
+                clip,
+                change: ClipChange::Transform(t),
+            },
+            "stabilize",
+        );
+        for param in [Param::X, Param::Y] {
+            self.apply_coalescing(Edit::ClearKeyframes { clip, param }, "stabilize");
+        }
+        let last = result.moves.len() - 1;
+        for (i, (mx, my)) in result.moves.iter().enumerate() {
+            if i % 2 != 0 && i != last {
+                continue;
+            }
+            let at = c.source_start + i as f64 * c.speed;
+            for (param, v) in [
+                (Param::X, t.x + mx.clamp(-m, m)),
+                (Param::Y, t.y + my.clamp(-m, m)),
+            ] {
+                self.apply_coalescing(
+                    Edit::SetKeyframe {
+                        clip,
+                        param,
+                        at,
+                        value: Some(v),
+                    },
+                    "stabilize",
+                );
+            }
+        }
+        self.editor.end_coalescing();
+        self.say(format!(
+            "Imagem estabilizada (zoom de {:.0} % para esconder as bordas)",
+            (zoom - 1.0) * 100.0 + 100.0
+        ));
+    }
+
     /// Slideshow: coloca no fim da primeira faixa de vídeo todas as imagens do Media Pool, em
     /// ordem, `secs` segundos cada, com um dissolve de `dissolve` segundos entre elas.
     /// Devolve quantas imagens entraram.

@@ -156,6 +156,10 @@ pub struct Workspace {
     pub silence_threshold: f32,
     pub silence_min: f64,
     pub duck_threshold: f32,
+    /// Estabilização rodando em outra thread.
+    pub stabilizing: Option<Stabilizing>,
+    /// Suavidade da estabilização (segundos de cada lado).
+    pub stabilize_secs: f32,
     /// Transcrição rodando em outra thread: resposta, onde as legendas entram e o idioma.
     pub transcription: Option<Transcription>,
     /// Presets de aparência salvos e o nome que está sendo digitado para um novo.
@@ -198,7 +202,7 @@ impl Workspace {
                 return;
             }
         };
-        let p = self.project_arc.clone();
+        let p = std::sync::Arc::new(self.st.project().clone());
         let Some((clip, samples, rate)) = self.st.selection.iter().find_map(|id| {
             let c = p.clip(*id)?;
             let (s, r) = crate::analysis::clip_mono(&p, c)?;
@@ -263,6 +267,77 @@ impl Workspace {
                     .say(format!("{n} legenda(s) criada(s) pela transcrição"));
             }
             Err(e) => self.st.warn(format!("Não entendi a legenda gerada: {e}")),
+        }
+    }
+
+    /// Estabiliza o primeiro clipe de vídeo selecionado (em outra thread, com progresso).
+    pub fn start_stabilization(&mut self) {
+        if self.stabilizing.is_some() {
+            self.st.warn("Já está estabilizando");
+            return;
+        }
+        let p = std::sync::Arc::new(self.st.project().clone());
+        let Some((clip, path)) = self.st.selection.iter().find_map(|id| {
+            let c = p.clip(*id)?;
+            let pawcut_core::ClipSource::Media(m) = &c.source else {
+                return None;
+            };
+            let media = p.media(*m)?;
+            matches!(media.info.kind, pawcut_core::MediaKind::Video { .. })
+                .then(|| (c.clone(), media.info.path.clone()))
+        }) else {
+            self.st.warn("Selecione um clipe de vídeo");
+            return;
+        };
+        if (clip.speed - 1.0).abs() > 1e-9 || clip.freeze.is_some() {
+            self.st
+                .warn("Estabilize antes de mudar a velocidade ou congelar");
+            return;
+        }
+        let fps = p.settings.fps.as_f64();
+        let (from, frames, width) = (
+            clip.source_start / fps,
+            clip.duration.max(2) as usize,
+            p.settings.width as f32,
+        );
+        let secs = self.stabilize_secs;
+        let progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (pr, ctx) = (progress.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let r = crate::stabilize::analyze(&path, from, frames, width, secs, |f| {
+                pr.store((f * 1000.0) as u32, std::sync::atomic::Ordering::Relaxed);
+                ctx.request_repaint();
+                true
+            });
+            let _ = tx.send(r);
+        });
+        self.stabilizing = Some(Stabilizing {
+            rx,
+            clip: clip.id,
+            progress,
+        });
+        self.st.say("Analisando a tremida do vídeo…");
+    }
+
+    fn poll_stabilization(&mut self, ctx: &egui::Context) {
+        let Some(s) = &self.stabilizing else { return };
+        match s.rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(200))
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.stabilizing = None;
+                self.st.warn("A estabilização foi interrompida");
+            }
+            Ok(result) => {
+                let clip = s.clip;
+                self.stabilizing = None;
+                match result {
+                    Ok(r) => self.st.apply_stabilization(clip, &r),
+                    Err(e) => self.st.warn(format!("Não deu para estabilizar: {e}")),
+                }
+            }
         }
     }
 
@@ -406,6 +481,8 @@ impl Workspace {
             silence_threshold: -40.0,
             silence_min: 0.5,
             duck_threshold: -35.0,
+            stabilizing: None,
+            stabilize_secs: 0.6,
             transcription: None,
             presets: Vec::new(),
             preset_pick: 0,
@@ -467,6 +544,7 @@ impl Workspace {
         }
         self.tick();
         self.poll_transcription(ctx);
+        self.poll_stabilization(ctx);
         self.poll_file_dialog();
         self.poll_proxy_jobs();
         self.handle_keys(ctx);
@@ -1428,4 +1506,12 @@ pub struct Transcription {
     pub rx: std::sync::mpsc::Receiver<Result<String, String>>,
     /// Onde o clipe começa na timeline (as legendas entram a partir daí).
     pub start: pawcut_core::Frame,
+}
+
+/// Uma estabilização em andamento.
+pub struct Stabilizing {
+    pub rx: std::sync::mpsc::Receiver<Result<crate::stabilize::Stabilization, String>>,
+    pub clip: pawcut_core::ClipId,
+    /// 0..1000.
+    pub progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }

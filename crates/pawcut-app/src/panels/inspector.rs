@@ -679,6 +679,53 @@ impl Workspace {
         }
     }
 
+    /// Estabilizar a imagem tremida (câmera na mão).
+    fn stabilize_section(&mut self, ui: &mut egui::Ui) {
+        section(ui, "Estabilizar", |ui| {
+            let running = self
+                .stabilizing
+                .as_ref()
+                .map(|s| s.progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0);
+            row(
+                ui,
+                "Suavidade",
+                |ui| {
+                    ui.add_enabled(
+                        running.is_none(),
+                        DragValue::new(&mut self.stabilize_secs)
+                            .range(0.1..=3.0)
+                            .speed(0.02)
+                            .max_decimals(1)
+                            .suffix(" s"),
+                    )
+                    .on_hover_text("Quanto da tremida entra no cálculo: maior = câmera mais firme, mas segue menos os movimentos de verdade");
+                },
+                |_| {},
+            );
+            row(
+                ui,
+                "",
+                |ui| {
+                    match running {
+                    Some(f) => {
+                        ui.add(egui::ProgressBar::new(f).desired_width(ui.available_width()));
+                    }
+                    None => {
+                        if ui
+                            .button("Estabilizar")
+                            .on_hover_text("Mede a tremida e põe keyframes de posição com um pouco de zoom para esconder as bordas")
+                            .clicked()
+                        {
+                            self.start_stabilization();
+                        }
+                    }
+                }
+                },
+                |_| {},
+            );
+        });
+    }
+
     /// Chroma key (fundo verde/azul): liga, escolhe a cor e ajusta.
     fn chroma_section(&mut self, ui: &mut egui::Ui, clips: &[Clip], first: &Clip) {
         section(ui, "Chroma key", |ui| {
@@ -1158,6 +1205,7 @@ impl Workspace {
                     });
                     if matches!(first.source, ClipSource::Media(_)) {
                         self.chroma_section(ui, &clips, &first);
+                        self.stabilize_section(ui);
                     }
                 }
                 if tab == InspectorTab::Time {
