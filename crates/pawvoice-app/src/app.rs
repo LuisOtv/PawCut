@@ -257,13 +257,16 @@ struct SpecCache {
     cols: usize,
 }
 
+/// Fábrica de efeitos: cada chamada devolve uma cópia nova pronta para aplicar.
+type EffectMaker = std::sync::Arc<dyn Fn() -> crate::fx_dialogs::Job + Send + Sync>;
+
 /// O último efeito aplicado, para "Repetir último efeito" (Ctrl+R).
 #[derive(Clone)]
 struct LastEffect {
     label: &'static str,
     resize: bool,
     /// Faz uma cópia nova do efeito a cada uso.
-    make: std::sync::Arc<dyn Fn() -> Box<dyn FnMut(&mut [Vec<f32>]) + Send> + Send + Sync>,
+    make: EffectMaker,
 }
 
 /// Efeito que está sendo calculado fora da thread da interface.
