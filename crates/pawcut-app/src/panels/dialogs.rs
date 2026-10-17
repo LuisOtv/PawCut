@@ -35,15 +35,18 @@ pub enum Format {
     Mp4,
     Mov,
     Mkv,
+    /// GIF animado (15 quadros por segundo, até 480 px de largura): feito por cima de um vídeo temporário.
+    Gif,
     Mp3,
     Wav,
 }
 
 impl Format {
-    pub const ALL: [Format; 5] = [
+    pub const ALL: [Format; 6] = [
         Format::Mp4,
         Format::Mov,
         Format::Mkv,
+        Format::Gif,
         Format::Mp3,
         Format::Wav,
     ];
@@ -53,6 +56,7 @@ impl Format {
             Format::Mp4 => "mp4",
             Format::Mov => "mov",
             Format::Mkv => "mkv",
+            Format::Gif => "gif",
             Format::Mp3 => "mp3",
             Format::Wav => "wav",
         }
@@ -63,6 +67,7 @@ impl Format {
             Format::Mp4 => "MP4",
             Format::Mov => "QuickTime (MOV)",
             Format::Mkv => "Matroska (MKV)",
+            Format::Gif => "GIF animado",
             Format::Mp3 => "MP3 (só áudio)",
             Format::Wav => "WAV (só áudio)",
         }
@@ -79,6 +84,7 @@ impl Format {
     fn codecs(self) -> &'static [VideoCodec] {
         match self {
             Format::Mp4 => &[VideoCodec::H264, VideoCodec::H265],
+            Format::Gif => &[VideoCodec::H264],
             Format::Mov | Format::Mkv => &[VideoCodec::H264, VideoCodec::H265, VideoCodec::ProRes],
             Format::Mp3 | Format::Wav => &[],
         }
@@ -207,7 +213,7 @@ impl DeliverOptions {
                 .use_bitrate
                 .then_some((self.bitrate_mbps * 1000.0).round() as u32),
             speed: self.speed,
-            audio_kbps: self.audio.then_some(self.audio_kbps),
+            audio_kbps: (self.audio && self.format != Format::Gif).then_some(self.audio_kbps),
             blur_bars: self.blur_bars,
         }
     }

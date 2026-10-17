@@ -624,11 +624,30 @@ impl ExportJob {
                     s.sample_rate,
                     default_cache_dir(),
                 ));
-                let out = export(&project, &mut renderer, &settings, &c, |p| {
+                let gif = settings
+                    .output
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("gif"));
+                // GIF: exporta um vídeo temporário sem áudio e converte (paleta própria, melhor cor).
+                let mut real = settings.clone();
+                if gif {
+                    real.output = settings.output.with_extension("gif.tmp.mp4");
+                    real.audio_kbps = None;
+                }
+                let out = export(&project, &mut renderer, &real, &c, |p| {
                     m.store(p.stage == Stage::Audio, Ordering::Relaxed);
                     d.store(p.done, Ordering::Relaxed);
                     if p.done % 15 == 0 {
                         repaint();
+                    }
+                })
+                .and_then(|()| {
+                    if gif {
+                        let r = to_gif(&real.output, &settings.output);
+                        let _ = std::fs::remove_file(&real.output);
+                        r
+                    } else {
+                        Ok(())
                     }
                 });
                 let msg = match out {
@@ -653,6 +672,36 @@ impl ExportJob {
 
     pub fn finished(&self) -> Option<Result<(), String>> {
         self.result.lock().ok()?.clone()
+    }
+}
+
+/// Converte um vídeo em GIF com o `ffmpeg`: 15 quadros por segundo, até 480 px de largura e uma
+/// paleta calculada para o próprio vídeo.
+fn to_gif(video: &Path, gif: &Path) -> Result<(), ExportError> {
+    let filter = "fps=15,scale='min(480,iw)':-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5";
+    let out = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-i"])
+        .arg(video)
+        .args(["-vf", filter, "-loop", "0"])
+        .arg(gif)
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ExportError::FfmpegMissing
+            } else {
+                ExportError::Io(e)
+            }
+        })?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(ExportError::Ffmpeg {
+            log: String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .last()
+                .unwrap_or("sem mensagem")
+                .to_string(),
+        })
     }
 }
 
@@ -757,6 +806,51 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Exportar para `.gif` gera um GIF de verdade (e não deixa o vídeo temporário para trás).
+    #[test]
+    fn exporting_to_gif_makes_a_gif_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = crate::state::AppState::new(Project::new(ProjectSettings {
+            width: 320,
+            height: 180,
+            ..ProjectSettings::default()
+        }));
+        st.drop_generator(crate::state::Generator::SolidColor, 0, 0);
+        let project = st.project().clone();
+        let out = dir.path().join("saida.gif");
+        let settings = pawcut_export::ExportSettings {
+            output: out.clone(),
+            crf: 28,
+            range: Some((0, 20)),
+            size: None,
+            codec: pawcut_export::VideoCodec::H264,
+            audio_only: None,
+            fps: None,
+            bitrate_kbps: None,
+            speed: pawcut_export::EncoderSpeed::Ultrafast,
+            audio_kbps: Some(128),
+            blur_bars: false,
+        };
+        let job = ExportJob::start(project, settings, || {});
+        let start = std::time::Instant::now();
+        let result = loop {
+            if let Some(r) = job.finished() {
+                break r;
+            }
+            assert!(start.elapsed() < Duration::from_secs(60), "não terminou");
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert!(result.is_ok(), "{result:?}");
+        let bytes = std::fs::read(&out).unwrap();
+        assert!(bytes.starts_with(b"GIF89a"), "não é um GIF");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(leftovers, ["saida.gif"], "sem arquivos temporários");
     }
 
     #[test]
