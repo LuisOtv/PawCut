@@ -201,6 +201,7 @@ e libclang. Se faltar o `libclang-dev`, o `.cargo/config.toml` aponta o bindgen 
 - **Projeto:** salva em `.pawcut` (JSON). Há autosave a cada 5 minutos e recuperação se o app fechar sem salvar.
 - **Layout:** os painéis são abas que podem ser arrastadas, divididas e fechadas.
   O menu *Workspace* reabre painéis e tem *Reset UI Layout*.
+- **Notas:** o painel *Notas* (menu Workspace) guarda anotações livres do projeto, salvas no arquivo e desfazíveis.
 - **Atalhos editáveis:** *Editar → Preferences*. Os padrões são os do Resolve.
 
 ## Atalhos padrão

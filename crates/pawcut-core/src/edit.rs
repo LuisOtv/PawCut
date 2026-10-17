@@ -143,6 +143,8 @@ pub enum Edit {
         frame: Frame,
         marker: Option<Marker>,
     },
+    /// Troca as anotações do projeto.
+    SetNotes(String),
     /// Muda a resolução do projeto (o FPS fica fixo).
     SetResolution {
         width: u32,
@@ -349,6 +351,13 @@ pub(crate) fn apply(p: &mut Project, edit: Edit) -> Result<Outcome, EditError> {
                 p.markers.push(m);
                 p.markers.sort_by_key(|m| m.frame);
             }
+            Ok(Outcome::default())
+        }
+        Edit::SetNotes(text) => {
+            if p.notes == text {
+                return Err(EditError::NoChange);
+            }
+            p.notes = text;
             Ok(Outcome::default())
         }
         Edit::SetResolution { width, height } => {
@@ -1365,6 +1374,7 @@ impl Edit {
             Edit::Link { .. } => "Ligar clipes",
             Edit::Unlink { .. } => "Separar áudio e vídeo",
             Edit::SetMarker { .. } => "Marcador",
+            Edit::SetNotes(_) => "Notas do projeto",
             Edit::SetResolution { .. } => "Resolução do projeto",
             Edit::SetDissolve { .. } => "Dissolve",
             Edit::RippleTrimToPlayhead { .. } => "Cortar até o cursor",

@@ -623,6 +623,9 @@ pub struct Project {
     pub audio_tracks: Vec<Track>,
     #[serde(default)]
     pub markers: Vec<Marker>,
+    /// Anotações livres do projeto (roteiro, pendências, créditos).
+    #[serde(default)]
+    pub notes: String,
     pub(crate) ids: IdGen,
 }
 
@@ -636,6 +639,7 @@ impl Project {
             video_tracks: Vec::new(),
             audio_tracks: Vec::new(),
             markers: Vec::new(),
+            notes: String::new(),
             ids: IdGen::default(),
         };
         p.add_track(TrackKind::Video);

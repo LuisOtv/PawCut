@@ -57,6 +57,7 @@ impl TabViewer for Workspace {
             Panel::TimelineViewer => self.timeline_viewer_ui(ui),
             Panel::Inspector => self.inspector_ui(ui),
             Panel::Timeline => self.timeline_ui(ui),
+            Panel::Notes => self.notes_ui(ui),
         }
     }
 }
