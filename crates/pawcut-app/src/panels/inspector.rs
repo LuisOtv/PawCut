@@ -1182,6 +1182,49 @@ impl Workspace {
                             |_| {},
                         );
                     });
+                    section(ui, "Música abaixa na voz", |ui| {
+                        row(
+                            ui,
+                            "Voz acima de",
+                            |ui| {
+                                ui.add(
+                                    DragValue::new(&mut self.duck_threshold)
+                                        .range(-60.0..=-10.0)
+                                        .suffix(" dB"),
+                                );
+                            },
+                            |_| {},
+                        );
+                        row(
+                            ui,
+                            "Música abaixa",
+                            |ui| {
+                                ui.add(
+                                    DragValue::new(&mut self.duck_db)
+                                        .range(3.0..=40.0)
+                                        .suffix(" dB"),
+                                );
+                            },
+                            |_| {},
+                        );
+                        row(
+                            ui,
+                            "",
+                            |ui| {
+                                if ui
+                                    .button("Abaixar a música")
+                                    .on_hover_text(
+                                        "Este clipe (a música) abaixa quando os outros clipes de áudio (a voz) falam. Vira keyframes de volume que você pode ajustar.",
+                                    )
+                                    .clicked()
+                                {
+                                    let (t, d) = (self.duck_threshold, self.duck_db);
+                                    self.st.auto_duck(t, d);
+                                }
+                            },
+                            |_| {},
+                        );
+                    });
                 }
                 if first.link.is_some() {
                     ui.add_space(4.0);

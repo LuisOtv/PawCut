@@ -522,7 +522,11 @@ pub fn align_lag(reference: &[f32], other: &[f32], max_lag: usize) -> Option<(i6
     // índice k >= 0: lag k; índice n-k: lag -k
     let max_lag = max_lag.min(n / 2 - 1);
     let at = |lag: i64| -> f32 {
-        let i = if lag >= 0 { lag as usize } else { n - (-lag) as usize };
+        let i = if lag >= 0 {
+            lag as usize
+        } else {
+            n - (-lag) as usize
+        };
         r[i].re / n as f32
     };
     let mut best = (0i64, f32::MIN);

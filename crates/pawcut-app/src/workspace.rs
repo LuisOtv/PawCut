@@ -153,6 +153,8 @@ pub struct Workspace {
     /// Parâmetros de "Remover silêncios".
     pub silence_threshold: f32,
     pub silence_min: f64,
+    pub duck_threshold: f32,
+    pub duck_db: f32,
     /// Marcador aberto para edição (duplo clique na régua).
     pub editing_marker: Option<Frame>,
     /// Mídia sob o mouse no Media Pool e a posição (0..1) na miniatura: o viewer mostra ela.
@@ -247,6 +249,8 @@ impl Workspace {
             pool_highlight: None,
             silence_threshold: -40.0,
             silence_min: 0.5,
+            duck_threshold: -35.0,
+            duck_db: 12.0,
             hover_preview: None,
             hover_preview_next: None,
             source_panel_visible: false,

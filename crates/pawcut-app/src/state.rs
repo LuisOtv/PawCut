@@ -756,6 +756,105 @@ impl AppState {
         }
     }
 
+    /// Auto-duck: nos clipes de áudio selecionados (a música) o volume cai `duck_db` enquanto os
+    /// outros clipes de áudio (a voz) passam de `threshold_db`. Vira keyframes de volume.
+    pub fn auto_duck(&mut self, threshold_db: f32, duck_db: f32) {
+        let p = self.project().clone();
+        let fps = p.settings.fps;
+        let is_audio = |id: ClipId| {
+            p.locate(id)
+                .and_then(|(t, _)| p.track(t))
+                .is_some_and(|t| t.kind == TrackKind::Audio)
+        };
+        let music: Vec<ClipId> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|id| is_audio(*id))
+            .collect();
+        if music.is_empty() {
+            self.warn("Selecione os clipes de áudio da música (a voz fica nas outras faixas)");
+            return;
+        }
+        let voices: Vec<&Clip> = p
+            .audio_tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .filter(|c| {
+                c.enabled && !music.contains(&c.id) && matches!(c.source, ClipSource::Media(_))
+            })
+            .collect();
+        if voices.is_empty() {
+            self.warn("Não há outro áudio na timeline para a música abaixar");
+            return;
+        }
+        let attack = fps.seconds_to_frames(0.15).max(1);
+        let release = fps.seconds_to_frames(0.6).max(1);
+        let min_gap = fps.seconds_to_frames(0.5).max(1) as usize;
+        let min_len = fps.seconds_to_frames(0.2).max(1) as usize;
+        let mut ducked = 0;
+        for id in &music {
+            let Some(clip) = p.clip(*id) else { continue };
+            let levels = crate::analysis::levels_per_frame(&p, &voices, clip.start, clip.end());
+            let ranges = crate::analysis::active_ranges(&levels, threshold_db, min_gap, min_len);
+            if ranges.is_empty() {
+                continue;
+            }
+            self.apply_coalescing(
+                Edit::ClearKeyframes {
+                    clip: *id,
+                    param: Param::VolumeDb,
+                },
+                "duck",
+            );
+            let base = clip.volume_db;
+            let low = (base - duck_db.abs()).max(-96.0);
+            // tempo da fonte (frames do projeto a 1x) de um frame da timeline
+            let src = |f: Frame| clip.source_start + (f - clip.start) as f64 * clip.speed;
+            let kf = |at: Frame, value: f32| {
+                let at = at.clamp(clip.start, clip.end() - 1);
+                (src(at), value)
+            };
+            let mut points: Vec<(f64, f32)> = vec![kf(clip.start, base)];
+            for (a, b) in ranges {
+                let (a, b) = (clip.start + a as Frame, clip.start + b as Frame);
+                points.push(kf(a - attack, base));
+                points.push(kf(a, low));
+                points.push(kf(b, low));
+                points.push(kf(b + release, base));
+            }
+            points.push(kf(clip.end() - 1, base));
+            // pontos repetidos (clamp nas pontas) ficam só com o último
+            points.dedup_by(|b, a| {
+                (a.0 - b.0).abs() < 1e-9 && {
+                    a.1 = b.1;
+                    true
+                }
+            });
+            for (at, value) in points {
+                self.apply_coalescing(
+                    Edit::SetKeyframe {
+                        clip: *id,
+                        param: Param::VolumeDb,
+                        at,
+                        value: Some(value),
+                    },
+                    "duck",
+                );
+            }
+            ducked += 1;
+        }
+        self.editor.end_coalescing();
+        if ducked == 0 {
+            self.say("Ninguém falou acima do limiar: nada para abaixar");
+        } else {
+            self.say(format!(
+                "Música abaixa {:.0} dB quando há voz ({ducked} clipe(s))",
+                duck_db.abs()
+            ));
+        }
+    }
+
     /// Alinha os clipes selecionados pelo som: o primeiro selecionado é a referência (a câmera)
     /// e os outros (o microfone) andam até o som casar. O vídeo ligado vai junto.
     pub fn align_selection_by_audio(&mut self) {
@@ -764,7 +863,10 @@ impl AppState {
             .selection
             .iter()
             .copied()
-            .filter(|id| p.clip(*id).is_some_and(|c| matches!(c.source, ClipSource::Media(_))))
+            .filter(|id| {
+                p.clip(*id)
+                    .is_some_and(|c| matches!(c.source, ClipSource::Media(_)))
+            })
             .collect();
         let [first, rest @ ..] = ids.as_slice() else {
             self.warn("Selecione pelo menos dois clipes com áudio (o primeiro é a referência)");
@@ -1588,6 +1690,40 @@ mod tests {
     }
 
     #[test]
+    fn auto_duck_lowers_the_music_only_while_the_voice_speaks() {
+        let dir = tempfile::tempdir().unwrap();
+        let voice = paw_testkit::speech_with_pause(dir.path()); // fala 0–1 s, pausa 1–2 s, fala 2–3 s
+        let music = paw_testkit::dc_audio(dir.path(), "musica.wav", 0.3, 4.0);
+        let mut s = state();
+        assert_eq!(s.import(&[voice, music]), 2);
+        let (mv, mm) = (s.project().media[0].id, s.project().media[1].id);
+        s.drop_media(mv, TrackKind::Audio, 0, 0);
+        s.drop_media(mm, TrackKind::Audio, 1, 0);
+        let music_clip = s.project().audio_tracks[1].clips[0].id;
+        s.selection = vec![music_clip];
+        s.auto_duck(-40.0, 12.0);
+        let c = s.project().clip(music_clip).unwrap().clone();
+        let at = |frame: Frame| c.param(Param::VolumeDb, frame);
+        assert!((at(15) - -12.0).abs() < 0.5, "com voz: {}", at(15));
+        assert!(at(54).abs() < 0.5, "na pausa a música volta: {}", at(54));
+        assert!((at(75) - -12.0).abs() < 0.5, "voz de novo: {}", at(75));
+        assert!(at(110).abs() < 0.5, "depois da voz: {}", at(110));
+        // um desfazer tira todos os keyframes
+        s.undo();
+        assert!(
+            s.project()
+                .clip(music_clip)
+                .unwrap()
+                .keyframes
+                .get(&Param::VolumeDb)
+                .is_none_or(|k| k.is_empty())
+        );
+        // sem seleção avisa
+        s.selection.clear();
+        s.auto_duck(-40.0, 12.0);
+    }
+
+    #[test]
     fn align_by_audio_moves_the_second_clip_to_match_the_sound() {
         let dir = tempfile::tempdir().unwrap();
         // a mesma gravação; a segunda começa 0,5 s depois no som
@@ -1598,7 +1734,11 @@ mod tests {
         let (m_cam, m_mic) = (s.project().media[0].id, s.project().media[1].id);
         s.drop_media(m_cam, TrackKind::Audio, 0, 0);
         s.drop_media(m_mic, TrackKind::Audio, 1, 300); // mic solto 10 s adiante, em outra faixa
-        let ids: Vec<_> = s.project().all_tracks().flat_map(|t| t.clips.iter().map(|c| c.id)).collect();
+        let ids: Vec<_> = s
+            .project()
+            .all_tracks()
+            .flat_map(|t| t.clips.iter().map(|c| c.id))
+            .collect();
         assert_eq!(ids.len(), 2);
         let (cam_clip, mic_clip) = (
             s.project().audio_tracks[0].clips[0].id,

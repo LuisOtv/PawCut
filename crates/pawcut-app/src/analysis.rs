@@ -57,6 +57,75 @@ pub fn align_by_audio(project: &Project, reference: &Clip, other: &Clip) -> Opti
     Some((delta_start - other.start, conf))
 }
 
+/// Nível (dBFS, pico) de cada frame da timeline em `[from, to)` somando o que os clipes
+/// `others` tocam nesse frame (quem não cobre o frame conta como silêncio, −120 dB).
+pub fn levels_per_frame(project: &Project, others: &[&Clip], from: Frame, to: Frame) -> Vec<f32> {
+    let s = &project.settings;
+    let loaded: Vec<(&Clip, Pcm, i64)> = others
+        .iter()
+        .filter_map(|c| clip_pcm(project, c).map(|(pcm, a, _)| (*c, pcm, a)))
+        .collect();
+    (from..to)
+        .map(|f| {
+            let mut peak = 0.0f32;
+            for (c, pcm, src0) in &loaded {
+                if f < c.start || f >= c.end() {
+                    continue;
+                }
+                let a = src0 + s.fps.frame_to_sample(f - c.start, s.sample_rate);
+                let b = src0 + s.fps.frame_to_sample(f - c.start + 1, s.sample_rate);
+                // olha ~64 amostras espalhadas pelo frame (suficiente para o pico da fala)
+                let step = ((b - a) / 64).max(1);
+                let mut i = a;
+                while i < b {
+                    let [l, r] = pcm.frame(i);
+                    peak = peak.max(l.abs()).max(r.abs());
+                    i += step;
+                }
+            }
+            if peak > 1e-6 {
+                20.0 * peak.log10()
+            } else {
+                -120.0
+            }
+        })
+        .collect()
+}
+
+/// Trechos (índices de `levels`) acima de `threshold_db`. Buracos menores que `min_gap` se
+/// fecham (a música não fica pulsando entre palavras) e trechos menores que `min_len` somem.
+pub fn active_ranges(
+    levels: &[f32],
+    threshold_db: f32,
+    min_gap: usize,
+    min_len: usize,
+) -> Vec<(usize, usize)> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut start = None;
+    for (i, l) in levels.iter().enumerate() {
+        match (*l >= threshold_db, start) {
+            (true, None) => start = Some(i),
+            (false, Some(a)) => {
+                runs.push((a, i));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(a) = start {
+        runs.push((a, levels.len()));
+    }
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for r in runs {
+        match merged.last_mut() {
+            Some(last) if r.0 - last.1 <= min_gap => last.1 = r.1,
+            _ => merged.push(r),
+        }
+    }
+    merged.retain(|(a, b)| b - a >= min_len);
+    merged
+}
+
 /// Pico absoluto do trecho do clipe (0..1).
 pub fn clip_peak(project: &Project, clip: &Clip) -> Option<f32> {
     let (pcm, a, b) = clip_pcm(project, clip)?;
@@ -99,4 +168,29 @@ pub fn clip_silences(
         .map(|(x, y)| (to_frame(x), to_frame(y)))
         .filter(|(x, y)| x < y)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_ranges_merge_small_gaps_and_drop_short_blips() {
+        let mut l = vec![-80.0f32; 100];
+        l[10..20].fill(-20.0);
+        l[23..30].fill(-20.0); // buraco de 3 frames: junta com o de cima
+        l[60] = -20.0; // estalo de 1 frame: some
+        l[80..95].fill(-20.0);
+        assert_eq!(active_ranges(&l, -40.0, 5, 3), vec![(10, 30), (80, 95)]);
+        assert_eq!(
+            active_ranges(&l, -40.0, 0, 3),
+            vec![(10, 20), (23, 30), (80, 95)]
+        );
+        assert!(active_ranges(&[], -40.0, 5, 3).is_empty());
+        // acabando em fala
+        assert_eq!(
+            active_ranges(&[-80.0, -10.0, -10.0], -40.0, 1, 1),
+            vec![(1, 3)]
+        );
+    }
 }
