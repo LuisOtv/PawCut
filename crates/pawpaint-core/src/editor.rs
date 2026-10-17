@@ -104,6 +104,7 @@ pub struct Editor {
     stroke: Option<ActiveStroke>,
     smudge: Option<ActiveSmudge>,
     mirror: (bool, bool),
+    wrap: bool,
     paint_mask: bool,
     pixel_rev: u64,
     history_budget: usize,
@@ -155,6 +156,7 @@ impl Editor {
             stroke: None,
             smudge: None,
             mirror: (false, false),
+            wrap: false,
             paint_mask: false,
             pixel_rev: 0,
             history_budget: HISTORY_BUDGET,
@@ -183,6 +185,15 @@ impl Editor {
     /// Sobe quando os pixels mudam (inclusive ao fim de um traço), para miniaturas.
     pub fn pixel_rev(&self) -> u64 {
         self.revision + self.pixel_rev
+    }
+
+    /// Modo de repetição (mosaico): o traço que passa de uma borda reaparece na oposta.
+    pub fn set_wrap(&mut self, on: bool) {
+        self.wrap = on;
+    }
+
+    pub fn wrap(&self) -> bool {
+        self.wrap
     }
 
     pub fn set_mirror(&mut self, horizontal_axis: bool, vertical_axis: bool) {
@@ -674,6 +685,7 @@ impl Editor {
         let opacity = brush.opacity;
         stroker.begin(brush, color, erase);
         stroker.mirror = self.mirror;
+        stroker.wrap = self.wrap;
         let on_mask = self.paint_mask && self.doc.layer(layer).is_some_and(|l| l.mask.is_some());
         self.stroke = Some(ActiveStroke {
             on_mask,

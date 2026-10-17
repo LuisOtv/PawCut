@@ -458,6 +458,8 @@ pub struct State {
     pub blend: BlendMode,
     /// Pintura com espelho: (eixo vertical no meio, eixo horizontal no meio).
     pub mirror: (bool, bool),
+    /// Modo de repetição (mosaico), como o Shift+W do Krita.
+    pub wrap: bool,
     pub opts: ToolOpts,
     pub clipboard: Option<Clip>,
     pub toasts: Toasts,

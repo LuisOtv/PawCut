@@ -193,6 +193,7 @@ pub fn run_radial(st: &mut State, id: &str) {
         "export" => ask(st, Purpose::Export),
         "mirror_h" => st.mirror.0 = !st.mirror.0,
         "mirror_v" => st.mirror.1 = !st.mirror.1,
+        "wrap" => st.wrap = !st.wrap,
         _ if st.docs.is_empty() => {}
         "undo" => {
             if let Some(d) = st.doc_mut() {
@@ -513,6 +514,7 @@ impl PaintApp {
                 hsv: (0.0, 0.0, 0.0),
                 blend: BlendMode::Normal,
                 mirror: (false, false),
+                wrap: false,
                 opts: ToolOpts::default(),
                 clipboard: None,
                 toasts: Toasts::default(),
@@ -1289,6 +1291,16 @@ impl PaintApp {
                     ui.close();
                     flip_view(st);
                 }
+                ui.separator();
+                let label = if st.wrap {
+                    "Desligar o modo de repetição (mosaico)"
+                } else {
+                    "Modo de repetição (mosaico) para texturas"
+                };
+                if item(ui, label, "Shift+W", has_doc) {
+                    ui.close();
+                    st.wrap = !st.wrap;
+                }
                 ui.label(
                     RichText::new("Shift + Espaço + arrastar também gira")
                         .weak()
@@ -1732,6 +1744,9 @@ impl PaintApp {
         }
         if hit(Modifiers::NONE, Key::M) {
             flip_view(st);
+        }
+        if hit(Modifiers::SHIFT, Key::W) {
+            st.wrap = !st.wrap;
         }
         if hit(Modifiers::NONE, Key::Plus) || hit(Modifiers::NONE, Key::Equals) {
             zoom_by(st, 1.25);
@@ -2670,8 +2685,14 @@ mod tests {
         };
         let to_screen = |h: &Harness, x: f32, y: f32| {
             let d = h.app.st.doc().unwrap();
-            canvas::ViewXf::new(d.view_center, d.zoom, d.view_rot, d.view_flip, (300.0, 200.0))
-                .project(x, y)
+            canvas::ViewXf::new(
+                d.view_center,
+                d.zoom,
+                d.view_rot,
+                d.view_flip,
+                (300.0, 200.0),
+            )
+            .project(x, y)
         };
         // Girada 90°: um traço na janela, da esquerda para a direita, vira vertical na imagem
         // (a imagem aparece deitada).
@@ -2683,13 +2704,29 @@ mod tests {
             .filter(|(x, y)| h.px(*x, *y)[1] < 100)
             .collect();
         assert!(drawn.len() > 300, "pintou: {}", drawn.len());
-        let (min_x, max_x) = drawn.iter().fold((999, 0), |(a, b), (x, _)| (a.min(*x), b.max(*x)));
-        let (min_y, max_y) = drawn.iter().fold((999, 0), |(a, b), (_, y)| (a.min(*y), b.max(*y)));
-        assert!(max_x - min_x < 12, "estreito na horizontal: {min_x}..{max_x}");
-        assert!(max_y - min_y > 100, "comprido na vertical: {min_y}..{max_y}");
+        let (min_x, max_x) = drawn
+            .iter()
+            .fold((999, 0), |(a, b), (x, _)| (a.min(*x), b.max(*x)));
+        let (min_y, max_y) = drawn
+            .iter()
+            .fold((999, 0), |(a, b), (_, y)| (a.min(*y), b.max(*y)));
+        assert!(
+            max_x - min_x < 12,
+            "estreito na horizontal: {min_x}..{max_x}"
+        );
+        assert!(
+            max_y - min_y > 100,
+            "comprido na vertical: {min_y}..{max_y}"
+        );
         // o ponto de tela do centro da imagem cai no centro dela
         let d = h.app.st.doc().unwrap();
-        let back = canvas::ViewXf::new(d.view_center, d.zoom, d.view_rot, d.view_flip, (300.0, 200.0));
+        let back = canvas::ViewXf::new(
+            d.view_center,
+            d.zoom,
+            d.view_rot,
+            d.view_flip,
+            (300.0, 200.0),
+        );
         let p = back.unproject(to_screen(&h, 77.0, 33.0));
         assert!((p.x - 77.0).abs() < 1e-3 && (p.y - 33.0).abs() < 1e-3);
 
@@ -2701,6 +2738,33 @@ mod tests {
         assert!(h.px(150 + 100, 100)[1] > 200, "e não à direita");
         // visão girada não muda a imagem: salvar e desfazer seguem normais
         assert!(h.app.st.doc().unwrap().ed.is_dirty());
+    }
+
+    #[test]
+    fn wrap_mode_toggles_with_shift_w_and_paints_across_the_edge() {
+        let mut h = Harness::new();
+        h.app.st.brush = Brush {
+            size: 30.0,
+            hardness: 1.0,
+            ..Brush::basic()
+        };
+        h.app.st.fg = [0, 0, 255];
+        h.app.st.tool = Tool::Brush;
+        assert!(!h.app.st.wrap);
+        h.frame(vec![Event::Key {
+            key: Key::W,
+            physical_key: Some(Key::W),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::SHIFT,
+        }]);
+        assert!(h.app.st.wrap, "Shift+W liga o mosaico");
+        assert_eq!(h.app.st.tool, Tool::Brush, "e não troca para a varinha");
+        let at = h.screen(295.0, 100.0);
+        paint_screen(&mut h, at, at + vec2(0.5, 0.0));
+        assert!(h.px(295, 100)[0] < 60, "pintou onde clicou");
+        assert!(h.px(3, 100)[0] < 60, "e do outro lado");
+        assert!(h.px(150, 100)[0] > 200, "meio intacto");
     }
 
     #[test]

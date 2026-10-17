@@ -353,11 +353,29 @@ pub fn canvas_panel(st: &mut State, ui: &mut egui::Ui) {
         Rect::from_min_max(pos2(0.0, 0.0), pos2(cw / 16.0, ch / 16.0)),
     ));
     if let Some(t) = &d.tex {
-        clip.add(quad(
-            t.id(),
-            corners,
-            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-        ));
+        let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        if st.wrap {
+            // Modo de repetição: as cópias em volta mostram a emenda.
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let (ox, oy) = (dx as f32 * cw, dy as f32 * ch);
+                    clip.add(quad(
+                        t.id(),
+                        [
+                            to_screen(ox, oy),
+                            to_screen(ox + cw, oy),
+                            to_screen(ox + cw, oy + ch),
+                            to_screen(ox, oy + ch),
+                        ],
+                        full,
+                    ));
+                }
+            }
+        }
+        clip.add(quad(t.id(), corners, full));
     }
     if let Some(fs) = &d.float {
         let (x0, y0, x1, y1) = fs.f.bounds;
@@ -824,6 +842,7 @@ fn start_interaction(
             };
             let (brush, color) = (st.brush.clone(), st.fg);
             st.docs[cur].ed.set_mirror(st.mirror.0, st.mirror.1);
+            st.docs[cur].ed.set_wrap(st.wrap);
             // Na máscara: cor escura esconde, cor clara revela (a borracha sempre revela).
             let on_mask = st.docs[cur].edit_mask
                 && st.docs[cur]

@@ -305,6 +305,8 @@ pub struct Stroker {
     pub erase: bool,
     /// Espelho: também carimba refletido na vertical (eixo no meio) e/ou na horizontal.
     pub mirror: (bool, bool),
+    /// Mosaico: carimbos que passam de uma borda reaparecem na outra.
+    pub wrap: bool,
     pub buf: StrokeBuffer,
     w: usize,
     h: usize,
@@ -336,6 +338,7 @@ impl Stroker {
             color: [0, 0, 0],
             erase: false,
             mirror: (false, false),
+            wrap: false,
             buf: StrokeBuffer::new(),
             w,
             h,
@@ -464,6 +467,21 @@ impl Stroker {
     }
 
     fn stamp(&mut self, cx: f32, cy: f32) {
+        let (w, h) = (self.w as f32, self.h as f32);
+        if self.wrap {
+            // O ponto volta para dentro da imagem e as cópias das bordas completam o carimbo.
+            let (cx, cy) = (cx.rem_euclid(w.max(1.0)), cy.rem_euclid(h.max(1.0)));
+            for dy in [-1.0f32, 0.0, 1.0] {
+                for dx in [-1.0f32, 0.0, 1.0] {
+                    self.stamp_mirrored(cx + dx * w, cy + dy * h);
+                }
+            }
+            return;
+        }
+        self.stamp_mirrored(cx, cy);
+    }
+
+    fn stamp_mirrored(&mut self, cx: f32, cy: f32) {
         let (w, h) = (self.w as f32, self.h as f32);
         self.stamp_one(cx, cy);
         if self.mirror.0 {
@@ -846,6 +864,36 @@ mod dynamics_tests {
             width(&plain),
             width(&follow)
         );
+    }
+
+    #[test]
+    fn wrap_carries_the_stroke_to_the_opposite_edge() {
+        let mut b = base();
+        b.size = 40.0;
+        let mut s = Stroker::new(400, 200);
+        s.begin(b.clone(), [0, 0, 0], false);
+        s.wrap = true;
+        // um toque perto da borda direita pinta também a esquerda
+        s.add_point(395.0, 100.0);
+        let alpha = |s: &Stroker, x: usize, y: usize| {
+            s.buf
+                .tile(x / TILE, y / TILE)
+                .map_or(0, |t| t[((y % TILE) * TILE + x % TILE) * 4 + 3])
+        };
+        assert!(alpha(&s, 5, 100) > 200, "esquerda");
+        assert!(alpha(&s, 395, 100) > 200, "direita");
+        assert_eq!(alpha(&s, 200, 100), 0);
+        // fora da imagem volta para dentro
+        let mut s = Stroker::new(400, 200);
+        s.begin(b.clone(), [0, 0, 0], false);
+        s.wrap = true;
+        s.add_point(430.0, 100.0);
+        assert!(alpha(&s, 30, 100) > 200, "430 vira 30");
+        // sem mosaico, nada reaparece
+        let mut s = Stroker::new(400, 200);
+        s.begin(b, [0, 0, 0], false);
+        s.add_point(395.0, 100.0);
+        assert_eq!(alpha(&s, 5, 100), 0);
     }
 
     #[test]
